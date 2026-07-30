@@ -234,6 +234,10 @@ configuration of fault-injection capabilities.
 	- ERRNO: retval must be -1 to -MAX_ERRNO (-4096).
 	- ERR_NULL: retval must be 0 or -1 to -MAX_ERRNO (-4096).
 
+	When CONFIG_SECURITY_HARDENING_SYMBOL_LOOKUP is enabled, readers
+	without kernel symbol disclosure authority see hidden markers instead
+	of function names.
+
 - /sys/kernel/debug/fail_function/<function-name>/retval:
 
 	specifies the "error" return value to inject to the given function.
@@ -241,6 +245,12 @@ configuration of fault-injection capabilities.
 	Note that this file only accepts unsigned values. So, if you want to
 	use a negative errno, you better use 'printf' instead of 'echo', e.g.:
 	$ printf %#x -12 > retval
+
+	When CONFIG_SECURITY_HARDENING_SYMBOL_LOOKUP is enabled, this
+	directory is named entry-N instead of the function name. Authorized
+	readers can map entry-N to the real symbol through the inject file;
+	readers without kernel symbol disclosure authority see only entry-N
+	and a hidden marker.
 
 - /sys/kernel/debug/fail_skb_realloc/devname:
 

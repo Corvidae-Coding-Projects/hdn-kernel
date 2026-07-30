@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/netdevice.h>
+#include <linux/hardening.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <net/wext.h>
@@ -308,8 +309,12 @@ static int ptype_seq_show(struct seq_file *seq, void *v)
 		else
 			seq_printf(seq, "%04x", ntohs(pt->type));
 
-		seq_printf(seq, " %-8s %ps\n",
-			   dev ? dev->name : "", pt->func);
+		if (hdn_kernel_symbol_disclose_allowed())
+			seq_printf(seq, " %-8s %ps\n",
+				   dev ? dev->name : "", pt->func);
+		else
+			seq_printf(seq, " %-8s [hidden]\n",
+				   dev ? dev->name : "");
 	}
 
 	return 0;

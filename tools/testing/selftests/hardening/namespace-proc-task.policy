@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Policy used by the QEMU smoke test to prove pidfd-backed namespace joins work
+# when both namespace administration and proc-task visibility are granted.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 namespace-proc-task-root
+
+allow 2 POLICY_ADMIN CRED_CHANGE TTY_ACCESS PTRACE NAMESPACE_ADMIN PROC_TASK_VIEW

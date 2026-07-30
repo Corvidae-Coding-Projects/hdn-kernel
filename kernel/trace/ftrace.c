@@ -17,7 +17,8 @@
 #include <linux/stop_machine.h>
 #include <linux/clocksource.h>
 #include <linux/sched/task.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
+#include <linux/hardening.h>
 #include <linux/security.h>
 #include <linux/seq_file.h>
 #include <linux/tracefs.h>
@@ -536,6 +537,7 @@ static int function_stat_show(struct seq_file *m, void *v)
 	struct trace_array *tr = trace_get_global_array();
 	struct ftrace_profile *rec = v;
 	const char *refsymbol = NULL;
+	bool disclose_symbols;
 	char str[KSYM_SYMBOL_LEN];
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
 	static struct trace_seq s;
@@ -555,28 +557,34 @@ static int function_stat_show(struct seq_file *m, void *v)
 		return 0;
 #endif
 
-	if (tr->trace_flags & TRACE_ITER(PROF_TEXT_OFFSET)) {
-		unsigned long offset;
+	disclose_symbols = hdn_kernel_symbol_disclose_allowed();
+	if (!disclose_symbols) {
+		strscpy(str, "[hidden]", sizeof(str));
+	} else {
+		if (tr->trace_flags & TRACE_ITER(PROF_TEXT_OFFSET)) {
+			unsigned long offset;
 
-		if (core_kernel_text(rec->ip)) {
-			refsymbol = "_text";
-			offset = rec->ip - (unsigned long)_text;
-		} else {
-			struct module *mod;
+			if (core_kernel_text(rec->ip)) {
+				refsymbol = "_text";
+				offset = rec->ip - (unsigned long)_text;
+			} else {
+				struct module *mod;
 
-			guard(rcu)();
-			mod = __module_text_address(rec->ip);
-			if (mod) {
-				refsymbol = mod->name;
-				/* Calculate offset from module's text entry address. */
-				offset = rec->ip - (unsigned long)mod->mem[MOD_TEXT].base;
+				guard(rcu)();
+				mod = __module_text_address(rec->ip);
+				if (mod) {
+					refsymbol = mod->name;
+					/* Calculate offset from module's text entry address. */
+					offset = rec->ip - (unsigned long)mod->mem[MOD_TEXT].base;
+				}
 			}
+			if (refsymbol)
+				snprintf(str, sizeof(str), "  %s+%#lx",
+					 refsymbol, offset);
 		}
-		if (refsymbol)
-			snprintf(str, sizeof(str), "  %s+%#lx", refsymbol, offset);
+		if (!refsymbol)
+			kallsyms_lookup(rec->ip, NULL, NULL, NULL, str);
 	}
-	if (!refsymbol)
-		kallsyms_lookup(rec->ip, NULL, NULL, NULL, str);
 
 	seq_printf(m, "  %-30.30s  %10lu", str, rec->counter);
 
@@ -4397,6 +4405,11 @@ static int print_rec(struct seq_file *m, unsigned long ip)
 	char *modname;
 	const char *ret;
 
+	if (!hdn_kernel_symbol_disclose_allowed()) {
+		seq_puts(m, "[hidden]");
+		return 0;
+	}
+
 	ret = kallsyms_lookup(ip, NULL, &offset, &modname, str);
 	/* Weak functions can cause invalid addresses */
 	if (!ret || offset > FTRACE_MCOUNT_MAX_OFFSET) {
@@ -4562,6 +4575,9 @@ ftrace_avail_open(struct inode *inode, struct file *file)
 	ret = security_locked_down(LOCKDOWN_TRACEFS);
 	if (ret)
 		return ret;
+	ret = hdn_authorize_kernel_symbol_lookup();
+	if (ret)
+		return ret;
 
 	if (unlikely(ftrace_disabled))
 		return -ENODEV;
@@ -4580,6 +4596,7 @@ static int
 ftrace_enabled_open(struct inode *inode, struct file *file)
 {
 	struct ftrace_iterator *iter;
+	int ret;
 
 	/*
 	 * This shows us what functions are currently being
@@ -4589,6 +4606,9 @@ ftrace_enabled_open(struct inode *inode, struct file *file)
 	 * want people to see, but if something is tracing
 	 * something, we probably want to know about it.
 	 */
+	ret = hdn_authorize_kernel_symbol_lookup();
+	if (ret)
+		return ret;
 
 	iter = __seq_open_private(file, &show_ftrace_seq_ops, sizeof(*iter));
 	if (!iter)
@@ -4605,6 +4625,7 @@ static int
 ftrace_touched_open(struct inode *inode, struct file *file)
 {
 	struct ftrace_iterator *iter;
+	int ret;
 
 	/*
 	 * This shows us what functions have ever been enabled
@@ -4614,6 +4635,9 @@ ftrace_touched_open(struct inode *inode, struct file *file)
 	 * want people to see, but if something had traced
 	 * something, we probably want to know about it.
 	 */
+	ret = hdn_authorize_kernel_symbol_lookup();
+	if (ret)
+		return ret;
 
 	iter = __seq_open_private(file, &show_ftrace_seq_ops, sizeof(*iter));
 	if (!iter)
@@ -4633,6 +4657,9 @@ ftrace_avail_addrs_open(struct inode *inode, struct file *file)
 	int ret;
 
 	ret = security_locked_down(LOCKDOWN_TRACEFS);
+	if (ret)
+		return ret;
+	ret = hdn_authorize_kernel_symbol_lookup();
 	if (ret)
 		return ret;
 
@@ -5779,6 +5806,9 @@ static int ftrace_process_regex(struct ftrace_iterator *iter,
 	func = strsep(&next, ":");
 
 	if (!next) {
+		ret = hdn_authorize_kernel_symbol_lookup();
+		if (ret)
+			return ret;
 		ret = ftrace_match_records(hash, func, len);
 		if (!ret)
 			ret = -EINVAL;
@@ -5790,6 +5820,9 @@ static int ftrace_process_regex(struct ftrace_iterator *iter,
 	/* command found */
 
 	command = strsep(&next, ":");
+	ret = hdn_authorize_kernel_symbol_lookup();
+	if (ret)
+		return ret;
 
 	guard(mutex)(&ftrace_cmd_mutex);
 
@@ -7169,6 +7202,9 @@ __ftrace_graph_open(struct inode *inode, struct file *file,
 	ret = security_locked_down(LOCKDOWN_TRACEFS);
 	if (ret)
 		return ret;
+	ret = hdn_authorize_kernel_symbol_lookup();
+	if (ret)
+		return ret;
 
 	if (file->f_mode & FMODE_WRITE) {
 		const int size_bits = FTRACE_HASH_DEFAULT_BITS;
@@ -7355,6 +7391,9 @@ ftrace_graph_set_hash(struct ftrace_hash *hash, char *buffer)
 	/* decode regex */
 	func_g.type = filter_parse_regex(buffer, strlen(buffer),
 					 &func_g.search, &not);
+	fail = hdn_authorize_kernel_symbol_lookup();
+	if (fail)
+		return fail;
 
 	func_g.len = strlen(func_g.search);
 

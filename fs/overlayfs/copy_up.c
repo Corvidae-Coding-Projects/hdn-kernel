@@ -9,6 +9,7 @@
 #include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/fileattr.h>
+#include <linux/hardening.h>
 #include <linux/splice.h>
 #include <linux/xattr.h>
 #include <linux/security.h>
@@ -289,6 +290,8 @@ static int ovl_copy_up_file(struct ovl_fs *ofs, struct dentry *dentry,
 	error = rw_verify_area(READ, old_file, &old_pos, len);
 	if (!error)
 		error = rw_verify_area(WRITE, new_file, &new_pos, len);
+	if (!error)
+		error = hdn_authorize_object_write_file(new_file, false);
 	if (error)
 		goto out_fput;
 

@@ -35,6 +35,7 @@
 #include <linux/fs.h>
 #include <linux/math64.h>
 #include <linux/ptrace.h>
+#include <linux/hardening.h>
 
 #include <linux/uaccess.h>
 #include <linux/compat.h>
@@ -91,9 +92,14 @@ SYSCALL_DEFINE1(stime, __kernel_old_time_t __user *, tptr)
 	err = security_settime64(&tv, NULL);
 	if (err)
 		return err;
+	err = hdn_authorize_time_change(HDN_TIME_SET_WALL);
+	if (err)
+		return err;
 
-	do_settimeofday64(&tv);
-	return 0;
+	err = do_settimeofday64(&tv);
+	if (!err)
+		hdn_record_time_change(HDN_TIME_SET_WALL);
+	return err;
 }
 
 #endif /* __ARCH_WANT_SYS_TIME */
@@ -129,9 +135,14 @@ SYSCALL_DEFINE1(stime32, old_time32_t __user *, tptr)
 	err = security_settime64(&tv, NULL);
 	if (err)
 		return err;
+	err = hdn_authorize_time_change(HDN_TIME_SET_WALL);
+	if (err)
+		return err;
 
-	do_settimeofday64(&tv);
-	return 0;
+	err = do_settimeofday64(&tv);
+	if (!err)
+		hdn_record_time_change(HDN_TIME_SET_WALL);
+	return err;
 }
 
 #endif /* __ARCH_WANT_SYS_TIME32 */
@@ -177,6 +188,12 @@ int do_sys_settimeofday64(const struct timespec64 *tv, const struct timezone *tz
 	error = security_settime64(tv, tz);
 	if (error)
 		return error;
+	if (tv)
+		error = hdn_authorize_time_change(HDN_TIME_SET_WALL);
+	else if (tz)
+		error = hdn_authorize_time_change(HDN_TIME_SET_TIMEZONE);
+	if (error)
+		return error;
 
 	if (tz) {
 		/* Verify we're within the +-15 hrs range */
@@ -191,8 +208,14 @@ int do_sys_settimeofday64(const struct timespec64 *tv, const struct timezone *tz
 				timekeeping_warp_clock();
 		}
 	}
-	if (tv)
-		return do_settimeofday64(tv);
+	if (tv) {
+		error = do_settimeofday64(tv);
+		if (!error)
+			hdn_record_time_change(HDN_TIME_SET_WALL);
+		return error;
+	}
+	if (tz)
+		hdn_record_time_change(HDN_TIME_SET_TIMEZONE);
 	return 0;
 }
 

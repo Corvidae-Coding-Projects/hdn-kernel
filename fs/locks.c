@@ -53,7 +53,9 @@
 #include <linux/fdtable.h>
 #include <linux/filelock.h>
 #include <linux/fs.h>
+#include <linux/hardening.h>
 #include <linux/init.h>
+#include <linux/resource.h>
 #include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
@@ -91,6 +93,12 @@ static int target_leasetype(struct file_lease *fl)
 	if (fl->c.flc_flags & FL_DOWNGRADE_PENDING)
 		return F_RDLCK;
 	return fl->c.flc_type;
+}
+
+static void hdn_record_file_lock_pressure(int error, int type)
+{
+	if (error && type != F_UNLCK)
+		hdn_record_resource_pressure(RLIMIT_LOCKS, 1);
 }
 
 static int leases_enable = 1;
@@ -2084,6 +2092,7 @@ static int do_fcntl_add_lease(unsigned int fd, struct file *filp, unsigned int f
 	new->fa_fd = fd;
 
 	error = vfs_setlease(filp, arg, &fl, (void **)&new);
+	hdn_record_file_lock_pressure(error, arg);
 	if (fl)
 		locks_free_lease(fl);
 	if (new)
@@ -2241,6 +2250,7 @@ SYSCALL_DEFINE2(flock, unsigned int, fd, unsigned int, cmd)
 	else
 		error = locks_lock_file_wait(fd_file(f), &fl);
 
+	hdn_record_file_lock_pressure(error, type);
 	locks_release_private(&fl);
 	return error;
 }
@@ -2527,6 +2537,7 @@ int fcntl_setlk(unsigned int fd, struct file *filp, unsigned int cmd,
 	}
 
 	error = do_lock_file_wait(filp, cmd, file_lock);
+	hdn_record_file_lock_pressure(error, file_lock->c.flc_type);
 
 	/*
 	 * Detect close/fcntl races and recover by zapping all POSIX locks
@@ -2649,6 +2660,7 @@ int fcntl_setlk64(unsigned int fd, struct file *filp, unsigned int cmd,
 	}
 
 	error = do_lock_file_wait(filp, cmd, file_lock);
+	hdn_record_file_lock_pressure(error, file_lock->c.flc_type);
 
 	/*
 	 * Detect close/fcntl races and recover by zapping all POSIX locks

@@ -23,6 +23,7 @@
 #include <linux/minmax.h>
 #include <linux/overflow.h>
 #include <linux/buildid.h>
+#include <linux/hardening.h>
 
 #include <asm/elf.h>
 #include <asm/tlb.h>
@@ -294,6 +295,7 @@ static void *m_start(struct seq_file *m, loff_t *ppos)
 		priv->task = NULL;
 		return NULL;
 	}
+	priv->memmap_disclose = hdn_proc_memmap_disclose(priv->task, mm);
 
 	if (!lock_vma_range(m, lock_ctx)) {
 		mmput(mm);
@@ -355,6 +357,14 @@ static int proc_maps_open(struct inode *inode, struct file *file,
 
 		seq_release_private(inode, file);
 		return err;
+	}
+	{
+		struct task_struct *task = get_proc_task(inode);
+
+		priv->memmap_disclose =
+			hdn_proc_memmap_disclose(task, priv->lock_ctx.mm);
+		if (task)
+			put_task_struct(task);
 	}
 
 	return 0;
@@ -460,7 +470,7 @@ static void show_vma_header_prefix(struct seq_file *m,
 }
 
 static void
-show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
+show_map_vma(struct seq_file *m, struct vm_area_struct *vma, bool disclose)
 {
 	const struct path *path;
 	const char *name_fmt, *name;
@@ -478,9 +488,10 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
 	}
 
-	start = vma->vm_start;
-	end = vma->vm_end;
-	show_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);
+	start = disclose ? vma->vm_start : 0;
+	end = disclose ? vma->vm_end : 0;
+	show_vma_header_prefix(m, start, end, flags, disclose ? pgoff : 0,
+			       dev, ino);
 
 	get_vma_name(vma, &path, &name, &name_fmt);
 	if (path) {
@@ -498,7 +509,9 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 
 static int show_map(struct seq_file *m, void *v)
 {
-	show_map_vma(m, v);
+	struct proc_maps_private *priv = m->private;
+
+	show_map_vma(m, v, priv->memmap_disclose);
 	return 0;
 }
 
@@ -651,7 +664,8 @@ no_vma:
 	return ERR_PTR(-ENOENT);
 }
 
-static int do_procmap_query(struct mm_struct *mm, void __user *uarg)
+static int do_procmap_query(struct mm_struct *mm, bool disclose,
+			    void __user *uarg)
 {
 	struct proc_maps_locking_ctx lock_ctx = { .mm = mm };
 	struct procmap_query karg;
@@ -661,6 +675,9 @@ static int do_procmap_query(struct mm_struct *mm, void __user *uarg)
 	char build_id_buf[BUILD_ID_SIZE_MAX], *name_buf = NULL;
 	__u64 usize;
 	int err;
+
+	if (!disclose)
+		return -EACCES;
 
 	if (copy_from_user(&usize, (void __user *)uarg, sizeof(usize)))
 		return -EFAULT;
@@ -823,7 +840,9 @@ static long procfs_procmap_ioctl(struct file *file, unsigned int cmd, unsigned l
 	switch (cmd) {
 	case PROCMAP_QUERY:
 		/* priv->lock_ctx.mm is set during file open operation */
-		return do_procmap_query(priv->lock_ctx.mm, (void __user *)arg);
+		return do_procmap_query(priv->lock_ctx.mm,
+					priv->memmap_disclose,
+					(void __user *)arg);
 	default:
 		return -ENOIOCTLCMD;
 	}
@@ -1371,12 +1390,15 @@ static int show_smap(struct seq_file *m, void *v)
 {
 	struct vm_area_struct *vma = v;
 	struct mem_size_stats mss = {};
+	struct proc_maps_private *priv = m->private;
 
-	smap_gather_stats(vma, &mss, 0);
+	if (priv->memmap_disclose)
+		smap_gather_stats(vma, &mss, 0);
 
-	show_map_vma(m, vma);
+	show_map_vma(m, vma, priv->memmap_disclose);
 
-	SEQ_PUT_DEC("Size:           ", vma->vm_end - vma->vm_start);
+	SEQ_PUT_DEC("Size:           ",
+		    priv->memmap_disclose ? vma->vm_end - vma->vm_start : 0);
 	SEQ_PUT_DEC(" kB\nKernelPageSize: ", vma_kernel_pagesize(vma));
 	SEQ_PUT_DEC(" kB\nMMUPageSize:    ", vma_mmu_pagesize(vma));
 	seq_puts(m, " kB\n");
@@ -1423,10 +1445,12 @@ static int show_smaps_rollup(struct seq_file *m, void *v)
 	if (unlikely(!vma))
 		goto empty_set;
 
-	vma_start = vma->vm_start;
+	priv->memmap_disclose = hdn_proc_memmap_disclose(priv->task, mm);
+	vma_start = priv->memmap_disclose ? vma->vm_start : 0;
 	do {
-		smap_gather_stats(vma, &mss, 0);
-		last_vma_end = vma->vm_end;
+		if (priv->memmap_disclose)
+			smap_gather_stats(vma, &mss, 0);
+		last_vma_end = priv->memmap_disclose ? vma->vm_end : 0;
 
 		/*
 		 * Release mmap_lock temporarily if someone wants to
@@ -1484,15 +1508,20 @@ static int show_smaps_rollup(struct seq_file *m, void *v)
 
 			/* Case 1 and 2 above */
 			if (vma->vm_start >= last_vma_end) {
-				smap_gather_stats(vma, &mss, 0);
-				last_vma_end = vma->vm_end;
+				if (priv->memmap_disclose)
+					smap_gather_stats(vma, &mss, 0);
+				last_vma_end = priv->memmap_disclose ?
+					vma->vm_end : 0;
 				continue;
 			}
 
 			/* Case 4 above */
 			if (vma->vm_end > last_vma_end) {
-				smap_gather_stats(vma, &mss, last_vma_end);
-				last_vma_end = vma->vm_end;
+				if (priv->memmap_disclose)
+					smap_gather_stats(vma, &mss,
+							  last_vma_end);
+				last_vma_end = priv->memmap_disclose ?
+					vma->vm_end : 0;
 			}
 		}
 	} for_each_vma(vmi, vma);
@@ -1549,6 +1578,14 @@ static int smaps_rollup_open(struct inode *inode, struct file *file)
 
 		single_release(inode, file);
 		goto out_free;
+	}
+	{
+		struct task_struct *task = get_proc_task(inode);
+
+		priv->memmap_disclose =
+			hdn_proc_memmap_disclose(task, priv->lock_ctx.mm);
+		if (task)
+			put_task_struct(task);
 	}
 
 	return 0;
@@ -2224,6 +2261,10 @@ static ssize_t pagemap_read(struct file *file, char __user *buf,
 
 	if (!mm || !mmget_not_zero(mm))
 		goto out;
+
+	ret = hdn_authorize_proc_memmap_read(NULL, mm);
+	if (ret)
+		goto out_mm;
 
 	ret = -EINVAL;
 	/* file position must be aligned */
@@ -3095,6 +3136,11 @@ static long do_pagemap_cmd(struct file *file, unsigned int cmd,
 			   unsigned long arg)
 {
 	struct mm_struct *mm = file->private_data;
+	int ret;
+
+	ret = hdn_authorize_proc_memmap_read(NULL, mm);
+	if (ret)
+		return ret;
 
 	switch (cmd) {
 	case PAGEMAP_SCAN:
@@ -3321,7 +3367,8 @@ static int show_numa_map(struct seq_file *m, void *v)
 		mpol_to_str(buffer, sizeof(buffer), proc_priv->task_mempolicy);
 	}
 
-	seq_printf(m, "%08lx %s", vma->vm_start, buffer);
+	seq_printf(m, "%08lx %s",
+		   proc_priv->memmap_disclose ? vma->vm_start : 0, buffer);
 
 	if (file) {
 		seq_puts(m, " file=");
@@ -3336,7 +3383,8 @@ static int show_numa_map(struct seq_file *m, void *v)
 		seq_puts(m, " huge");
 
 	/* mmap_lock is held by m_start */
-	walk_page_vma(vma, &show_numa_ops, md);
+	if (proc_priv->memmap_disclose)
+		walk_page_vma(vma, &show_numa_ops, md);
 
 	if (!md->pages)
 		goto out;

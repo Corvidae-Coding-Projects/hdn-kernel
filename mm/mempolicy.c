@@ -112,6 +112,7 @@
 #include <linux/printk.h>
 #include <linux/leafops.h>
 #include <linux/gcd.h>
+#include <linux/hardening.h>
 
 #include <asm/tlbflush.h>
 #include <asm/tlb.h>
@@ -1899,7 +1900,8 @@ static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
 	 * Check if this process has the right to modify the specified process.
 	 * Use the regular "ptrace_may_access()" checks.
 	 */
-	if (!ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS)) {
+	if (!ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS |
+				     PTRACE_MODE_HDN_MEMORY_MIGRATE)) {
 		rcu_read_unlock();
 		err = -EPERM;
 		goto out_put;
@@ -1922,10 +1924,17 @@ static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
 		goto out_put;
 
 	mm = get_task_mm(task);
-	put_task_struct(task);
 
 	if (!mm) {
 		err = -EINVAL;
+		goto out_put;
+	}
+
+	err = hdn_authorize_memory_migrate(task, mm,
+					   HDN_MEMORY_MIGRATE_MIGRATE_PAGES);
+	put_task_struct(task);
+	if (err) {
+		mmput(mm);
 		goto out;
 	}
 

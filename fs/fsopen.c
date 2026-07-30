@@ -14,6 +14,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/namei.h>
 #include <linux/file.h>
+#include <linux/hardening.h>
 #include <uapi/linux/mount.h>
 #include "internal.h"
 #include "mount.h"
@@ -124,6 +125,9 @@ SYSCALL_DEFINE2(fsopen, const char __user *, _fs_name, unsigned int, flags)
 	const char *fs_name;
 	int ret;
 
+	ret = hdn_authorize_chroot_mount(NULL);
+	if (ret)
+		return ret;
 	if (!may_mount())
 		return -EPERM;
 
@@ -138,6 +142,12 @@ SYSCALL_DEFINE2(fsopen, const char __user *, _fs_name, unsigned int, flags)
 	kfree(fs_name);
 	if (!fs_type)
 		return -ENODEV;
+
+	ret = hdn_authorize_mount_type(fs_type);
+	if (ret) {
+		put_filesystem(fs_type);
+		return ret;
+	}
 
 	fc = fs_context_for_mount(fs_type, 0);
 	put_filesystem(fs_type);
@@ -222,6 +232,10 @@ static int vfs_cmd_create(struct fs_context *fc, bool exclusive)
 	if (fc->phase != FS_CONTEXT_CREATE_PARAMS)
 		return -EBUSY;
 
+	ret = hdn_authorize_mount_type(fc->fs_type);
+	if (ret)
+		return ret;
+
 	if (!mount_capable(fc))
 		return -EPERM;
 
@@ -259,6 +273,11 @@ static int vfs_cmd_reconfigure(struct fs_context *fc)
 	fc->phase = FS_CONTEXT_RECONFIGURING;
 
 	sb = fc->root->d_sb;
+	ret = hdn_authorize_chroot_mount(NULL);
+	if (ret) {
+		fc->phase = FS_CONTEXT_FAILED;
+		return ret;
+	}
 	if (!ns_capable(sb->s_user_ns, CAP_SYS_ADMIN)) {
 		fc->phase = FS_CONTEXT_FAILED;
 		return -EPERM;

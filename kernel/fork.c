@@ -51,6 +51,7 @@
 #include <linux/cgroup.h>
 #include <linux/security.h>
 #include <linux/hugetlb.h>
+#include <linux/hardening.h>
 #include <linux/seccomp.h>
 #include <linux/swap.h>
 #include <linux/syscalls.h>
@@ -1744,6 +1745,8 @@ static int copy_signal(u64 clone_flags, struct task_struct *tsk)
 	mutex_init(&sig->cred_guard_mutex);
 	init_rwsem(&sig->exec_update_lock);
 
+	hdn_signal_fork(sig);
+
 	return 0;
 }
 
@@ -2091,8 +2094,14 @@ __latent_entropy struct task_struct *copy_process(
 	retval = -EAGAIN;
 	if (is_rlimit_overlimit(task_ucounts(p), UCOUNT_RLIMIT_NPROC, rlimit(RLIMIT_NPROC))) {
 		if (p->real_cred->user != INIT_USER &&
-		    !capable(CAP_SYS_RESOURCE) && !capable(CAP_SYS_ADMIN))
+		    !capable(CAP_SYS_RESOURCE) && !capable(CAP_SYS_ADMIN)) {
+			long nproc = get_rlimit_value(task_ucounts(p),
+						      UCOUNT_RLIMIT_NPROC);
+
+			hdn_record_resource_pressure(RLIMIT_NPROC,
+						     nproc > 0 ? nproc : 0);
 			goto bad_fork_cleanup_count;
+		}
 	}
 	current->flags &= ~PF_NPROC_EXCEEDED;
 
@@ -2308,6 +2317,14 @@ __latent_entropy struct task_struct *copy_process(
 
 	p->pdeath_signal = 0;
 	p->task_works = NULL;
+#ifdef CONFIG_SECURITY_HARDENING_SETXID
+	p->hardening_setxid_work.next = NULL;
+	p->hardening_setxid_work.func = NULL;
+	p->hardening_setxid_cred = NULL;
+	p->hardening_setxid_securebits = 0;
+	p->hardening_setxid_queued = false;
+	p->hardening_setxid_applying = false;
+#endif
 	clear_posix_cputimers_work(p);
 
 #ifdef CONFIG_KRETPROBES
@@ -2541,6 +2558,7 @@ fork_out:
 	spin_lock_irq(&current->sighand->siglock);
 	hlist_del_init(&delayed.node);
 	spin_unlock_irq(&current->sighand->siglock);
+	hdn_record_fork_failure(retval);
 	return ERR_PTR(retval);
 }
 
@@ -2616,6 +2634,7 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 	struct pid *pid;
 	struct task_struct *p;
 	int trace = 0;
+	int ret;
 	pid_t nr;
 
 	/*
@@ -2650,6 +2669,11 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 			trace = 0;
 	}
 
+	hdn_brute_check_fork();
+	ret = hdn_kernel_lockout_check_fork();
+	if (ret)
+		return ret;
+
 	p = copy_process(NULL, trace, NUMA_NO_NODE, args);
 	add_latent_entropy();
 
@@ -2664,6 +2688,7 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 
 	pid = get_task_pid(p, PIDTYPE_PID);
 	nr = pid_vnr(pid);
+	hdn_record_fork(p);
 
 	if (clone_flags & CLONE_PARENT_SETTID)
 		put_user(nr, args->parent_tid);

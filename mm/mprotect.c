@@ -14,6 +14,7 @@
 #include <linux/shm.h>
 #include <linux/mman.h>
 #include <linux/fs.h>
+#include <linux/hardening.h>
 #include <linux/highmem.h>
 #include <linux/security.h>
 #include <linux/mempolicy.h>
@@ -872,6 +873,7 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 	nstart = start;
 	tmp = vma->vm_start;
 	for_each_vma_range(vmi, vma, end) {
+		struct hdn_mprotect_request hdn_req;
 		vm_flags_t mask_off_old_flags;
 		vm_flags_t newflags;
 		int new_vma_pkey;
@@ -895,6 +897,20 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 		new_vma_pkey = arch_override_mprotect_pkey(vma, prot, pkey);
 		newflags = calc_vm_prot_bits(prot, new_vma_pkey);
 		newflags |= (vma->vm_flags & ~mask_off_old_flags);
+
+		hdn_req = (struct hdn_mprotect_request) {
+			.vma = vma,
+			.start = nstart,
+			.end = min(vma->vm_end, end),
+			.reqprot = reqprot,
+			.prot = prot,
+			.oldflags = vma->vm_flags,
+			.newflags = newflags,
+		};
+		error = hdn_mprotect_validate(&hdn_req);
+		if (error)
+			break;
+		newflags = hdn_req.newflags;
 
 		/* newflags >> 4 shift VM_MAY% in place of VM_% */
 		if ((newflags & ~(newflags >> 4)) & VM_ACCESS_FLAGS) {

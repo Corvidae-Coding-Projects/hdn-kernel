@@ -43,6 +43,7 @@
 #include <linux/sched/sysctl.h>
 #include <linux/memory-tiers.h>
 #include <linux/pagewalk.h>
+#include <linux/hardening.h>
 
 #include <asm/tlbflush.h>
 
@@ -2544,6 +2545,7 @@ static struct mm_struct *find_mm_struct(pid_t pid, nodemask_t *mem_nodes)
 {
 	struct task_struct *task;
 	struct mm_struct *mm;
+	int err;
 
 	/*
 	 * There is no need to check if current process has the right to modify
@@ -2564,7 +2566,8 @@ static struct mm_struct *find_mm_struct(pid_t pid, nodemask_t *mem_nodes)
 	 * Check if this process has the right to modify the specified
 	 * process. Use the regular "ptrace_may_access()" checks.
 	 */
-	if (!ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS)) {
+	if (!ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS |
+				     PTRACE_MODE_HDN_MEMORY_MIGRATE)) {
 		mm = ERR_PTR(-EPERM);
 		goto out;
 	}
@@ -2574,6 +2577,14 @@ static struct mm_struct *find_mm_struct(pid_t pid, nodemask_t *mem_nodes)
 		goto out;
 	*mem_nodes = cpuset_mems_allowed(task);
 	mm = get_task_mm(task);
+	if (!mm)
+		goto out;
+	err = hdn_authorize_memory_migrate(task, mm,
+					   HDN_MEMORY_MIGRATE_MOVE_PAGES);
+	if (err) {
+		mmput(mm);
+		mm = ERR_PTR(err);
+	}
 out:
 	put_task_struct(task);
 	if (!mm)

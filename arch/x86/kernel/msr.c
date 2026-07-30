@@ -32,6 +32,7 @@
 #include <linux/device.h>
 #include <linux/cpu.h>
 #include <linux/notifier.h>
+#include <linux/hardening.h>
 #include <linux/uaccess.h>
 #include <linux/gfp.h>
 #include <linux/security.h>
@@ -207,9 +208,15 @@ static int msr_open(struct inode *inode, struct file *file)
 {
 	unsigned int cpu = iminor(file_inode(file));
 	struct cpuinfo_x86 *c;
+	int err;
 
 	if (!capable(CAP_SYS_RAWIO))
 		return -EPERM;
+
+	err = hdn_authorize(HDN_AUTH_RAW_IO, HDN_TRANS_RAW_IO,
+			    HDN_REASON_PROFILE_DENIED, -EPERM);
+	if (err)
+		return err;
 
 	if (cpu >= nr_cpu_ids || !cpu_online(cpu))
 		return -ENXIO;	/* No such CPU */

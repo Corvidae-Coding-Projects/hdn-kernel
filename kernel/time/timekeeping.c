@@ -25,6 +25,7 @@
 #include <linux/compiler.h>
 #include <linux/audit.h>
 #include <linux/random.h>
+#include <linux/hardening.h>
 
 #include <vdso/auxclock.h>
 
@@ -2670,6 +2671,19 @@ static int timekeeping_validate_timex(const struct __kernel_timex *txc, bool aux
 	return 0;
 }
 
+static bool hdn_timex_mutates_time(const struct __kernel_timex *txc)
+{
+	unsigned int read_only_mask = ADJ_ADJTIME | ADJ_OFFSET_READONLY;
+
+	if (!txc->modes)
+		return false;
+	if ((txc->modes & read_only_mask) == read_only_mask &&
+	    !(txc->modes & ~read_only_mask))
+		return false;
+
+	return true;
+}
+
 /**
  * random_get_entropy_fallback - Returns the raw clock source value,
  * used by random.c for platforms with no valid random_get_entropy().
@@ -2704,6 +2718,11 @@ static int __do_adjtimex(struct tk_data *tkd, struct __kernel_timex *txc,
 	ret = timekeeping_validate_timex(txc, aux_clock);
 	if (ret)
 		return ret;
+	if (hdn_timex_mutates_time(txc)) {
+		ret = hdn_authorize_time_change(HDN_TIME_ADJTIMEX);
+		if (ret)
+			return ret;
+	}
 	add_device_randomness(txc, sizeof(*txc));
 
 	if (!aux_clock)
@@ -2769,6 +2788,8 @@ int do_adjtimex(struct __kernel_timex *txc)
 		clock_was_set(CLOCK_SET_WALL);
 
 	ntp_notify_cmos_timer(result.delta.tv_sec != 0);
+	if (hdn_timex_mutates_time(txc))
+		hdn_record_time_change(HDN_TIME_ADJTIMEX);
 
 	return ret;
 }

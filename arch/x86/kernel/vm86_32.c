@@ -33,6 +33,7 @@
 
 #include <linux/capability.h>
 #include <linux/errno.h>
+#include <linux/hardening.h>
 #include <linux/interrupt.h>
 #include <linux/syscalls.h>
 #include <linux/sched.h>
@@ -165,11 +166,13 @@ Efault:
 }
 
 static int do_vm86_irq_handling(int subfunction, int irqnumber);
-static long do_sys_vm86(struct vm86plus_struct __user *user_vm86, bool plus);
+static long do_sys_vm86(struct vm86plus_struct __user *user_vm86, bool plus,
+			unsigned int cmd);
 
 SYSCALL_DEFINE1(vm86old, struct vm86_struct __user *, user_vm86)
 {
-	return do_sys_vm86((struct vm86plus_struct __user *) user_vm86, false);
+	return do_sys_vm86((struct vm86plus_struct __user *)user_vm86, false,
+			   VM86_ENTER);
 }
 
 
@@ -192,11 +195,12 @@ SYSCALL_DEFINE2(vm86, unsigned long, cmd, unsigned long, arg)
 	}
 
 	/* we come here only for functions VM86_ENTER, VM86_ENTER_NO_BYPASS */
-	return do_sys_vm86((struct vm86plus_struct __user *) arg, true);
+	return do_sys_vm86((struct vm86plus_struct __user *)arg, true, cmd);
 }
 
 
-static long do_sys_vm86(struct vm86plus_struct __user *user_vm86, bool plus)
+static long do_sys_vm86(struct vm86plus_struct __user *user_vm86, bool plus,
+			unsigned int cmd)
 {
 	struct task_struct *tsk = current;
 	struct vm86 *vm86 = tsk->thread.vm86;
@@ -230,6 +234,10 @@ static long do_sys_vm86(struct vm86plus_struct __user *user_vm86, bool plus)
 			     from_kuid_munged(&init_user_ns, current_uid()));
 		return -EPERM;
 	}
+
+	err = hdn_authorize_vm86(cmd);
+	if (err)
+		return err;
 
 	if (!vm86) {
 		if (!(vm86 = kzalloc_obj(*vm86)))
@@ -798,6 +806,11 @@ static inline int get_and_reset_irq(int irqnumber)
 static int do_vm86_irq_handling(int subfunction, int irqnumber)
 {
 	int ret;
+
+	ret = hdn_authorize_vm86(subfunction);
+	if (ret)
+		return ret;
+
 	switch (subfunction) {
 		case VM86_GET_AND_RESET_IRQ: {
 			return get_and_reset_irq(irqnumber);
@@ -828,4 +841,3 @@ static int do_vm86_irq_handling(int subfunction, int irqnumber)
 	}
 	return -EINVAL;
 }
-

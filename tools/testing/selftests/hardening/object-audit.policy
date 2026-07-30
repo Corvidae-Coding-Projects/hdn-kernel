@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-only
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 object-audit-root
+allow 2 POLICY_ADMIN TTY_ACCESS
+
+object 2 audit-read path /hdn-object-audit-read
+object 2 audit-append path /hdn-object-audit-append
+object 2 audit-write path /hdn-object-audit-write
+object 2 audit-exec path /hdn-elfnote-jit
+object 2 audit-find path /hdn-object-audit-find
+object 2 audit-create path /hdn-object-audit-create-dir
+object 2 audit-delete path /hdn-object-audit-delete
+object 2 audit-link path /hdn-object-audit-link
+object 2 audit-setid path /hdn-object-audit-setid
+object 2 audit-read path /hdn-object-audit-deny
+object 2 deny-read path /hdn-object-audit-deny
+
+exec inherit path /hdn-elfnote-jit audit-inherit

@@ -12,7 +12,7 @@
  *      Changed the compression method from stem compression to "table lookup"
  *      compression (see scripts/kallsyms.c for a more complete description)
  */
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/init.h>
 #include <linux/seq_file.h>
 #include <linux/fs.h>
@@ -25,6 +25,7 @@
 #include <linux/filter.h>
 #include <linux/ftrace.h>
 #include <linux/kprobes.h>
+#include <linux/hardening.h>
 #include <linux/build_bug.h>
 #include <linux/compiler.h>
 #include <linux/module.h>
@@ -476,6 +477,9 @@ static int __sprint_symbol(char *buffer, unsigned long address,
 	unsigned long offset, size;
 	int len;
 
+	if (!hdn_kernel_symbol_disclose_allowed())
+		return sprintf(buffer, "[hidden]");
+
 	/* Prevent module removal until modname and modbuildid are printed */
 	guard(rcu)();
 
@@ -603,6 +607,7 @@ struct kallsym_iter {
 	char module_name[MODULE_NAME_LEN];
 	int exported;
 	int show_value;
+	int show_name;
 };
 
 static int get_ksymbol_mod(struct kallsym_iter *iter)
@@ -765,6 +770,8 @@ static int s_show(struct seq_file *m, void *p)
 	/* Some debugging symbols have no name.  Ignore them. */
 	if (!iter->name[0])
 		return 0;
+	if (!iter->show_name)
+		return 0;
 
 	value = iter->show_value ? (void *)iter->value : NULL;
 
@@ -845,6 +852,7 @@ static int bpf_iter_ksym_init(void *priv_data, struct bpf_iter_aux_info *aux)
 	 * credentials to tell BPF iterators if values should be shown.
 	 */
 	iter->show_value = kallsyms_show_value(current_cred());
+	iter->show_name = iter->show_value;
 
 	return 0;
 }
@@ -899,6 +907,7 @@ static int kallsyms_open(struct inode *inode, struct file *file)
 	 * the result here at open time.
 	 */
 	iter->show_value = kallsyms_show_value(file->f_cred);
+	iter->show_name = iter->show_value;
 	return 0;
 }
 

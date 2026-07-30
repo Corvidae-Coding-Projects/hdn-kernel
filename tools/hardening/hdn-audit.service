@@ -1,0 +1,43 @@
+[Unit]
+Description=Persist decoded HDN security events to the journal
+Documentation=man:journalctl(1)
+After=hdn-policy-load.service systemd-journald.service
+Requires=hdn-policy-load.service
+ConditionPathExists=/sys/kernel/security/hardening/events
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/hdn-event-decode --follow
+Restart=on-failure
+RestartSec=1s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hdn-audit
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

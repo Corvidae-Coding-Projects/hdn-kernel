@@ -16,6 +16,7 @@
 #include <linux/namei.h>
 #include <linux/security.h>
 #include <linux/cred.h>
+#include <linux/hardening.h>
 #include <linux/idr.h>
 #include <linux/init.h>		/* init_rootfs */
 #include <linux/fs_struct.h>	/* get_fs_root et.al. */
@@ -2001,7 +2002,11 @@ void __detach_mounts(struct dentry *dentry)
  */
 bool may_mount(void)
 {
-	return ns_capable(current->nsproxy->mnt_ns->user_ns, CAP_SYS_ADMIN);
+	if (!ns_capable(current->nsproxy->mnt_ns->user_ns, CAP_SYS_ADMIN))
+		return false;
+
+	return !hdn_authorize(HDN_AUTH_MOUNT_ADMIN, HDN_TRANS_MOUNT,
+			      HDN_REASON_PROFILE_DENIED, -EPERM);
 }
 
 static void warn_mandlock(void)
@@ -2038,6 +2043,8 @@ int path_umount(const struct path *path, int flags)
 	int ret;
 
 	ret = can_umount(path, flags);
+	if (!ret)
+		ret = hdn_authorize_object_umount(path);
 	if (!ret)
 		ret = do_umount(mnt, flags);
 
@@ -2961,7 +2968,9 @@ static struct mount *__do_loopback(const struct path *old_path,
 				   unsigned int flags, unsigned int copy_flags)
 {
 	struct mount *old = real_mount(old_path->mnt);
+	struct mount *mnt, *p;
 	bool recurse = flags & AT_RECURSIVE;
+	int err;
 
 	if (IS_MNT_UNBINDABLE(old))
 		return ERR_PTR(-EINVAL);
@@ -2985,9 +2994,29 @@ static struct mount *__do_loopback(const struct path *old_path,
 		copy_flags |= CL_COPY_MNT_NS_FILE;
 
 	if (recurse)
-		return copy_tree(old, old_path->dentry, copy_flags);
+		mnt = copy_tree(old, old_path->dentry, copy_flags);
+	else
+		mnt = clone_mnt(old, old_path->dentry, copy_flags);
 
-	return clone_mnt(old, old_path->dentry, copy_flags);
+	if (IS_ERR(mnt))
+		return mnt;
+
+	for (p = mnt; p; p = next_mnt(p, mnt)) {
+		if (__mnt_is_readonly(&p->mnt))
+			continue;
+
+		err = hdn_authorize_writable_mount(old->mnt.mnt_sb->s_type,
+						   false);
+		if (err) {
+			lock_mount_hash();
+			umount_tree(mnt, UMOUNT_SYNC);
+			unlock_mount_hash();
+			return ERR_PTR(err);
+		}
+		break;
+	}
+
+	return mnt;
 }
 
 /*
@@ -3208,6 +3237,12 @@ static struct file *vfs_open_tree(int dfd, const char __user *filename, unsigned
 	    !ns_capable(current_user_ns(), CAP_SYS_ADMIN))
 		return ERR_PTR(-EPERM);
 
+	if (flags & OPEN_TREE_NAMESPACE) {
+		ret = hdn_authorize_namespace_create(CLONE_NEWNS);
+		if (ret)
+			return ERR_PTR(ret);
+	}
+
 	if ((flags & OPEN_TREE_CLONE) && !may_mount())
 		return ERR_PTR(-EPERM);
 
@@ -3334,6 +3369,12 @@ static int do_reconfigure_mnt(const struct path *path, unsigned int mnt_flags)
 	if (!can_change_locked_flags(mnt, mnt_flags))
 		return -EPERM;
 
+	ret = hdn_authorize_rofs_relax(path->mnt, __mnt_is_readonly(path->mnt),
+				       (mnt_flags & MNT_READONLY) ||
+				       sb_rdonly(sb));
+	if (ret)
+		return ret;
+
 	/*
 	 * We're only checking whether the superblock is read-only not
 	 * changing it, so only take down_read(&sb->s_umount).
@@ -3372,6 +3413,12 @@ static int do_remount(const struct path *path, int sb_flags,
 
 	if (!can_change_locked_flags(mnt, mnt_flags))
 		return -EPERM;
+
+	err = hdn_authorize_rofs_relax(path->mnt, __mnt_is_readonly(path->mnt),
+				       (mnt_flags & MNT_READONLY) ||
+				       (sb_flags & SB_RDONLY));
+	if (err)
+		return err;
 
 	fc = fs_context_for_reconfigure(path->dentry, sb_flags, MS_RMT_MASK);
 	if (IS_ERR(fc))
@@ -3713,6 +3760,10 @@ static int do_move_mount_old(const struct path *path, const char *old_name)
 	if (err)
 		return err;
 
+	err = hdn_authorize_object_mount_source(&old_path);
+	if (err)
+		return err;
+
 	return do_move_mount(&old_path, path, 0);
 }
 
@@ -3760,9 +3811,14 @@ static int do_new_mount_fc(struct fs_context *fc, const struct path *mountpoint,
 			   unsigned int mnt_flags)
 {
 	struct super_block *sb;
-	struct vfsmount *mnt __free(mntput) = fc_mount(fc);
+	struct vfsmount *mnt __free(mntput) = ERR_PTR(-EINVAL);
 	int error;
 
+	error = hdn_authorize_mount_type(fc->fs_type);
+	if (error)
+		return error;
+
+	mnt = fc_mount(fc);
 	if (IS_ERR(mnt))
 		return PTR_ERR(mnt);
 
@@ -3775,6 +3831,12 @@ static int do_new_mount_fc(struct fs_context *fc, const struct path *mountpoint,
 		errorfcp(fc, "VFS", "Mount too revealing");
 		return -EPERM;
 	}
+
+	error = hdn_authorize_writable_mount(fc->fs_type,
+					     (mnt_flags & MNT_READONLY) ||
+					     sb_rdonly(sb));
+	if (error)
+		return error;
 
 	mnt_warn_timestamp_expiry(mountpoint, mnt);
 
@@ -3804,6 +3866,12 @@ static int do_new_mount(const struct path *path, const char *fstype,
 	type = get_fs_type(fstype);
 	if (!type)
 		return -ENODEV;
+
+	err = hdn_authorize_mount_type(type);
+	if (err) {
+		put_filesystem(type);
+		return err;
+	}
 
 	if (type->fs_flags & FS_HAS_SUBTYPE) {
 		subtype = strchr(fstype, '.');
@@ -4101,6 +4169,12 @@ int path_mount(const char *dev_name, const struct path *path,
 	ret = security_sb_mount(dev_name, path, type_page, flags, data_page);
 	if (ret)
 		return ret;
+	ret = hdn_authorize_chroot_mount(path);
+	if (ret)
+		return ret;
+	ret = hdn_authorize_object_mount(path);
+	if (ret)
+		return ret;
 	if (!may_mount())
 		return -EPERM;
 	if (flags & SB_MANDLOCK)
@@ -4146,18 +4220,22 @@ int path_mount(const char *dev_name, const struct path *path,
 			    SB_I_VERSION);
 
 	if ((flags & (MS_REMOUNT | MS_BIND)) == (MS_REMOUNT | MS_BIND))
-		return do_reconfigure_mnt(path, mnt_flags);
-	if (flags & MS_REMOUNT)
-		return do_remount(path, sb_flags, mnt_flags, data_page);
-	if (flags & MS_BIND)
-		return do_loopback(path, dev_name, flags & MS_REC);
-	if (flags & (MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE))
-		return do_change_type(path, flags);
-	if (flags & MS_MOVE)
-		return do_move_mount_old(path, dev_name);
+		ret = do_reconfigure_mnt(path, mnt_flags);
+	else if (flags & MS_REMOUNT)
+		ret = do_remount(path, sb_flags, mnt_flags, data_page);
+	else if (flags & MS_BIND)
+		ret = do_loopback(path, dev_name, flags & MS_REC);
+	else if (flags & (MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE))
+		ret = do_change_type(path, flags);
+	else if (flags & MS_MOVE)
+		ret = do_move_mount_old(path, dev_name);
+	else
+		ret = do_new_mount(path, type_page, sb_flags, mnt_flags,
+				   dev_name, data_page);
 
-	return do_new_mount(path, type_page, sb_flags, mnt_flags, dev_name,
-			    data_page);
+	if (!ret)
+		hdn_record_mount(path);
+	return ret;
 }
 
 int do_mount(const char *dev_name, const char __user *dir_name,
@@ -4180,6 +4258,35 @@ static struct ucounts *inc_mnt_namespaces(struct user_namespace *ns)
 static void dec_mnt_namespaces(struct ucounts *ucounts)
 {
 	dec_ucount(ucounts, UCOUNT_MNT_NAMESPACES);
+}
+
+u64 hdn_mntns_profile_id(const struct mnt_namespace *ns)
+{
+	u64 profile_id;
+
+	if (!ns)
+		return HDN_PROFILE_PRIVILEGED;
+
+	profile_id = READ_ONCE(ns->hardening_profile_id);
+	if (!profile_id)
+		return HDN_PROFILE_DEFAULT;
+
+	return profile_id;
+}
+
+u64 hdn_current_mntns_profile_id(void)
+{
+	struct nsproxy *nsproxy = current->nsproxy;
+
+	if (!nsproxy)
+		return HDN_PROFILE_PRIVILEGED;
+
+	return hdn_mntns_profile_id(nsproxy->mnt_ns);
+}
+
+static void hdn_mntns_init_profile(struct mnt_namespace *ns)
+{
+	WRITE_ONCE(ns->hardening_profile_id, hdn_current_profile_id());
 }
 
 static void free_mnt_ns(struct mnt_namespace *ns)
@@ -4223,6 +4330,7 @@ static struct mnt_namespace *alloc_mnt_ns(struct user_namespace *user_ns, bool a
 	init_waitqueue_head(&new_ns->poll);
 	new_ns->user_ns = get_user_ns(user_ns);
 	new_ns->ucounts = ucounts;
+	hdn_mntns_init_profile(new_ns);
 	return new_ns;
 }
 
@@ -4414,6 +4522,9 @@ SYSCALL_DEFINE3(fsmount, int, fs_fd, unsigned int, flags,
 	unsigned int mnt_flags = 0;
 	long ret;
 
+	ret = hdn_authorize_chroot_mount(NULL);
+	if (ret)
+		return ret;
 	if (!may_mount())
 		return -EPERM;
 
@@ -4452,6 +4563,10 @@ SYSCALL_DEFINE3(fsmount, int, fs_fd, unsigned int, flags,
 	if (ret)
 		return ret;
 
+	ret = hdn_authorize_mount_type(fc->fs_type);
+	if (ret)
+		return ret;
+
 	/* There must be a valid superblock or we can't mount it */
 	ret = -EINVAL;
 	if (!fc->root)
@@ -4462,6 +4577,12 @@ SYSCALL_DEFINE3(fsmount, int, fs_fd, unsigned int, flags,
 		errorfcp(fc, "VFS", "Mount too revealing");
 		return ret;
 	}
+
+	ret = hdn_authorize_writable_mount(fc->fs_type,
+					   (mnt_flags & MNT_READONLY) ||
+					   sb_rdonly(fc->root->d_sb));
+	if (ret)
+		return ret;
 
 	ret = -EBUSY;
 	if (fc->phase != FS_CONTEXT_AWAITING_MOUNT)
@@ -4506,7 +4627,10 @@ SYSCALL_DEFINE3(fsmount, int, fs_fd, unsigned int, flags,
 	 * need to unmount it, not just simply put it.
 	 */
 	fd_prepare_file(fdf)->f_mode |= FMODE_NEED_UNMOUNT;
-	return fd_publish(fdf);
+	ret = fd_publish(fdf);
+	if (ret >= 0)
+		hdn_record_mount(&new_path);
+	return ret;
 }
 
 static inline int vfs_move_mount(const struct path *from_path,
@@ -4519,10 +4643,24 @@ static inline int vfs_move_mount(const struct path *from_path,
 	if (ret)
 		return ret;
 
-	if (mflags & MNT_TREE_PROPAGATION)
-		return do_set_group(from_path, to_path);
+	ret = hdn_authorize_chroot_mount(to_path);
+	if (ret)
+		return ret;
+	ret = hdn_authorize_object_mount_source(from_path);
+	if (ret)
+		return ret;
+	ret = hdn_authorize_object_mount(to_path);
+	if (ret)
+		return ret;
 
-	return do_move_mount(from_path, to_path, mflags);
+	if (mflags & MNT_TREE_PROPAGATION)
+		ret = do_set_group(from_path, to_path);
+	else
+		ret = do_move_mount(from_path, to_path, mflags);
+
+	if (!ret)
+		hdn_record_mount(to_path);
+	return ret;
 }
 
 /*
@@ -4544,6 +4682,9 @@ SYSCALL_DEFINE5(move_mount,
 	enum mnt_tree_flags_t mflags = 0;
 	int ret = 0;
 
+	ret = hdn_authorize_chroot_mount(NULL);
+	if (ret)
+		return ret;
 	if (!may_mount())
 		return -EPERM;
 
@@ -4740,6 +4881,10 @@ SYSCALL_DEFINE2(pivot_root, const char __user *, new_root,
 	if (error)
 		return error;
 
+	error = hdn_authorize_pivot_root(&new, &old);
+	if (error)
+		return error;
+
 	return path_pivot_root(&new, &old);
 }
 
@@ -4819,10 +4964,19 @@ static int mount_setattr_prepare(struct mount_kattr *kattr, struct mount *mnt)
 	int err;
 
 	for (m = mnt; m; m = next_mnt(m, mnt)) {
-		if (!can_change_locked_flags(m, recalc_flags(kattr, m))) {
+		unsigned int new_flags = recalc_flags(kattr, m);
+
+		if (!can_change_locked_flags(m, new_flags)) {
 			err = -EPERM;
 			break;
 		}
+
+		err = hdn_authorize_rofs_relax(&m->mnt,
+					       __mnt_is_readonly(&m->mnt),
+					       (new_flags & MNT_READONLY) ||
+					       sb_rdonly(m->mnt.mnt_sb));
+		if (err)
+			break;
 
 		err = can_idmap_mount(kattr, m);
 		if (err)
@@ -4940,6 +5094,8 @@ out:
 		namespace_unlock();
 	}
 
+	if (!err)
+		hdn_record_mount(path);
 	return err;
 }
 
@@ -6134,6 +6290,7 @@ struct mnt_namespace init_mnt_ns = {
 	.passive	= REFCOUNT_INIT(1),
 	.mounts		= RB_ROOT,
 	.poll		= __WAIT_QUEUE_HEAD_INITIALIZER(init_mnt_ns.poll),
+	.hardening_profile_id = HDN_PROFILE_PRIVILEGED,
 };
 
 static void __init init_mount_tree(void)
@@ -6441,6 +6598,11 @@ static int mntns_install(struct nsset *nsset, struct ns_common *ns)
 
 	if (fs->users != 1)
 		return -EINVAL;
+
+	err = hdn_authorize_namespace_join_profile(hdn_mntns_profile_id(mnt_ns),
+						   CLONE_NEWNS);
+	if (err)
+		return err;
 
 	get_mnt_ns(mnt_ns);
 	old_mnt_ns = nsproxy->mnt_ns;

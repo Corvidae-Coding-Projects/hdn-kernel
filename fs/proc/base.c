@@ -66,12 +66,13 @@
 #include <linux/mm.h>
 #include <linux/swap.h>
 #include <linux/rcupdate.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/stacktrace.h>
 #include <linux/resource.h>
 #include <linux/module.h>
 #include <linux/mount.h>
 #include <linux/security.h>
+#include <linux/hardening.h>
 #include <linux/ptrace.h>
 #include <linux/printk.h>
 #include <linux/cache.h>
@@ -216,6 +217,43 @@ static int get_task_root(struct task_struct *task, struct path *root)
 	}
 	task_unlock(task);
 	return result;
+}
+
+static bool hdn_proc_task_dir_mode(umode_t mode)
+{
+	umode_t perm = mode & 0777;
+
+	return S_ISDIR(mode) &&
+	       (perm == (S_IRUGO | S_IXUGO) ||
+		perm == (S_IRUSR | S_IXUSR | S_IRGRP | S_IXGRP));
+}
+
+static void hdn_proc_task_restrict_inode(struct inode *inode)
+{
+	kgid_t gid;
+
+	if (!hdn_proc_task_dir_mode(inode->i_mode))
+		return;
+	if (!hdn_proc_task_group_kgid(&gid))
+		return;
+
+	inode->i_mode = (inode->i_mode & ~0777) |
+		S_IRUSR | S_IXUSR | S_IRGRP | S_IXGRP;
+	inode->i_gid = gid;
+}
+
+static void hdn_proc_task_restrict_stat(struct kstat *stat)
+{
+	kgid_t gid;
+
+	if (!hdn_proc_task_dir_mode(stat->mode))
+		return;
+	if (!hdn_proc_task_group_kgid(&gid))
+		return;
+
+	stat->mode = (stat->mode & ~0777) |
+		S_IRUSR | S_IXUSR | S_IRGRP | S_IXGRP;
+	stat->gid = gid;
 }
 
 static int proc_cwd_link(struct dentry *dentry, struct path *path)
@@ -385,7 +423,9 @@ static ssize_t get_task_cmdline(struct task_struct *tsk, char __user *buf,
 	if (!mm)
 		return 0;
 
-	ret = get_mm_cmdline(mm, buf, count, pos);
+	ret = hdn_authorize_proc_sensitive_read(tsk, mm);
+	if (!ret)
+		ret = get_mm_cmdline(mm, buf, count, pos);
 	mmput(mm);
 	return ret;
 }
@@ -425,6 +465,11 @@ static int proc_pid_wchan(struct seq_file *m, struct pid_namespace *ns,
 	char symname[KSYM_NAME_LEN];
 
 	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS))
+		goto print0;
+	if (hdn_authorize_profile(HDN_AUTH_PROC_DISCLOSE,
+				  HDN_TRANS_PROCFS_READ,
+				  HDN_REASON_PROFILE_DENIED, -EACCES,
+				  hdn_current_mntns_profile_id()))
 		goto print0;
 
 	wchan = get_wchan(task);
@@ -479,6 +524,12 @@ static int proc_pid_stack(struct seq_file *m, struct pid_namespace *ns,
 	 */
 	if (!file_ns_capable(m->file, &init_user_ns, CAP_SYS_ADMIN))
 		return -EACCES;
+	err = hdn_authorize_profile(HDN_AUTH_PROC_DISCLOSE,
+				    HDN_TRANS_PROCFS_READ,
+				    HDN_REASON_PROFILE_DENIED, -EACCES,
+				    hdn_current_mntns_profile_id());
+	if (err)
+		return err;
 
 	entries = kmalloc_array(MAX_STACK_TRACE_DEPTH, sizeof(*entries),
 				GFP_KERNEL);
@@ -511,6 +562,16 @@ static int proc_pid_stack(struct seq_file *m, struct pid_namespace *ns,
 static int proc_pid_schedstat(struct seq_file *m, struct pid_namespace *ns,
 			      struct pid *pid, struct task_struct *task)
 {
+	struct mm_struct *mm;
+	int err;
+
+	mm = get_task_mm(task);
+	err = hdn_authorize_proc_sensitive_read(task, mm);
+	if (mm)
+		mmput(mm);
+	if (err)
+		return err;
+
 	if (unlikely(!sched_info_on()))
 		seq_puts(m, "0 0 0\n");
 	else
@@ -631,10 +692,19 @@ static const struct limit_names lnames[RLIM_NLIMITS] = {
 static int proc_pid_limits(struct seq_file *m, struct pid_namespace *ns,
 			   struct pid *pid, struct task_struct *task)
 {
+	struct mm_struct *mm;
 	unsigned int i;
 	unsigned long flags;
+	int err;
 
 	struct rlimit rlim[RLIM_NLIMITS];
+
+	mm = get_task_mm(task);
+	err = hdn_authorize_proc_sensitive_read(task, mm);
+	if (mm)
+		mmput(mm);
+	if (err)
+		return err;
 
 	if (!lock_task_sighand(task, &flags))
 		return 0;
@@ -676,8 +746,16 @@ static int proc_pid_syscall(struct seq_file *m, struct pid_namespace *ns,
 			    struct pid *pid, struct task_struct *task)
 {
 	struct syscall_info info;
+	struct mm_struct *mm;
 	u64 *args = &info.data.args[0];
 	int res;
+
+	mm = get_task_mm(task);
+	res = hdn_authorize_proc_sensitive_read(task, mm);
+	if (mm)
+		mmput(mm);
+	if (res)
+		return res;
 
 	res = lock_trace(task);
 	if (res)
@@ -738,6 +816,15 @@ int proc_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	return 0;
 }
 
+static bool hdn_proc_mount_group_visible(struct proc_fs_info *fs_info)
+{
+	if (fs_info->hide_pid == HIDEPID_OFF ||
+	    fs_info->hide_pid == HIDEPID_NOT_PTRACEABLE)
+		return false;
+
+	return in_group_p(fs_info->pid_gid);
+}
+
 /*
  * May current process learn task's sched/cmdline info (for hide_pid_min=1)
  * or euid/egid (for hide_pid_min=2)?
@@ -746,6 +833,10 @@ static bool has_pid_permissions(struct proc_fs_info *fs_info,
 				 struct task_struct *task,
 				 enum proc_hidepid hide_pid_min)
 {
+	if (!hdn_proc_task_visible(task) &&
+	    !hdn_proc_mount_group_visible(fs_info))
+		return false;
+
 	/*
 	 * If 'hidpid' mount option is set force a ptrace check,
 	 * we indicate that we are using a filesystem syscall
@@ -1016,6 +1107,10 @@ static ssize_t environ_read(struct file *file, char __user *buf,
 	if (!mm || !mm->env_end)
 		return 0;
 
+	ret = hdn_authorize_proc_sensitive_read(NULL, mm);
+	if (ret)
+		return ret;
+
 	page = (char *)__get_free_page(GFP_KERNEL);
 	if (!page)
 		return -ENOMEM;
@@ -1083,9 +1178,13 @@ static ssize_t auxv_read(struct file *file, char __user *buf,
 {
 	struct mm_struct *mm = file->private_data;
 	unsigned int nwords = 0;
+	int ret;
 
 	if (!mm)
 		return 0;
+	ret = hdn_authorize_proc_sensitive_read(NULL, mm);
+	if (ret)
+		return ret;
 	do {
 		nwords += 2;
 	} while (mm->saved_auxv[nwords - 2] != 0); /* AT_NULL */
@@ -1503,10 +1602,20 @@ static int sched_show(struct seq_file *m, void *v)
 	struct inode *inode = m->private;
 	struct pid_namespace *ns = proc_pid_ns(inode->i_sb);
 	struct task_struct *p;
+	struct mm_struct *mm;
+	int err;
 
 	p = get_proc_task(inode);
 	if (!p)
 		return -ESRCH;
+	mm = get_task_mm(p);
+	err = hdn_authorize_proc_sensitive_read(p, mm);
+	if (mm)
+		mmput(mm);
+	if (err) {
+		put_task_struct(p);
+		return err;
+	}
 	proc_sched_show_task(p, ns, m);
 
 	put_task_struct(p);
@@ -1972,6 +2081,7 @@ struct inode *proc_pid_make_inode(struct super_block *sb,
 	ei->pid = pid;
 
 	task_dump_owner(task, 0, &inode->i_uid, &inode->i_gid);
+	hdn_proc_task_restrict_inode(inode);
 	security_task_to_inode(task, inode);
 
 out:
@@ -2038,6 +2148,7 @@ int pid_getattr(struct mnt_idmap *idmap, const struct path *path,
 			return -ENOENT;
 		}
 		task_dump_owner(task, inode->i_mode, &stat->uid, &stat->gid);
+		hdn_proc_task_restrict_stat(stat);
 	}
 	rcu_read_unlock();
 	return 0;
@@ -2051,6 +2162,7 @@ int pid_getattr(struct mnt_idmap *idmap, const struct path *path,
 void pid_update_inode(struct task_struct *task, struct inode *inode)
 {
 	task_dump_owner(task, inode->i_mode, &inode->i_uid, &inode->i_gid);
+	hdn_proc_task_restrict_inode(inode);
 
 	inode->i_mode &= ~(S_ISUID | S_ISGID);
 	security_task_to_inode(task, inode);
@@ -2965,13 +3077,17 @@ static ssize_t proc_coredump_filter_read(struct file *file, char __user *buf,
 	ret = 0;
 	mm = get_task_mm(task);
 	if (mm) {
-		unsigned long flags = __mm_flags_get_dumpable(mm);
+		ret = hdn_authorize_proc_sensitive_read(task, mm);
+		if (!ret) {
+			unsigned long flags = __mm_flags_get_dumpable(mm);
 
-		len = snprintf(buffer, sizeof(buffer), "%08lx\n",
-			       ((flags & MMF_DUMP_FILTER_MASK) >>
-				MMF_DUMP_FILTER_SHIFT));
+			len = snprintf(buffer, sizeof(buffer), "%08lx\n",
+				       ((flags & MMF_DUMP_FILTER_MASK) >>
+					MMF_DUMP_FILTER_SHIFT));
+			ret = simple_read_from_buffer(buf, count, ppos, buffer,
+						      len);
+		}
 		mmput(mm);
-		ret = simple_read_from_buffer(buf, count, ppos, buffer, len);
 	}
 
 	put_task_struct(task);
@@ -3003,7 +3119,10 @@ static ssize_t proc_coredump_filter_write(struct file *file,
 	mm = get_task_mm(task);
 	if (!mm)
 		goto out_no_mm;
-	ret = 0;
+
+	ret = hdn_authorize_proc_sensitive_write(task, mm);
+	if (ret)
+		goto out_mm;
 
 	for (i = 0, mask = 1; i < MMF_DUMP_FILTER_BITS; i++, mask <<= 1) {
 		if (val & mask)
@@ -3012,6 +3131,7 @@ static ssize_t proc_coredump_filter_write(struct file *file,
 			mm_flags_clear(i + MMF_DUMP_FILTER_SHIFT, mm);
 	}
 
+out_mm:
 	mmput(mm);
  out_no_mm:
 	put_task_struct(task);
@@ -3032,6 +3152,7 @@ static const struct file_operations proc_coredump_filter_operations = {
 static int do_io_accounting(struct task_struct *task, struct seq_file *m, int whole)
 {
 	struct task_io_accounting acct;
+	struct mm_struct *mm;
 	int result;
 
 	result = down_read_killable(&task->signal->exec_update_lock);
@@ -3042,6 +3163,13 @@ static int do_io_accounting(struct task_struct *task, struct seq_file *m, int wh
 		result = -EACCES;
 		goto out_unlock;
 	}
+
+	mm = get_task_mm(task);
+	result = hdn_authorize_proc_sensitive_read(task, mm);
+	if (mm)
+		mmput(mm);
+	if (result)
+		goto out_unlock;
 
 	if (whole) {
 		struct signal_struct *sig = task->signal;
@@ -3228,7 +3356,17 @@ static const struct file_operations proc_setgroups_operations = {
 static int proc_pid_personality(struct seq_file *m, struct pid_namespace *ns,
 				struct pid *pid, struct task_struct *task)
 {
-	int err = lock_trace(task);
+	struct mm_struct *mm;
+	int err;
+
+	mm = get_task_mm(task);
+	err = hdn_authorize_proc_sensitive_read(task, mm);
+	if (mm)
+		mmput(mm);
+	if (err)
+		return err;
+
+	err = lock_trace(task);
 	if (!err) {
 		seq_printf(m, "%08x\n", task->personality);
 		unlock_trace(task);
@@ -3308,6 +3446,23 @@ static int proc_stack_depth(struct seq_file *m, struct pid_namespace *ns,
  */
 static const struct file_operations proc_task_operations;
 static const struct inode_operations proc_task_inode_operations;
+
+#ifdef CONFIG_SECURITY_HARDENING_PROC_IPADDR
+static int proc_pid_ipaddr(struct seq_file *m, struct pid_namespace *ns,
+			   struct pid *pid, struct task_struct *task)
+{
+	unsigned long flags;
+	__be32 ip = 0;
+
+	if (lock_task_sighand(task, &flags)) {
+		ip = task->signal->hdn_curr_ip;
+		unlock_task_sighand(task, &flags);
+	}
+
+	seq_printf(m, "%pI4\n", &ip);
+	return 0;
+}
+#endif
 
 static const struct pid_entry tgid_base_stuff[] = {
 	DIR("task",       S_IRUGO|S_IXUGO, proc_task_inode_operations, proc_task_operations),
@@ -3394,6 +3549,9 @@ static const struct pid_entry tgid_base_stuff[] = {
 #endif
 #ifdef CONFIG_TASK_IO_ACCOUNTING
 	ONE("io",	S_IRUSR, proc_tgid_io_accounting),
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_PROC_IPADDR
+	ONE("ipaddr",	0400, proc_pid_ipaddr),
 #endif
 #ifdef CONFIG_USER_NS
 	REG("uid_map",    S_IRUGO|S_IWUSR, proc_uid_map_operations),
@@ -3522,6 +3680,10 @@ struct dentry *proc_pid_lookup(struct dentry *dentry, unsigned int flags)
 	rcu_read_unlock();
 	if (!task)
 		goto out;
+
+	if (!hdn_proc_task_visible(task) &&
+	    !hdn_proc_mount_group_visible(fs_info))
+		goto out_put_task;
 
 	/* Limit procfs to only ptraceable tasks */
 	if (fs_info->hide_pid == HIDEPID_NOT_PTRACEABLE) {

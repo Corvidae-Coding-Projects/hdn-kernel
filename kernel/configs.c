@@ -15,6 +15,7 @@
 #include <linux/seq_file.h>
 #include <linux/init.h>
 #include <linux/uaccess.h>
+#include <linux/hardening.h>
 
 /*
  * "IKCFG_ST" and "IKCFG_ED" are used to extract the config data from
@@ -41,6 +42,15 @@ static ssize_t
 ikconfig_read_current(struct file *file, char __user *buf,
 		      size_t len, loff_t * offset)
 {
+	int ret;
+
+	ret = hdn_authorize_profile(HDN_AUTH_PROC_DISCLOSE,
+				    HDN_TRANS_PROCFS_READ,
+				    HDN_REASON_PROFILE_DENIED, -EACCES,
+				    hdn_current_mntns_profile_id());
+	if (ret)
+		return ret;
+
 	return simple_read_from_buffer(buf, len, offset,
 				       &kernel_config_data,
 				       &kernel_config_data_end -

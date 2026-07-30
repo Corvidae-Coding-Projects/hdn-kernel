@@ -19,9 +19,11 @@
 #include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/hardening.h>
 #include <linux/license.h>
 #include <linux/filter.h>
 #include <linux/kernel.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/idr.h>
 #include <linux/cred.h>
 #include <linux/timekeeping.h>
@@ -66,6 +68,7 @@ static DEFINE_IDR(link_idr);
 static DEFINE_SPINLOCK(link_idr_lock);
 
 int sysctl_unprivileged_bpf_disabled __read_mostly =
+	IS_ENABLED(CONFIG_SECURITY_HARDENING_UNPRIV_BPF) ? 1 :
 	IS_BUILTIN(CONFIG_BPF_UNPRIV_DEFAULT_OFF) ? 2 : 0;
 
 static const struct bpf_map_ops * const bpf_map_types[] = {
@@ -2911,6 +2914,19 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	}
 
 	bpf_cap = bpf_token_capable(token, CAP_BPF);
+	err = -EPERM;
+
+	err = hdn_authorize_bpf_prog_load(type, attr->prog_flags,
+					  uattr.is_kernel, bpf_cap);
+	if (err)
+		goto put_token;
+
+	/*
+	 * hdn_authorize_bpf_prog_load() leaves err == 0 on the allow path.
+	 * Restore the -EPERM preset the unprivileged gates below depend on;
+	 * otherwise their "goto put_token" would return 0 (a spurious success)
+	 * instead of denying the load.
+	 */
 	err = -EPERM;
 
 	if (!IS_ENABLED(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS) &&
@@ -6224,6 +6240,53 @@ put_prog:
 	return ret;
 }
 
+static bool hdn_bpf_command_requires_authority(enum bpf_cmd cmd)
+{
+	switch (cmd) {
+	case BPF_MAP_CREATE:
+	case BPF_MAP_LOOKUP_ELEM:
+	case BPF_MAP_UPDATE_ELEM:
+	case BPF_MAP_DELETE_ELEM:
+	case BPF_MAP_GET_NEXT_KEY:
+	case BPF_MAP_FREEZE:
+	case BPF_OBJ_PIN:
+	case BPF_OBJ_GET:
+	case BPF_BTF_LOAD:
+	case BPF_RAW_TRACEPOINT_OPEN:
+	case BPF_PROG_ATTACH:
+	case BPF_PROG_DETACH:
+	case BPF_PROG_QUERY:
+	case BPF_PROG_TEST_RUN:
+	case BPF_PROG_GET_NEXT_ID:
+	case BPF_MAP_GET_NEXT_ID:
+	case BPF_BTF_GET_NEXT_ID:
+	case BPF_PROG_GET_FD_BY_ID:
+	case BPF_MAP_GET_FD_BY_ID:
+	case BPF_OBJ_GET_INFO_BY_FD:
+	case BPF_BTF_GET_FD_BY_ID:
+	case BPF_TASK_FD_QUERY:
+	case BPF_MAP_LOOKUP_AND_DELETE_ELEM:
+	case BPF_MAP_LOOKUP_BATCH:
+	case BPF_MAP_LOOKUP_AND_DELETE_BATCH:
+	case BPF_MAP_UPDATE_BATCH:
+	case BPF_MAP_DELETE_BATCH:
+	case BPF_LINK_CREATE:
+	case BPF_LINK_UPDATE:
+	case BPF_LINK_GET_FD_BY_ID:
+	case BPF_LINK_GET_NEXT_ID:
+	case BPF_LINK_DETACH:
+	case BPF_ENABLE_STATS:
+	case BPF_ITER_CREATE:
+	case BPF_PROG_BIND_MAP:
+	case BPF_TOKEN_CREATE:
+	case BPF_PROG_STREAM_READ_BY_FD:
+	case BPF_PROG_ASSOC_STRUCT_OPS:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static int __sys_bpf(enum bpf_cmd cmd, bpfptr_t uattr, unsigned int size)
 {
 	union bpf_attr attr;
@@ -6242,6 +6305,12 @@ static int __sys_bpf(enum bpf_cmd cmd, bpfptr_t uattr, unsigned int size)
 	err = security_bpf(cmd, &attr, size, uattr.is_kernel);
 	if (err < 0)
 		return err;
+
+	if (hdn_bpf_command_requires_authority(cmd)) {
+		err = hdn_authorize_bpf_command(cmd, uattr.is_kernel);
+		if (err)
+			return err;
+	}
 
 	switch (cmd) {
 	case BPF_MAP_CREATE:
@@ -6494,12 +6563,18 @@ static const struct bpf_func_proto bpf_sys_close_proto = {
 
 BPF_CALL_4(bpf_kallsyms_lookup_name, const char *, name, int, name_sz, int, flags, u64 *, res)
 {
+	int err;
+
 	*res = 0;
 	if (flags)
 		return -EINVAL;
 
 	if (name_sz <= 1 || name[name_sz - 1])
 		return -EINVAL;
+
+	err = hdn_authorize_kernel_symbol_lookup();
+	if (err)
+		return err;
 
 	if (!bpf_dump_raw_ok(current_cred()))
 		return -EPERM;
@@ -6613,7 +6688,11 @@ static const struct ctl_table bpf_syscall_table[] = {
 		.maxlen		= sizeof(sysctl_unprivileged_bpf_disabled),
 		.mode		= 0644,
 		.proc_handler	= bpf_unpriv_handler,
+#if IS_ENABLED(CONFIG_SECURITY_HARDENING_UNPRIV_BPF)
+		.extra1		= SYSCTL_ONE,
+#else
 		.extra1		= SYSCTL_ZERO,
+#endif
 		.extra2		= SYSCTL_TWO,
 	},
 	{

@@ -38,6 +38,7 @@ struct unix_sock {
 	struct sock		sk;
 	struct unix_address	*addr;
 	struct path		path;
+	struct path		hdn_bind_root;
 	struct mutex		iolock, bindlock;
 	struct sock		*peer;
 	struct sock		*listener;

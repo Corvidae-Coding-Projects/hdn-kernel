@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Root-profile policy used by the QEMU smoke test to prove product profiles can
+# require new mounts to be read-only unless they hold the ROFS_RELAX bypass.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 mount-ro-root
+profile 3 mount-ro-updater
+profile 4 product-rofs-apply
+profile 5 product-rofs-transaction
+profile 6 product-admin-broker
+profile 7 product-rofs-bind-apply
+
+feature 2 ENFORCE_READONLY_MOUNTS
+feature 3 ENFORCE_READONLY_MOUNTS
+feature 4 ENFORCE_READONLY_MOUNTS
+feature 5 ENFORCE_READONLY_MOUNTS
+feature 6 ENFORCE_READONLY_MOUNTS
+feature 7 ENFORCE_READONLY_MOUNTS
+allow 2 MOUNT_ADMIN POLICY_ADMIN CRED_CHANGE TTY_ACCESS
+allow 3 MOUNT_ADMIN ROFS_RELAX
+allow 4 MOUNT_ADMIN
+allow 5 MOUNT_ADMIN ROFS_RELAX
+allow 6 MOUNT_ADMIN ROFS_RELAX
+allow 7 MOUNT_ADMIN ROFS_RELAX
+
+exec 3 path /hdn-rofs-updater parent 2
+exec 4 path /hdn-rofs-apply parent 2
+exec 5 path /hdn-rofs-transaction parent 2
+exec 6 path /hdn-admin-broker parent 2
+exec 4 path /hdn-rofs-apply parent 6
+exec 5 path /hdn-rofs-transaction parent 6
+exec 7 path /hdn-rofs-bind-apply parent 2

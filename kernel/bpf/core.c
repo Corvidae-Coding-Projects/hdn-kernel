@@ -546,8 +546,11 @@ void bpf_prog_kallsyms_del_all(struct bpf_prog *fp)
 #ifdef CONFIG_BPF_JIT
 /* All BPF JIT sysctl knobs here. */
 int bpf_jit_enable   __read_mostly = IS_BUILTIN(CONFIG_BPF_JIT_DEFAULT_ON);
-int bpf_jit_kallsyms __read_mostly = IS_BUILTIN(CONFIG_BPF_JIT_DEFAULT_ON);
-int bpf_jit_harden   __read_mostly;
+int bpf_jit_kallsyms __read_mostly =
+	IS_ENABLED(CONFIG_SECURITY_HARDENING_UNPRIV_BPF) ? 0 :
+	IS_BUILTIN(CONFIG_BPF_JIT_DEFAULT_ON);
+int bpf_jit_harden   __read_mostly =
+	IS_ENABLED(CONFIG_SECURITY_HARDENING_UNPRIV_BPF) ? 2 : 0;
 long bpf_jit_limit   __read_mostly;
 long bpf_jit_limit_max __read_mostly;
 

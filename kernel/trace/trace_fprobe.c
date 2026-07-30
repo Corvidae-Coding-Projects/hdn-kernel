@@ -6,6 +6,8 @@
 #define pr_fmt(fmt)	"trace_fprobe: " fmt
 
 #include <linux/fprobe.h>
+#include <linux/hardening.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -1274,6 +1276,11 @@ static int trace_fprobe_create_internal(int argc, const char *argv[],
 	ret = parse_symbol_and_return(argc, argv, &symbol, &is_return, is_tracepoint);
 	if (ret < 0)
 		return -EINVAL;
+	if (!is_tracepoint) {
+		ret = hdn_authorize_kernel_symbol_lookup();
+		if (ret)
+			return ret;
+	}
 
 	trace_probe_log_set_index(0);
 	if (event) {

@@ -21,6 +21,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/poll.h>
 #include <linux/security.h>
+#include <linux/hardening.h>
 
 #include "internal.h"
 
@@ -135,6 +136,11 @@ static int __debugfs_file_get(struct dentry *dentry, enum dbgfs_get_mode mode)
 	 */
 	if (d_unlinked(dentry))
 		return -EIO;
+	if (hdn_authorize_profile(HDN_AUTH_DEBUGFS,
+				  HDN_TRANS_DEBUGFS_ACCESS,
+				  HDN_REASON_PROFILE_DENIED, -EPERM,
+				  hdn_current_mntns_profile_id()))
+		return -EPERM;
 
 	if (!refcount_inc_not_zero(&fsd->active_users))
 		return -EIO;

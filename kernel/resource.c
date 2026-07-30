@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/fs.h>
+#include <linux/hardening.h>
 #include <linux/proc_fs.h>
 #include <linux/pseudo_fs.h>
 #include <linux/sched.h>
@@ -135,7 +136,8 @@ static int r_show(struct seq_file *m, void *v)
 		if (p->parent == root)
 			break;
 
-	if (file_ns_capable(m->file, &init_user_ns, CAP_SYS_ADMIN)) {
+	if (file_ns_capable(m->file, &init_user_ns, CAP_SYS_ADMIN) &&
+	    hdn_proc_resource_disclose()) {
 		start = r->start;
 		end = r->end;
 	} else {

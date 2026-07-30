@@ -8,6 +8,7 @@
 #include <linux/hdreg.h>
 #include <linux/backing-dev.h>
 #include <linux/fs.h>
+#include <linux/hardening.h>
 #include <linux/blktrace_api.h>
 #include <linux/pr.h>
 #include <linux/uaccess.h>
@@ -284,6 +285,48 @@ static int put_ulong(unsigned long __user *argp, unsigned long val)
 static int put_u64(u64 __user *argp, u64 val)
 {
 	return put_user(val, argp);
+}
+
+static bool blkdev_common_ioctl_needs_admin(unsigned int cmd)
+{
+	switch (cmd) {
+	case BLKFLSBUF:
+	case BLKROSET:
+	case BLKDISCARD:
+	case BLKSECDISCARD:
+	case BLKZEROOUT:
+	case BLKRESETZONE:
+	case BLKOPENZONE:
+	case BLKCLOSEZONE:
+	case BLKFINISHZONE:
+	case BLKRASET:
+	case BLKFRASET:
+	case BLKRRPART:
+	case BLKTRACESTART:
+	case BLKTRACESTOP:
+	case BLKTRACETEARDOWN:
+	case BLKCRYPTOIMPORTKEY:
+	case BLKCRYPTOGENERATEKEY:
+	case BLKCRYPTOPREPAREKEY:
+	case IOC_PR_REGISTER:
+	case IOC_PR_RESERVE:
+	case IOC_PR_RELEASE:
+	case IOC_PR_PREEMPT:
+	case IOC_PR_PREEMPT_ABORT:
+	case IOC_PR_CLEAR:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static int blkdev_authorize_admin_ioctl(struct block_device *bdev,
+					unsigned int cmd)
+{
+	if (!blkdev_common_ioctl_needs_admin(cmd))
+		return 0;
+
+	return hdn_authorize_block_device_admin(bdev->bd_dev, cmd);
 }
 
 #ifdef CONFIG_COMPAT
@@ -659,6 +702,11 @@ static int blkdev_common_ioctl(struct block_device *bdev, blk_mode_t mode,
 			       void __user *argp)
 {
 	unsigned int max_sectors;
+	int ret;
+
+	ret = blkdev_authorize_admin_ioctl(bdev, cmd);
+	if (ret)
+		return ret;
 
 	switch (cmd) {
 	case BLKFLSBUF:
@@ -765,6 +813,9 @@ long blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	case HDIO_GETGEO:
 		return blkdev_getgeo(bdev, argp);
 	case BLKPG:
+		ret = hdn_authorize_block_device_admin(bdev->bd_dev, cmd);
+		if (ret)
+			return ret;
 		return blkpg_ioctl(bdev, argp);
 
 	/* Compat mode returns 32-bit data instead of 'long' */
@@ -783,6 +834,9 @@ long blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	case BLKBSZGET: /* get block device soft block size (cf. BLKSSZGET) */
 		return put_int(argp, block_size(bdev));
 	case BLKBSZSET:
+		ret = hdn_authorize_block_device_admin(bdev->bd_dev, cmd);
+		if (ret)
+			return ret;
 		return blkdev_bszset(file, mode, argp);
 	case BLKGETSIZE64:
 		return put_u64(argp, bdev_nr_bytes(bdev));
@@ -790,6 +844,9 @@ long blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	/* Incompatible alignment on i386 */
 	case BLKTRACESETUP:
 	case BLKTRACESETUP2:
+		ret = hdn_authorize_block_device_admin(bdev->bd_dev, cmd);
+		if (ret)
+			return ret;
 		return blk_trace_ioctl(bdev, cmd, argp);
 	default:
 		break;
@@ -801,6 +858,9 @@ long blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 
 	if (!bdev->bd_disk->fops->ioctl)
 		return -ENOTTY;
+	ret = hdn_authorize_block_device_admin(bdev->bd_dev, cmd);
+	if (ret)
+		return ret;
 	return bdev->bd_disk->fops->ioctl(bdev, mode, cmd, arg);
 }
 
@@ -826,6 +886,9 @@ long compat_blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	case HDIO_GETGEO:
 		return compat_hdio_getgeo(bdev, argp);
 	case BLKPG:
+		ret = hdn_authorize_block_device_admin(bdev->bd_dev, cmd);
+		if (ret)
+			return ret;
 		return compat_blkpg_ioctl(bdev, argp);
 
 	/* Compat mode returns 32-bit data instead of 'long' */
@@ -844,20 +907,30 @@ long compat_blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	case BLKBSZGET_32: /* get the logical block size (cf. BLKSSZGET) */
 		return put_int(argp, bdev_logical_block_size(bdev));
 	case BLKBSZSET_32:
+		ret = hdn_authorize_block_device_admin(bdev->bd_dev, cmd);
+		if (ret)
+			return ret;
 		return blkdev_bszset(file, mode, argp);
 	case BLKGETSIZE64_32:
 		return put_u64(argp, bdev_nr_bytes(bdev));
 
 	/* Incompatible alignment on i386 */
 	case BLKTRACESETUP32:
+		ret = hdn_authorize_block_device_admin(bdev->bd_dev, cmd);
+		if (ret)
+			return ret;
 		return blk_trace_ioctl(bdev, cmd, argp);
 	default:
 		break;
 	}
 
 	ret = blkdev_common_ioctl(bdev, mode, cmd, arg, argp);
-	if (ret == -ENOIOCTLCMD && disk->fops->compat_ioctl)
+	if (ret == -ENOIOCTLCMD && disk->fops->compat_ioctl) {
+		ret = hdn_authorize_block_device_admin(bdev->bd_dev, cmd);
+		if (ret)
+			return ret;
 		ret = disk->fops->compat_ioctl(bdev, mode, cmd, arg);
+	}
 
 	return ret;
 }
@@ -956,6 +1029,7 @@ int blkdev_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags)
 	struct block_device *bdev = I_BDEV(cmd->file->f_mapping->host);
 	struct blk_iou_cmd *bic = io_uring_cmd_to_pdu(cmd, struct blk_iou_cmd);
 	u32 cmd_op = cmd->cmd_op;
+	int err;
 
 	/* Read what we need from the SQE on the first issue */
 	if (!(issue_flags & IORING_URING_CMD_REISSUE)) {
@@ -974,6 +1048,9 @@ int blkdev_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags)
 
 	switch (cmd_op) {
 	case BLOCK_URING_CMD_DISCARD:
+		err = hdn_authorize_block_device_admin(bdev->bd_dev, cmd_op);
+		if (err)
+			return err;
 		return blkdev_cmd_discard(cmd, bdev, bic->start, bic->len,
 					  bic->nowait);
 	}

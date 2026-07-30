@@ -11,7 +11,7 @@
 
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/random.h>
 #include <linux/sched/clock.h>
 #include <linux/kthread.h>

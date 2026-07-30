@@ -7046,6 +7046,7 @@ consume:
 		SKB_DR_SET(reason, TCP_RFC7323_PAWS);
 		goto discard_and_undo;
 	}
+#ifndef CONFIG_SECURITY_HARDENING_TCP_NO_SIMULT_CONNECT
 	if (th->syn) {
 		/* We see SYN without ACK. It is attempt of
 		 * simultaneous connect with crossed SYNs.
@@ -7107,6 +7108,7 @@ consume:
 		goto consume;
 #endif
 	}
+#endif
 	/* "fifth, if neither of the SYN or RST bits is set then
 	 * drop the segment and return."
 	 */

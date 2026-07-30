@@ -23,6 +23,7 @@
 #include <linux/sort.h>
 #include <linux/key.h>
 #include <linux/namei.h>
+#include <linux/hardening.h>
 
 #include <net/bpf_sk_storage.h>
 
@@ -2804,6 +2805,10 @@ int bpf_kprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 			.cookies = cookies,
 		};
 		struct user_syms us;
+
+		err = hdn_authorize_kernel_symbol_lookup();
+		if (err)
+			goto error;
 
 		err = copy_user_syms(&us, usyms, cnt);
 		if (err)

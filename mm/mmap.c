@@ -23,6 +23,7 @@
 #include <linux/init.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/hardening.h>
 #include <linux/personality.h>
 #include <linux/security.h>
 #include <linux/hugetlb.h>
@@ -45,6 +46,7 @@
 #include <linux/moduleparam.h>
 #include <linux/pkeys.h>
 #include <linux/oom.h>
+#include <linux/random.h>
 #include <linux/sched/mm.h>
 #include <linux/ksm.h>
 #include <linux/memfd.h>
@@ -58,6 +60,14 @@
 #include <trace/events/mmap.h>
 
 #include "internal.h"
+
+static unsigned long hdn_pages_to_bytes_saturated(unsigned long pages)
+{
+	if (pages > ULONG_MAX >> PAGE_SHIFT)
+		return ULONG_MAX;
+
+	return pages << PAGE_SHIFT;
+}
 
 #ifndef arch_mmap_check
 #define arch_mmap_check(addr, len, flags)	(0)
@@ -240,7 +250,14 @@ bool mlock_future_ok(const struct mm_struct *mm, bool is_vma_locked,
 	limit_pages = rlimit(RLIMIT_MEMLOCK);
 	limit_pages >>= PAGE_SHIFT;
 
-	return locked_pages <= limit_pages;
+	if (locked_pages > limit_pages) {
+		hdn_record_resource_pressure(RLIMIT_MEMLOCK,
+					     hdn_pages_to_bytes_saturated(
+						     locked_pages));
+		return false;
+	}
+
+	return true;
 }
 
 static inline u64 file_mmap_size_max(struct file *file, struct inode *inode)
@@ -339,7 +356,10 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			struct list_head *uf)
 {
 	struct mm_struct *mm = current->mm;
+	struct hdn_mmap_request hdn_req;
+	bool read_implies_exec = false;
 	int pkey = 0;
+	int error;
 
 	*populate = 0;
 
@@ -354,9 +374,12 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	 * (the exception is when the underlying filesystem is noexec
 	 *  mounted, in which case we don't add PROT_EXEC.)
 	 */
-	if ((prot & PROT_READ) && (current->personality & READ_IMPLIES_EXEC))
-		if (!(file && path_noexec(&file->f_path)))
+	if ((prot & PROT_READ) && (current->personality & READ_IMPLIES_EXEC)) {
+		if (!(file && path_noexec(&file->f_path))) {
+			read_implies_exec = !(prot & PROT_EXEC);
 			prot |= PROT_EXEC;
+		}
+	}
 
 	/* force arch specific MAP_FIXED handling in get_unmapped_area */
 	if (flags & MAP_FIXED_NOREPLACE)
@@ -377,6 +400,23 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	/* Too many mappings? */
 	if (mm->map_count > sysctl_max_map_count)
 		return -ENOMEM;
+
+	hdn_req = (struct hdn_mmap_request) {
+		.file = file,
+		.addr = addr,
+		.len = len,
+		.prot = prot,
+		.flags = flags,
+		.pgoff = pgoff,
+		.read_implies_exec = read_implies_exec,
+	};
+	error = hdn_mmap_rewrite(&hdn_req);
+	if (error)
+		return error;
+	addr = hdn_req.addr;
+	prot = hdn_req.prot;
+	flags = hdn_req.flags;
+	pgoff = hdn_req.pgoff;
 
 	/*
 	 * addr is returned from get_unmapped_area,
@@ -557,6 +597,21 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	}
 
 	addr = mmap_region(file, addr, len, vm_flags, pgoff, uf);
+	if (!IS_ERR_VALUE(addr)) {
+		struct vm_area_struct *vma = find_vma(mm, addr);
+
+		if (vma && vma->vm_start <= addr) {
+			struct hdn_mmap_request hdn_commit_req = hdn_req;
+
+			hdn_commit_req.file = vma->vm_file;
+			hdn_commit_req.prot = vma->vm_flags & VM_EXEC ?
+					      PROT_EXEC : 0;
+			hdn_commit_req.pgoff = vma->vm_pgoff +
+					       ((addr - vma->vm_start) >>
+						PAGE_SHIFT);
+			hdn_mmap_committed(&hdn_commit_req);
+		}
+	}
 	if (!IS_ERR_VALUE(addr) &&
 	    ((vm_flags & VM_LOCKED) ||
 	     (flags & (MAP_POPULATE | MAP_NONBLOCK)) == MAP_POPULATE))
@@ -652,6 +707,39 @@ static inline unsigned long stack_guard_placement(vm_flags_t vm_flags)
 	return 0;
 }
 
+#define HDN_RAND_THREADSTACK_MAX_PAGES 256
+
+static bool hdn_rand_threadstack_stack_like(unsigned long flags,
+					    vm_flags_t vm_flags)
+{
+	if (flags & MAP_STACK)
+		return true;
+	if (vm_flags & (VM_GROWSDOWN | VM_GROWSUP))
+		return true;
+
+	return false;
+}
+
+unsigned long hdn_rand_threadstack_offset(const struct file *filp,
+					  unsigned long addr,
+					  unsigned long flags,
+					  vm_flags_t vm_flags)
+{
+	if (!IS_ENABLED(CONFIG_SECURITY_HARDENING_RAND_THREADSTACK))
+		return 0;
+	if (filp || addr || (flags & MAP_FIXED))
+		return 0;
+	if ((flags & MAP_TYPE) != MAP_PRIVATE)
+		return 0;
+	if (!hdn_rand_threadstack_stack_like(flags, vm_flags))
+		return 0;
+	if (!randomize_va_space || (current->personality & ADDR_NO_RANDOMIZE))
+		return 0;
+
+	return ((unsigned long)(get_random_u8() % HDN_RAND_THREADSTACK_MAX_PAGES) + 1)
+		<< PAGE_SHIFT;
+}
+
 /*
  * Search for an unmapped address range.
  *
@@ -694,6 +782,8 @@ generic_get_unmapped_area(struct file *filp, unsigned long addr,
 	struct vm_area_struct *vma, *prev;
 	struct vm_unmapped_area_info info = {};
 	const unsigned long mmap_end = arch_get_mmap_end(addr, len, flags);
+	unsigned long threadstack_offset =
+		hdn_rand_threadstack_offset(filp, addr, flags, vm_flags);
 
 	if (len > mmap_end - mmap_min_addr)
 		return -ENOMEM;
@@ -714,6 +804,7 @@ generic_get_unmapped_area(struct file *filp, unsigned long addr,
 	info.low_limit = mm->mmap_base;
 	info.high_limit = mmap_end;
 	info.start_gap = stack_guard_placement(vm_flags);
+	info.threadstack_offset = threadstack_offset;
 	if (filp && is_file_hugepages(filp))
 		info.align_mask = huge_page_mask_align(filp);
 	return vm_unmapped_area(&info);
@@ -743,6 +834,8 @@ generic_get_unmapped_area_topdown(struct file *filp, unsigned long addr,
 	struct mm_struct *mm = current->mm;
 	struct vm_unmapped_area_info info = {};
 	const unsigned long mmap_end = arch_get_mmap_end(addr, len, flags);
+	unsigned long threadstack_offset =
+		hdn_rand_threadstack_offset(filp, addr, flags, vm_flags);
 
 	/* requested length too big for entire address space */
 	if (len > mmap_end - mmap_min_addr)
@@ -766,6 +859,7 @@ generic_get_unmapped_area_topdown(struct file *filp, unsigned long addr,
 	info.low_limit = PAGE_SIZE;
 	info.high_limit = arch_get_mmap_base(addr, mm->mmap_base);
 	info.start_gap = stack_guard_placement(vm_flags);
+	info.threadstack_offset = threadstack_offset;
 	if (filp && is_file_hugepages(filp))
 		info.align_mask = huge_page_mask_align(filp);
 	addr = vm_unmapped_area(&info);
@@ -781,6 +875,7 @@ generic_get_unmapped_area_topdown(struct file *filp, unsigned long addr,
 		info.flags = 0;
 		info.low_limit = TASK_UNMAPPED_BASE;
 		info.high_limit = mmap_end;
+		info.threadstack_offset = threadstack_offset;
 		addr = vm_unmapped_area(&info);
 	}
 
@@ -1334,24 +1429,36 @@ destroy:
  */
 bool may_expand_vm(struct mm_struct *mm, vm_flags_t flags, unsigned long npages)
 {
-	if (mm->total_vm + npages > rlimit(RLIMIT_AS) >> PAGE_SHIFT)
+	unsigned long wanted_pages = mm->total_vm + npages;
+
+	if (wanted_pages > rlimit(RLIMIT_AS) >> PAGE_SHIFT) {
+		hdn_record_resource_pressure(RLIMIT_AS,
+					     hdn_pages_to_bytes_saturated(
+						     wanted_pages));
 		return false;
+	}
 
 	if (is_data_mapping(flags) &&
 	    mm->data_vm + npages > rlimit(RLIMIT_DATA) >> PAGE_SHIFT) {
+		wanted_pages = mm->data_vm + npages;
+
 		/* Workaround for Valgrind */
 		if (rlimit(RLIMIT_DATA) == 0 &&
-		    mm->data_vm + npages <= rlimit_max(RLIMIT_DATA) >> PAGE_SHIFT)
+		    wanted_pages <= rlimit_max(RLIMIT_DATA) >> PAGE_SHIFT)
 			return true;
 
 		pr_warn_once("%s (%d): VmData %lu exceed data ulimit %lu. Update limits%s.\n",
 			     current->comm, current->pid,
-			     (mm->data_vm + npages) << PAGE_SHIFT,
+			     wanted_pages << PAGE_SHIFT,
 			     rlimit(RLIMIT_DATA),
 			     ignore_rlimit_data ? "" : " or use boot option ignore_rlimit_data");
 
-		if (!ignore_rlimit_data)
+		if (!ignore_rlimit_data) {
+			hdn_record_resource_pressure(RLIMIT_DATA,
+						     hdn_pages_to_bytes_saturated(
+							     wanted_pages));
 			return false;
+		}
 	}
 
 	return true;

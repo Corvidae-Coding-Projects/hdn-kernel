@@ -7,6 +7,7 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/fsnotify.h>
+#include <linux/hardening.h>
 #include <linux/poll.h>
 #include <linux/nospec.h>
 #include <linux/compat.h>
@@ -948,6 +949,10 @@ static int __io_read(struct io_kiocb *req, struct io_br_sel *sel,
 	if (unlikely(ret))
 		return ret;
 
+	ret = hdn_authorize_object_read(&req->file->f_path);
+	if (unlikely(ret))
+		return ret;
+
 	ret = io_iter_do_read(rw, &io->iter);
 
 	/*
@@ -1163,6 +1168,11 @@ int io_write(struct io_kiocb *req, unsigned int issue_flags)
 	ppos = io_kiocb_update_pos(req);
 
 	ret = rw_verify_area(WRITE, req->file, ppos, req->cqe.res);
+	if (unlikely(ret))
+		return ret;
+
+	ret = hdn_authorize_object_write_file(req->file,
+					      kiocb->ki_flags & IOCB_APPEND);
 	if (unlikely(ret))
 		return ret;
 

@@ -5,6 +5,7 @@
 
 #include <linux/printk.h>
 #include <linux/capability.h>
+#include <linux/kconfig.h>
 #include <linux/ratelimit.h>
 #include "internal.h"
 
@@ -63,7 +64,11 @@ static const struct ctl_table printk_sysctls[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax_sysadmin,
+#if IS_ENABLED(CONFIG_SECURITY_HARDENING_EXPLOIT_MITIGATIONS)
+		.extra1		= SYSCTL_ONE,
+#else
 		.extra1		= SYSCTL_ZERO,
+#endif
 		.extra2		= SYSCTL_ONE,
 	},
 	{
@@ -72,7 +77,11 @@ static const struct ctl_table printk_sysctls[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax_sysadmin,
+#if IS_ENABLED(CONFIG_SECURITY_HARDENING_EXPLOIT_MITIGATIONS)
+		.extra1		= SYSCTL_TWO,
+#else
 		.extra1		= SYSCTL_ZERO,
+#endif
 		.extra2		= SYSCTL_TWO,
 	},
 };

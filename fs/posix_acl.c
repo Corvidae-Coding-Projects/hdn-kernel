@@ -15,6 +15,7 @@
 #include <linux/slab.h>
 #include <linux/atomic.h>
 #include <linux/fs.h>
+#include <linux/hardening.h>
 #include <linux/sched.h>
 #include <linux/cred.h>
 #include <linux/posix_acl.h>
@@ -1122,6 +1123,10 @@ retry_deleg:
 	if (error)
 		goto out_inode_unlock;
 
+	error = hdn_authorize_object_xattr(dentry, HDN_XATTR_SET);
+	if (error)
+		goto out_inode_unlock;
+
 	error = security_inode_set_acl(idmap, dentry, acl_name, kacl);
 	if (error)
 		goto out_inode_unlock;
@@ -1182,6 +1187,10 @@ struct posix_acl *vfs_get_acl(struct mnt_idmap *idmap,
 	if (error)
 		return ERR_PTR(error);
 
+	error = hdn_authorize_object_xattr(dentry, HDN_XATTR_READ);
+	if (error)
+		return ERR_PTR(error);
+
 	if (!IS_POSIXACL(inode))
 		return ERR_PTR(-EOPNOTSUPP);
 	if (S_ISLNK(inode->i_mode))
@@ -1227,6 +1236,10 @@ retry_deleg:
 	 * us otherwise POSIX ACLs aren't subject to any VFS restrictions.
 	 */
 	error = may_write_xattr(idmap, inode);
+	if (error)
+		goto out_inode_unlock;
+
+	error = hdn_authorize_object_xattr(dentry, HDN_XATTR_REMOVE);
 	if (error)
 		goto out_inode_unlock;
 

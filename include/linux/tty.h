@@ -158,6 +158,8 @@ struct tty_operations;
  *		  them.
  * @ctrl.pktstatus: packet mode status (bitwise OR of %TIOCPKT_ constants)
  * @ctrl.packet: packet mode enabled
+ * @hdn_session_broker: parent thread group that created a PTY's controlling
+ *			session; retained across child-session teardown
  * @hw_stopped: not controlled by the tty layer, under @driver's control for CTS
  *		handling
  * @receive_room: bytes permitted to feed to @ldisc without any being lost
@@ -221,6 +223,10 @@ struct tty_struct {
 		unsigned char pktstatus;
 		bool packet;
 	} ctrl;
+
+#ifdef CONFIG_SECURITY_HARDENING
+	struct pid *hdn_session_broker;
+#endif
 
 	bool hw_stopped;
 	bool closing;

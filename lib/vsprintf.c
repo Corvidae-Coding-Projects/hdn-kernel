@@ -29,6 +29,7 @@
 #include <linux/hex.h>
 #include <linux/kernel.h>
 #include <linux/kallsyms.h>
+#include <linux/hardening.h>
 #include <linux/math64.h>
 #include <linux/uaccess.h>
 #include <linux/ioport.h>
@@ -856,7 +857,11 @@ static char *default_pointer(char *buf, char *end, const void *ptr,
 	return ptr_to_id(buf, end, ptr, spec);
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_EXPLOIT_MITIGATIONS
+int kptr_restrict __read_mostly = 2;
+#else
 int kptr_restrict __read_mostly;
+#endif
 
 static noinline_for_stack
 char *restricted_pointer(char *buf, char *end, const void *ptr,
@@ -999,6 +1004,9 @@ char *symbol_string(char *buf, char *end, void *ptr,
 	if (fmt[1] == 'R')
 		ptr = __builtin_extract_return_addr(ptr);
 	value = (unsigned long)ptr;
+
+	if (!hdn_kernel_symbol_disclose_allowed())
+		return string_nocheck(buf, end, "[hidden]", spec);
 
 #ifdef CONFIG_KALLSYMS
 	if (*fmt == 'B' && fmt[1] == 'b')

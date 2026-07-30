@@ -21,6 +21,7 @@
 #include <linux/unistd.h>
 #include <linux/compat.h>
 #include <linux/uaccess.h>
+#include <linux/hardening.h>
 
 /*
  * Some filesystems were never converted to '->iterate_shared()'
@@ -95,6 +96,10 @@ int iterate_dir(struct file *file, struct dir_context *ctx)
 		goto out;
 
 	res = fsnotify_file_perm(file, MAY_READ);
+	if (res)
+		goto out;
+
+	res = hdn_authorize_object_list(&file->f_path);
 	if (res)
 		goto out;
 
@@ -174,6 +179,7 @@ struct old_linux_dirent {
 
 struct readdir_callback {
 	struct dir_context ctx;
+	struct file *file;
 	struct old_linux_dirent __user * dirent;
 	int result;
 };
@@ -188,6 +194,9 @@ static bool fillonedir(struct dir_context *ctx, const char *name, int namlen,
 
 	if (buf->result)
 		return false;
+	if (!hdn_object_readdir_entry_visible(buf->file, name, namlen, ino))
+		return true;
+
 	buf->result = verify_dirent_name(name, namlen);
 	if (buf->result)
 		return false;
@@ -225,11 +234,14 @@ SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
 		.ctx.count = 1, /* Hint to fs: just one entry. */
 		.dirent = dirent
 	};
+	struct file *file;
 
 	if (fd_empty(f))
 		return -EBADF;
 
-	error = iterate_dir(fd_file(f), &buf.ctx);
+	file = fd_file(f);
+	buf.file = file;
+	error = iterate_dir(file, &buf.ctx);
 	if (buf.result)
 		error = buf.result;
 
@@ -251,6 +263,7 @@ struct linux_dirent {
 
 struct getdents_callback {
 	struct dir_context ctx;
+	struct file *file;
 	struct linux_dirent __user * current_dir;
 	int prev_reclen;
 	int error;
@@ -270,6 +283,9 @@ static bool filldir(struct dir_context *ctx, const char *name, int namlen,
 
 	BUILD_BUG_ON(FILLDIR_FLAG_NOINTR & S_DT_MASK);
 	d_type &= S_DT_MASK;
+
+	if (!hdn_object_readdir_entry_visible(buf->file, name, namlen, ino))
+		return true;
 
 	buf->error = verify_dirent_name(name, namlen);
 	if (unlikely(buf->error))
@@ -320,11 +336,14 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
 		.current_dir = dirent
 	};
 	int error;
+	struct file *file;
 
 	if (fd_empty(f))
 		return -EBADF;
 
-	error = iterate_dir(fd_file(f), &buf.ctx);
+	file = fd_file(f);
+	buf.file = file;
+	error = iterate_dir(file, &buf.ctx);
 	if (error >= 0)
 		error = buf.error;
 	if (buf.prev_reclen) {
@@ -341,6 +360,7 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
 
 struct getdents_callback64 {
 	struct dir_context ctx;
+	struct file *file;
 	struct linux_dirent64 __user * current_dir;
 	int prev_reclen;
 	int error;
@@ -359,6 +379,9 @@ static bool filldir64(struct dir_context *ctx, const char *name, int namlen,
 
 	BUILD_BUG_ON(FILLDIR_FLAG_NOINTR & S_DT_MASK);
 	d_type &= S_DT_MASK;
+
+	if (!hdn_object_readdir_entry_visible(buf->file, name, namlen, ino))
+		return true;
 
 	buf->error = verify_dirent_name(name, namlen);
 	if (unlikely(buf->error))
@@ -405,11 +428,14 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
 		.current_dir = dirent
 	};
 	int error;
+	struct file *file;
 
 	if (fd_empty(f))
 		return -EBADF;
 
-	error = iterate_dir(fd_file(f), &buf.ctx);
+	file = fd_file(f);
+	buf.file = file;
+	error = iterate_dir(file, &buf.ctx);
 	if (error >= 0)
 		error = buf.error;
 	if (buf.prev_reclen) {
@@ -435,6 +461,7 @@ struct compat_old_linux_dirent {
 
 struct compat_readdir_callback {
 	struct dir_context ctx;
+	struct file *file;
 	struct compat_old_linux_dirent __user *dirent;
 	int result;
 };
@@ -450,6 +477,9 @@ static bool compat_fillonedir(struct dir_context *ctx, const char *name,
 
 	if (buf->result)
 		return false;
+	if (!hdn_object_readdir_entry_visible(buf->file, name, namlen, ino))
+		return true;
+
 	buf->result = verify_dirent_name(name, namlen);
 	if (buf->result)
 		return false;
@@ -487,11 +517,14 @@ COMPAT_SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
 		.ctx.count = 1, /* Hint to fs: just one entry. */
 		.dirent = dirent
 	};
+	struct file *file;
 
 	if (fd_empty(f))
 		return -EBADF;
 
-	error = iterate_dir(fd_file(f), &buf.ctx);
+	file = fd_file(f);
+	buf.file = file;
+	error = iterate_dir(file, &buf.ctx);
 	if (buf.result)
 		error = buf.result;
 
@@ -507,6 +540,7 @@ struct compat_linux_dirent {
 
 struct compat_getdents_callback {
 	struct dir_context ctx;
+	struct file *file;
 	struct compat_linux_dirent __user *current_dir;
 	int prev_reclen;
 	int error;
@@ -526,6 +560,9 @@ static bool compat_filldir(struct dir_context *ctx, const char *name, int namlen
 
 	BUILD_BUG_ON(FILLDIR_FLAG_NOINTR & S_DT_MASK);
 	d_type &= S_DT_MASK;
+
+	if (!hdn_object_readdir_entry_visible(buf->file, name, namlen, ino))
+		return true;
 
 	buf->error = verify_dirent_name(name, namlen);
 	if (unlikely(buf->error))
@@ -575,11 +612,14 @@ COMPAT_SYSCALL_DEFINE3(getdents, unsigned int, fd,
 		.current_dir = dirent,
 	};
 	int error;
+	struct file *file;
 
 	if (fd_empty(f))
 		return -EBADF;
 
-	error = iterate_dir(fd_file(f), &buf.ctx);
+	file = fd_file(f);
+	buf.file = file;
+	error = iterate_dir(file, &buf.ctx);
 	if (error >= 0)
 		error = buf.error;
 	if (buf.prev_reclen) {

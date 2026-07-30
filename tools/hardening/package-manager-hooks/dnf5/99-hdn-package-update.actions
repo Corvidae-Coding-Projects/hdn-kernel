@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# DNF5/libdnf5 actions-plugin integration for HDN protected system updates.
+# Install under the distro's libdnf5 actions.d config directory, for example:
+# /etc/dnf/libdnf5-plugins/actions.d/99-hdn-package-update.actions.
+#
+# Empty package filter and direction fields make the action run once per
+# transaction instead of once per package. raise_error=1 fails loudly if the
+# product reseal hook fails.
+
+post_transaction:::enabled=host-only raise_error=1:/usr/libexec/hdn-package-hook image-seal-default

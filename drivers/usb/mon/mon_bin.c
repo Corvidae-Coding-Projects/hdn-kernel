@@ -17,6 +17,7 @@
 #include <linux/usb.h>
 #include <linux/poll.h>
 #include <linux/compat.h>
+#include <linux/hardening.h>
 #include <linux/mm.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
@@ -693,6 +694,9 @@ static int mon_bin_open(struct inode *inode, struct file *file)
 		mutex_unlock(&mon_lock);
 		return -ENODEV;
 	}
+	rc = hdn_authorize_usb_monitor(mbus->u_bus ? mbus->u_bus->busnum : 0);
+	if (rc)
+		goto err_alloc;
 
 	rp = kzalloc_obj(struct mon_reader_bin);
 	if (rp == NULL) {

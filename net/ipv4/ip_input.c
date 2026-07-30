@@ -110,6 +110,7 @@
 
 #include <linux/module.h>
 #include <linux/types.h>
+#include <linux/hardening.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/errno.h>
@@ -215,8 +216,9 @@ resubmit:
 		if (!raw) {
 			if (xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
 				__IP_INC_STATS(net, IPSTATS_MIB_INUNKNOWNPROTOS);
-				icmp_send(skb, ICMP_DEST_UNREACH,
-					  ICMP_PROT_UNREACH, 0);
+				if (!hdn_blackhole_remote_skb(skb))
+					icmp_send(skb, ICMP_DEST_UNREACH,
+						  ICMP_PROT_UNREACH, 0);
 			}
 			kfree_skb_reason(skb, SKB_DROP_REASON_IP_NOPROTO);
 		} else {

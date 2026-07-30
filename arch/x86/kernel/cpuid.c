@@ -33,6 +33,7 @@
 #include <linux/device.h>
 #include <linux/cpu.h>
 #include <linux/notifier.h>
+#include <linux/hardening.h>
 #include <linux/uaccess.h>
 #include <linux/gfp.h>
 #include <linux/completion.h>
@@ -101,6 +102,12 @@ static int cpuid_open(struct inode *inode, struct file *file)
 {
 	unsigned int cpu;
 	struct cpuinfo_x86 *c;
+	int err;
+
+	err = hdn_authorize(HDN_AUTH_RAW_IO, HDN_TRANS_RAW_IO,
+			    HDN_REASON_PROFILE_DENIED, -EPERM);
+	if (err)
+		return err;
 
 	cpu = iminor(file_inode(file));
 	if (cpu >= nr_cpu_ids || !cpu_online(cpu))

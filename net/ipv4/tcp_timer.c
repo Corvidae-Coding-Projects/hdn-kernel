@@ -21,6 +21,7 @@
 
 #include <linux/module.h>
 #include <linux/gfp.h>
+#include <linux/hardening.h>
 #include <net/tcp.h>
 #include <net/tcp_ecn.h>
 #include <net/rstreason.h>
@@ -269,10 +270,14 @@ static int tcp_write_timeout(struct sock *sk)
 		}
 
 		retry_until = READ_ONCE(net->ipv4.sysctl_tcp_retries2);
+		if (sk->sk_state == TCP_LAST_ACK)
+			retry_until = hdn_tcp_lastack_retries(retry_until);
 		if (sock_flag(sk, SOCK_DEAD)) {
 			const bool alive = icsk->icsk_rto < tcp_rto_max(sk);
 
 			retry_until = tcp_orphan_retries(sk, alive);
+			if (sk->sk_state == TCP_LAST_ACK)
+				retry_until = hdn_tcp_lastack_retries(retry_until);
 			do_reset = alive ||
 				!retransmits_timed_out(sk, retry_until, 0);
 

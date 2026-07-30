@@ -3,6 +3,7 @@
 #define pr_fmt(fmt) "kprobes: " fmt
 
 #include <linux/kprobes.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/extable.h>
 #include <linux/slab.h>
 #include <linux/stop_machine.h>

@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Root-profile policy used by the QEMU smoke test to prove privileged exec
+# transitions fail when the target profile lacks CRED_CHANGE.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 no-cred-change-root
+
+allow 2 POLICY_ADMIN TTY_ACCESS

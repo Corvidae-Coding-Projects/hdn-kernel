@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Policy used by the QEMU smoke test to prove runtime path resolution for
+# executable identity and interpreter chains.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 privileged
+profile 3 identity-binary
+profile 4 identity-script
+
+allow 2 BPF_LOAD PERF_OPEN USERNS_CREATE MODULE_LOAD MODULE_AUTOLOAD
+allow 2 PTRACE PROC_DISCLOSE PROC_TASK_VIEW DEBUGFS SYSFS_MUTATE
+allow 2 KEXEC_LOAD FIRMWARE_LOAD IO_URING_RESTRICTED_OP
+allow 2 KERNEL_LOG_READ KERNEL_LOG_WRITE RAW_IO MOUNT_ADMIN POLICY_ADMIN
+allow 2 NAMESPACE_ADMIN CRED_CHANGE CHROOT_ADMIN TRUSTED_EXEC_BYPASS
+allow 2 IPC_ADMIN TTY_INJECT TTY_ACCESS FUSE_MOUNT ROFS_RELAX USB_ATTACH USB_MONITOR
+allow 2 SOCKET_CREATE SOCKET_CONNECT SOCKET_SERVER TIME_ADMIN RESOURCE_ADMIN
+allow 2 BLOCK_DEVICE_ACCESS BLOCK_DEVICE_ADMIN SIGNAL PROCESS_MEMORY MEMORY_MIGRATE PROCESS_FD
+allow 3 CRED_CHANGE
+feature 3 INHERIT_UNMATCHED_EXEC
+
+exec 3 path /hdn-identity-trusted
+exec 4 interpreter-path /hdn_smoke original-path /hdn-identity-script
+exec inherit path /hdn-identity-inherit
+exec inherit path /hdn-identity-parent-inherit parent 3

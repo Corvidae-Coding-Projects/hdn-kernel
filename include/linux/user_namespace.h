@@ -82,6 +82,7 @@ struct user_namespace {
 	kuid_t			owner;
 	kgid_t			group;
 	struct ns_common	ns;
+	u64			hardening_profile_id;
 	unsigned long		flags;
 	/* parent_could_setfcap: true if the creator if this ns had CAP_SETFCAP
 	 * in its effective capability set at the child ns creation time. */

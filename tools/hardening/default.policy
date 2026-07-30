@@ -1,0 +1,44 @@
+# Built-in-style starter policy for the hardening profile loader.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 privileged
+profile 3 refresh-jit-test
+
+# Daily-driver baseline for the default profile. Ordinary unprivileged
+# userland must keep working: system services that drop privileges after
+# fork (systemd User=/Group=/capabilities), and normal application
+# networking. The point of the default profile is that the kernel-surface
+# attack authorities below (BPF, modules, kexec, userns, perf, raw IO,
+# ptrace across profiles, mount, debugfs, ...) stay denied — not to block
+# routine credential drops or socket use. Tighter product profiles can drop
+# these grants for confined subjects.
+allow 1 CRED_CHANGE
+allow 1 SOCKET_CREATE SOCKET_CONNECT SOCKET_SERVER
+
+allow 2 BPF_LOAD PERF_OPEN USERNS_CREATE MODULE_LOAD MODULE_AUTOLOAD
+allow 2 PTRACE PROC_DISCLOSE PROC_TASK_VIEW DEBUGFS SYSFS_MUTATE SYSFS_READ
+allow 2 KEXEC_LOAD FIRMWARE_LOAD IO_URING_RESTRICTED_OP
+allow 2 KERNEL_LOG_READ KERNEL_LOG_WRITE RAW_IO MOUNT_ADMIN POLICY_ADMIN
+allow 2 NAMESPACE_ADMIN CRED_CHANGE CHROOT_ADMIN TRUSTED_EXEC_BYPASS
+allow 2 IPC_ADMIN TTY_INJECT TTY_ACCESS FUSE_MOUNT ROFS_RELAX USB_ATTACH USB_MONITOR
+allow 2 SOCKET_CREATE SOCKET_CONNECT SOCKET_SERVER TIME_ADMIN RESOURCE_ADMIN
+allow 2 BLOCK_DEVICE_ACCESS BLOCK_DEVICE_ADMIN SIGNAL PROCESS_MEMORY MEMORY_MIGRATE PROCESS_FD
+audit 2 MODULE_LOAD KEXEC_LOAD
+
+# The QEMU selftest atomically replaces this executable, proves its resolved
+# identity no longer matches, and then proves a same-policy runtime refresh
+# safely binds the replacement inode without opening general policy mutation.
+mem 3 ALLOW_JIT_EXEC_AFTER_WRITE
+exec 3 path /hdn-refresh-target
+
+# Packaged drivers still pass the normal enforced kernel signature check. The
+# signed policy delegates module identity to that keyring instead of carrying
+# thousands of fragile inode rules. Firmware requests remain privileged and
+# are sourced from the product-controlled, read-only system firmware tree.
+module 2 signed
+firmware 2 any

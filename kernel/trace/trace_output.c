@@ -15,6 +15,8 @@
 #include <linux/idr.h>
 #include <linux/btf.h>
 #include <linux/bpf.h>
+#include <linux/hardening.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/hashtable.h>
 
 #include "trace_output.h"
@@ -393,6 +395,11 @@ static inline const char *kretprobed(const char *name, unsigned long addr)
 void
 trace_seq_print_sym(struct trace_seq *s, unsigned long address, bool offset)
 {
+	if (!hdn_kernel_symbol_disclose_allowed()) {
+		trace_seq_puts(s, "[hidden]");
+		return;
+	}
+
 #ifdef CONFIG_KALLSYMS
 	char str[KSYM_SYMBOL_LEN];
 	const char *name;
@@ -730,6 +737,8 @@ void print_function_args(struct trace_seq *s, unsigned long *args,
 	trace_seq_printf(s, "(");
 
 	if (!args)
+		goto out;
+	if (!hdn_kernel_symbol_disclose_allowed())
 		goto out;
 	if (lookup_symbol_name(func, name))
 		goto out;

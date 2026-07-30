@@ -6,6 +6,7 @@
 #include <linux/file.h>
 #include <linux/uio.h>
 #include <linux/fsnotify.h>
+#include <linux/hardening.h>
 #include <linux/security.h>
 #include <linux/export.h>
 #include <linux/syscalls.h>
@@ -112,6 +113,13 @@ int remap_verify_area(struct file *file, loff_t pos, loff_t len, bool write)
 		return -EINVAL;
 
 	ret = security_file_permission(file, mask);
+	if (ret)
+		return ret;
+
+	if (write)
+		ret = hdn_authorize_object_write_file(file, false);
+	else
+		ret = hdn_authorize_object_read(&file->f_path);
 	if (ret)
 		return ret;
 
@@ -388,6 +396,14 @@ loff_t vfs_clone_file_range(struct file *file_in, loff_t pos_in,
 	if (ret < 0)
 		return ret;
 
+	ret = hdn_authorize_object_read(&file_in->f_path);
+	if (ret)
+		return ret;
+
+	ret = hdn_authorize_object_write_file(file_out, false);
+	if (ret)
+		return ret;
+
 	if (!file_in->f_op->remap_file_range)
 		return -EOPNOTSUPP;
 
@@ -514,6 +530,10 @@ int vfs_dedupe_file_range(struct file *file, struct file_dedupe_range *same)
 
 	if (!S_ISREG(src->i_mode))
 		return -EINVAL;
+
+	ret = hdn_authorize_object_read(&file->f_path);
+	if (ret)
+		return ret;
 
 	if (!file->f_op->remap_file_range)
 		return -EOPNOTSUPP;

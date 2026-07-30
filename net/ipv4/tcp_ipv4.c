@@ -51,6 +51,7 @@
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/module.h>
+#include <linux/hardening.h>
 #include <linux/random.h>
 #include <linux/cache.h>
 #include <linux/fips.h>
@@ -2346,7 +2347,9 @@ csum_error:
 bad_packet:
 		__TCP_INC_STATS(net, TCP_MIB_INERRS);
 	} else {
-		tcp_v4_send_reset(NULL, skb, sk_rst_convert_drop_reason(drop_reason));
+		if (!hdn_blackhole_remote_skb(skb))
+			tcp_v4_send_reset(NULL, skb,
+					  sk_rst_convert_drop_reason(drop_reason));
 	}
 
 discard_it:

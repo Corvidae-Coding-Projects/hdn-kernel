@@ -23,6 +23,7 @@
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/types.h>
+#include <linux/hardening.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
@@ -1888,7 +1889,9 @@ csum_error:
 bad_packet:
 		__TCP_INC_STATS(net, TCP_MIB_INERRS);
 	} else {
-		tcp_v6_send_reset(NULL, skb, sk_rst_convert_drop_reason(drop_reason));
+		if (!hdn_blackhole_remote_skb(skb))
+			tcp_v6_send_reset(NULL, skb,
+					  sk_rst_convert_drop_reason(drop_reason));
 	}
 
 discard_it:

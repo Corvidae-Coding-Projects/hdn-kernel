@@ -14,6 +14,7 @@
 #include <linux/proc_ns.h>
 #include <linux/pseudo_fs.h>
 #include <linux/ptrace.h>
+#include <linux/hardening.h>
 #include <linux/seq_file.h>
 #include <uapi/linux/pidfd.h>
 #include <linux/ipc_namespace.h>
@@ -244,12 +245,18 @@ void pidfs_free_pid(struct pid *pid)
 static void pidfd_show_fdinfo(struct seq_file *m, struct file *f)
 {
 	struct pid *pid = pidfd_pid(f);
-	struct pid_namespace *ns;
+	struct task_struct *task __free(put_task) = NULL;
+	struct pid_namespace *ns = NULL;
 	pid_t nr = -1;
 
 	if (likely(pid_has_task(pid, PIDTYPE_PID))) {
-		ns = proc_pid_ns(file_inode(m->file)->i_sb);
-		nr = pid_nr_ns(pid, ns);
+		task = get_pid_task(pid, PIDTYPE_PID);
+		if (task && hdn_authorize_pidfd_open(task)) {
+			nr = 0;
+		} else {
+			ns = proc_pid_ns(file_inode(m->file)->i_sb);
+			nr = pid_nr_ns(pid, ns);
+		}
 	}
 
 	seq_put_decimal_ll(m, "Pid:\t", nr);
@@ -362,6 +369,14 @@ static long pidfd_info(struct file *file, unsigned int cmd, unsigned long arg)
 	if (!pid_in_current_pidns(pid))
 		return -EREMOTE;
 
+	task = get_pid_task(pid, PIDTYPE_PID);
+	if (task) {
+		int ret = hdn_authorize_pidfd_open(task);
+
+		if (ret)
+			return ret;
+	}
+
 	attr = READ_ONCE(pid->attr);
 	if (mask & PIDFD_INFO_EXIT) {
 		if (test_bit(PIDFS_ATTR_BIT_EXIT, &attr->attr_mask)) {
@@ -384,7 +399,6 @@ static long pidfd_info(struct file *file, unsigned int cmd, unsigned long arg)
 		}
 	}
 
-	task = get_pid_task(pid, PIDTYPE_PID);
 	if (!task) {
 		/*
 		 * If the task has already been reaped, only exit
@@ -507,6 +521,7 @@ static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	struct task_struct *task __free(put_task) = NULL;
 	struct nsproxy *nsp __free(put_nsproxy) = NULL;
 	struct ns_common *ns_common = NULL;
+	int ret;
 
 	if (!pidfs_ioctl_valid(cmd))
 		return -ENOIOCTLCMD;
@@ -526,6 +541,10 @@ static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	task = get_pid_task(pidfd_pid(file), PIDTYPE_PID);
 	if (!task)
 		return -ESRCH;
+
+	ret = hdn_authorize_pidfd_open(task);
+	if (ret)
+		return ret;
 
 	if (arg)
 		return -EINVAL;

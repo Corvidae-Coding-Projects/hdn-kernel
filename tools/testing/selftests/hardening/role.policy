@@ -1,0 +1,14 @@
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 privileged-root
+
+role policy-admin allow POLICY_ADMIN
+role credential-admin allow CRED_CHANGE
+role policy-audit audit POLICY_ADMIN
+role desktop-admin include policy-admin credential-admin policy-audit
+
+use-role 2 desktop-admin

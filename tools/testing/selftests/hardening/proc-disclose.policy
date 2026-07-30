@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Prove that read-only proc disclosure does not imply direct ptrace authority.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 policy-admin
+profile 3 proc-reader
+
+allow 2 POLICY_ADMIN CRED_CHANGE TTY_ACCESS
+allow 3 CRED_CHANGE PROC_DISCLOSE
+
+exec 3 path /hdn-proc-reader

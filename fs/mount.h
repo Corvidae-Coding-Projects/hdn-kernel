@@ -21,6 +21,7 @@ struct mnt_namespace {
 	wait_queue_head_t	poll;
 	u64			seq_origin; /* Sequence number of origin mount namespace */
 	u64 event;
+	u64			hardening_profile_id;
 #ifdef CONFIG_FSNOTIFY
 	__u32			n_fsnotify_mask;
 	struct fsnotify_mark_connector __rcu *n_fsnotify_marks;

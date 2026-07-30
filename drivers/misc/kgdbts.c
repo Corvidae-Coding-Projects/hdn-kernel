@@ -93,7 +93,7 @@
 #include <linux/kthread.h>
 #include <linux/module.h>
 #include <linux/sched/task.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 
 #include <asm/sections.h>
 #include <asm/rwonce.h>

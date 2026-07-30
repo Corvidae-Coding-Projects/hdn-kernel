@@ -12,7 +12,7 @@
 #include <linux/cpu.h>
 #include <linux/errno.h>
 #include <linux/init.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/kernel.h>
 #include <linux/nmi.h>
 #include <linux/personality.h>

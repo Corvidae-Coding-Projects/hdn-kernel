@@ -10,10 +10,24 @@
 #include <linux/mm.h>
 #include <linux/io.h>
 #include <linux/btf.h>
+#include <linux/hardening.h>
 
 /* See scripts/link-vmlinux.sh, gen_btf() func for details */
 extern char __start_BTF[];
 extern char __stop_BTF[];
+
+ssize_t btf_sysfs_read(struct file *file, struct kobject *kobj,
+		       const struct bin_attribute *attr, char *buf,
+		       loff_t off, size_t len)
+{
+	int err;
+
+	err = hdn_authorize_kernel_symbol_lookup_transition(HDN_TRANS_SYSFS_READ);
+	if (err)
+		return err;
+
+	return sysfs_bin_attr_simple_read(file, kobj, attr, buf, off, len);
+}
 
 static int btf_sysfs_vmlinux_mmap(struct file *filp, struct kobject *kobj,
 				  const struct bin_attribute *attr,
@@ -23,6 +37,11 @@ static int btf_sysfs_vmlinux_mmap(struct file *filp, struct kobject *kobj,
 	size_t vm_size = vma->vm_end - vma->vm_start;
 	phys_addr_t addr = __pa_symbol(__start_BTF);
 	unsigned long pfn = addr >> PAGE_SHIFT;
+	int err;
+
+	err = hdn_authorize_kernel_symbol_lookup_transition(HDN_TRANS_SYSFS_READ);
+	if (err)
+		return err;
 
 	if (attr->private != __start_BTF || !PAGE_ALIGNED(addr))
 		return -EINVAL;
@@ -45,7 +64,7 @@ static int btf_sysfs_vmlinux_mmap(struct file *filp, struct kobject *kobj,
 
 static struct bin_attribute bin_attr_btf_vmlinux __ro_after_init = {
 	.attr = { .name = "vmlinux", .mode = 0444, },
-	.read = sysfs_bin_attr_simple_read,
+	.read = btf_sysfs_read,
 	.mmap = btf_sysfs_vmlinux_mmap,
 };
 

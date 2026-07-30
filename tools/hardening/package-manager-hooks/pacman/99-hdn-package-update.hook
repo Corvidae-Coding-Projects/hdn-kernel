@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# pacman/libalpm integration for HDN protected system updates.
+# Install as /usr/share/libalpm/hooks/99-hdn-package-update.hook.
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = *
+
+[Action]
+Description = Resealing protected system files
+When = PostTransaction
+Exec = /usr/libexec/hdn-package-hook image-seal-default
+AbortOnFail

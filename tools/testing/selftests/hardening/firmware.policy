@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Policy used by the QEMU smoke test to prove firmware allow-listing by
+# kernel-requested firmware name.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 privileged
+
+allow 2 FIRMWARE_LOAD POLICY_ADMIN SYSFS_MUTATE TTY_ACCESS
+audit 2 FIRMWARE_LOAD
+
+firmware 2 name hdn-allowed-fw.bin

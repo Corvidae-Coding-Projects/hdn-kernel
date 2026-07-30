@@ -19,6 +19,7 @@
 #include <linux/mm_types.h>
 #include <linux/mm.h>			/* find_and_lock_vma() */
 #include <linux/vmalloc.h>
+#include <linux/hardening.h>
 
 #include <asm/cpufeature.h>		/* boot_cpu_has, ...		*/
 #include <asm/traps.h>			/* dotraplinkage, ...		*/
@@ -712,6 +713,7 @@ oops:
 	/* Executive summary in case the body of the oops scrolled away */
 	printk(KERN_DEFAULT "CR2: %016lx\n", address);
 
+	hdn_report_kernel_lockout();
 	oops_end(flags, regs, sig);
 }
 
@@ -721,6 +723,10 @@ kernelmode_fixup_or_oops(struct pt_regs *regs, unsigned long error_code,
 			 u32 pkey)
 {
 	WARN_ON_ONCE(user_mode(regs));
+
+	if ((error_code & (X86_PF_WRITE | X86_PF_PROT | X86_PF_USER)) ==
+	    (X86_PF_WRITE | X86_PF_PROT))
+		hdn_report_sealed_write_fault(address);
 
 	/* Are we prepared to handle this kernel fault? */
 	if (fixup_exception(regs, X86_TRAP_PF, error_code, address))

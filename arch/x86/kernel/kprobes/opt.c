@@ -14,7 +14,7 @@
 #include <linux/preempt.h>
 #include <linux/extable.h>
 #include <linux/kdebug.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/kgdb.h>
 #include <linux/ftrace.h>
 #include <linux/objtool.h>

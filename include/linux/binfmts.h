@@ -65,6 +65,16 @@ struct linux_binprm {
 	unsigned interp_flags;
 	int execfd;		/* File descriptor of the executable */
 	unsigned long exec;
+	u64 hardening_profile_id;
+	u64 hardening_original_dev_major;
+	u64 hardening_original_dev_minor;
+	u64 hardening_original_ino;
+	u64 hardening_exec_memory_flags;
+	bool hardening_interpreted;
+	bool hardening_privileged_exec;
+	bool hardening_privileged_lineage;
+	bool hardening_profile_pinned;
+	bool hardening_profile_inherit_audit;
 
 	struct rlimit rlim_stack; /* Saved RLIMIT_STACK used during exec. */
 

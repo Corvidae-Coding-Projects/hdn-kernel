@@ -14,6 +14,7 @@
 #include <linux/smp.h>
 #include <linux/idr.h>
 #include <linux/file.h>
+#include <linux/hardening.h>
 #include <linux/poll.h>
 #include <linux/slab.h>
 #include <linux/hash.h>
@@ -491,8 +492,10 @@ static __always_inline bool is_guest_mediated_pmu_loaded(void)
  *   0 - disallow raw tracepoint access for unpriv
  *   1 - disallow cpu events for unpriv
  *   2 - disallow kernel profiling for unpriv
+ *   3 - disallow all unpriv perf event use
  */
-int sysctl_perf_event_paranoid __read_mostly = 2;
+int sysctl_perf_event_paranoid __read_mostly =
+	IS_ENABLED(CONFIG_SECURITY_HARDENING_UNPRIV_PERF_KERNEL) ? 3 : 2;
 
 /* Minimum for 512 kiB + 1 user control page. 'free' kiB per user. */
 static int sysctl_perf_event_mlock __read_mostly = 512 + (PAGE_SIZE / 1024);
@@ -579,7 +582,13 @@ static const struct ctl_table events_core_sysctl_table[] = {
 		.data		= &sysctl_perf_event_paranoid,
 		.maxlen		= sizeof(sysctl_perf_event_paranoid),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
+		.proc_handler	= proc_dointvec_minmax,
+#if IS_ENABLED(CONFIG_SECURITY_HARDENING_UNPRIV_PERF_KERNEL)
+		.extra1		= SYSCTL_THREE,
+#else
+		.extra1		= SYSCTL_NEG_ONE,
+		.extra2		= SYSCTL_THREE,
+#endif
 	},
 	{
 		.procname	= "perf_event_mlock_kb",
@@ -13825,6 +13834,11 @@ SYSCALL_DEFINE5(perf_event_open,
 		return -EINVAL;
 
 	err = perf_copy_attr(attr_uptr, &attr);
+	if (err)
+		return err;
+
+	err = hdn_authorize_perf_event_open(!attr.exclude_kernel,
+					    attr.namespaces, pid, cpu, flags);
 	if (err)
 		return err;
 

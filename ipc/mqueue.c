@@ -17,6 +17,7 @@
 #include <linux/pagemap.h>
 #include <linux/file.h>
 #include <linux/mount.h>
+#include <linux/hardening.h>
 #include <linux/fs_context.h>
 #include <linux/namei.h>
 #include <linux/sysctl.h>
@@ -370,13 +371,18 @@ static struct inode *mqueue_get_inode(struct super_block *sb,
 		mq_bytes += mq_treesize;
 		info->ucounts = get_ucounts(current_ucounts());
 		if (info->ucounts) {
+			unsigned long msgqueue_wanted;
 			long msgqueue;
 
 			spin_lock(&mq_lock);
 			msgqueue = inc_rlimit_ucounts(info->ucounts, UCOUNT_RLIMIT_MSGQUEUE, mq_bytes);
 			if (msgqueue == LONG_MAX || msgqueue > rlimit(RLIMIT_MSGQUEUE)) {
+				msgqueue_wanted = msgqueue == LONG_MAX ?
+					ULONG_MAX : (unsigned long)msgqueue;
 				dec_rlimit_ucounts(info->ucounts, UCOUNT_RLIMIT_MSGQUEUE, mq_bytes);
 				spin_unlock(&mq_lock);
+				hdn_record_resource_pressure(RLIMIT_MSGQUEUE,
+							     msgqueue_wanted);
 				put_ucounts(info->ucounts);
 				info->ucounts = NULL;
 				/* mqueue_evict_inode() releases info->messages */
@@ -865,6 +871,7 @@ static int prepare_open(struct dentry *dentry, int oflag, int ro,
 	static const int oflag2acc[O_ACCMODE] = { MAY_READ, MAY_WRITE,
 						  MAY_READ | MAY_WRITE };
 	int acc;
+	int ret;
 
 	if (d_really_is_negative(dentry)) {
 		if (!(oflag & O_CREAT))
@@ -882,7 +889,12 @@ static int prepare_open(struct dentry *dentry, int oflag, int ro,
 	if ((oflag & O_ACCMODE) == (O_RDWR | O_WRONLY))
 		return -EINVAL;
 	acc = oflag2acc[oflag & O_ACCMODE];
-	return inode_permission(&nop_mnt_idmap, d_inode(dentry), acc);
+	ret = inode_permission(&nop_mnt_idmap, d_inode(dentry), acc);
+	if (ret)
+		return ret;
+
+	return hdn_authorize_posix_mqueue_access(current->nsproxy->ipc_ns,
+						 d_inode(dentry), acc);
 }
 
 static struct file *mqueue_file_open(struct filename *name,
@@ -1070,6 +1082,10 @@ static int do_mq_timedsend(mqd_t mqdes, const char __user *u_msg_ptr,
 
 	if (unlikely(!(fd_file(f)->f_mode & FMODE_WRITE)))
 		return -EBADF;
+	ret = hdn_authorize_posix_mqueue_access(current->nsproxy->ipc_ns,
+						inode, MAY_WRITE);
+	if (ret)
+		return ret;
 
 	if (unlikely(msg_len > info->attr.mq_msgsize))
 		return -EMSGSIZE;
@@ -1170,6 +1186,10 @@ static int do_mq_timedreceive(mqd_t mqdes, char __user *u_msg_ptr,
 
 	if (unlikely(!(fd_file(f)->f_mode & FMODE_READ)))
 		return -EBADF;
+	ret = hdn_authorize_posix_mqueue_access(current->nsproxy->ipc_ns,
+						inode, MAY_READ);
+	if (ret)
+		return ret;
 
 	/* checks if buffer is big enough */
 	if (unlikely(msg_len < info->attr.mq_msgsize))
@@ -1331,6 +1351,11 @@ retry:
 	}
 	info = MQUEUE_I(inode);
 
+	ret = hdn_authorize_posix_mqueue_access(current->nsproxy->ipc_ns,
+						inode, MAY_WRITE);
+	if (ret)
+		goto out;
+
 	ret = 0;
 	spin_lock(&info->lock);
 	if (notification == NULL) {
@@ -1388,6 +1413,7 @@ static int do_mq_getsetattr(int mqdes, struct mq_attr *new, struct mq_attr *old)
 {
 	struct inode *inode;
 	struct mqueue_inode_info *info;
+	int ret;
 
 	if (new && (new->mq_flags & (~O_NONBLOCK)))
 		return -EINVAL;
@@ -1401,6 +1427,11 @@ static int do_mq_getsetattr(int mqdes, struct mq_attr *new, struct mq_attr *old)
 
 	inode = file_inode(fd_file(f));
 	info = MQUEUE_I(inode);
+	ret = hdn_authorize_posix_mqueue_access(current->nsproxy->ipc_ns,
+						inode,
+						new ? MAY_WRITE : MAY_READ);
+	if (ret)
+		return ret;
 
 	spin_lock(&info->lock);
 

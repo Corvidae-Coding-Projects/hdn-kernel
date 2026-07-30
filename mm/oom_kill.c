@@ -44,6 +44,7 @@
 #include <linux/init.h>
 #include <linux/mmu_notifier.h>
 #include <linux/cred.h>
+#include <linux/hardening.h>
 #include <linux/nmi.h>
 
 #include <asm/tlb.h>
@@ -1237,6 +1238,13 @@ SYSCALL_DEFINE2(process_mrelease, int, pidfd, unsigned int, flags)
 
 	mm = p->mm;
 	mmgrab(mm);
+
+	ret = hdn_authorize_process_memory(task, mm,
+					   HDN_PROCESS_MEMORY_MRELEASE);
+	if (ret) {
+		task_unlock(p);
+		goto drop_mm;
+	}
 
 	if (task_will_free_mem(p))
 		reap = true;

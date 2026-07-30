@@ -8,6 +8,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/fsnotify.h>
+#include <linux/hardening.h>
 #include <linux/pagemap.h>
 #include <linux/highmem.h>
 #include <linux/time.h>
@@ -4478,6 +4479,9 @@ static int btrfs_ioctl_encoded_write(struct file *file, void __user *argp, bool 
 	ret = rw_verify_area(WRITE, file, &pos, args.len);
 	if (ret < 0)
 		goto out_iov;
+	ret = hdn_authorize_object_write_file(file, false);
+	if (ret)
+		goto out_iov;
 
 	init_sync_kiocb(&kiocb, file);
 	ret = kiocb_set_rw_flags(&kiocb, 0, WRITE);
@@ -4927,6 +4931,9 @@ static int btrfs_uring_encoded_write(struct io_uring_cmd *cmd, unsigned int issu
 	pos = data->args.offset;
 	ret = rw_verify_area(WRITE, file, &pos, data->args.len);
 	if (ret < 0)
+		goto out_iov;
+	ret = hdn_authorize_object_write_file(file, false);
+	if (ret)
 		goto out_iov;
 
 	init_sync_kiocb(&kiocb, file);

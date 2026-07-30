@@ -10,6 +10,7 @@
 #include <linux/syscalls.h>
 #include <linux/export.h>
 #include <linux/fs.h>
+#include <linux/hardening.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/sched/signal.h>
@@ -589,8 +590,10 @@ repeat:
 	 * will limit the total number of files that can be opened.
 	 */
 	error = -EMFILE;
-	if (unlikely(fd >= end))
+	if (unlikely(fd >= end)) {
+		hdn_record_resource_pressure(RLIMIT_NOFILE, fd);
 		goto out;
+	}
 
 	if (unlikely(fd >= fdt->max_fds)) {
 		error = expand_files(files, fd);
@@ -1348,12 +1351,15 @@ int replace_fd(unsigned fd, struct file *file, unsigned flags)
 {
 	int err;
 	struct files_struct *files = current->files;
+	unsigned long nofile = rlimit(RLIMIT_NOFILE);
 
 	if (!file)
 		return close_fd(fd);
 
-	if (fd >= rlimit(RLIMIT_NOFILE))
+	if (fd >= nofile) {
+		hdn_record_resource_pressure(RLIMIT_NOFILE, fd);
 		return -EBADF;
+	}
 
 	spin_lock(&files->file_lock);
 	err = expand_files(files, fd);
@@ -1404,7 +1410,12 @@ int receive_fd(struct file *file, int __user *ufd, unsigned int o_flags)
 	}
 
 	__receive_sock(fd_prepare_file(fdf));
-	return fd_publish(fdf);
+	error = fd_publish(fdf);
+#ifdef CONFIG_SECURITY_HARDENING_TTY_ACCESS
+	if (error >= 0)
+		hdn_tty_record_received_file(file);
+#endif
+	return error;
 }
 EXPORT_SYMBOL_GPL(receive_fd);
 
@@ -1419,6 +1430,9 @@ int receive_fd_replace(int new_fd, struct file *file, unsigned int o_flags)
 	if (error)
 		return error;
 	__receive_sock(file);
+#ifdef CONFIG_SECURITY_HARDENING_TTY_ACCESS
+	hdn_tty_record_received_file(file);
+#endif
 	return new_fd;
 }
 
@@ -1427,6 +1441,7 @@ static int ksys_dup3(unsigned int oldfd, unsigned int newfd, int flags)
 	int err = -EBADF;
 	struct file *file;
 	struct files_struct *files = current->files;
+	unsigned long nofile = rlimit(RLIMIT_NOFILE);
 
 	if ((flags & ~O_CLOEXEC) != 0)
 		return -EINVAL;
@@ -1434,8 +1449,10 @@ static int ksys_dup3(unsigned int oldfd, unsigned int newfd, int flags)
 	if (unlikely(oldfd == newfd))
 		return -EINVAL;
 
-	if (newfd >= rlimit(RLIMIT_NOFILE))
+	if (newfd >= nofile) {
+		hdn_record_resource_pressure(RLIMIT_NOFILE, newfd);
 		return -EBADF;
+	}
 
 	spin_lock(&files->file_lock);
 	err = expand_files(files, newfd);
@@ -1499,8 +1516,10 @@ int f_dupfd(unsigned int from, struct file *file, unsigned flags)
 {
 	unsigned long nofile = rlimit(RLIMIT_NOFILE);
 	int err;
-	if (from >= nofile)
+	if (from >= nofile) {
+		hdn_record_resource_pressure(RLIMIT_NOFILE, from);
 		return -EINVAL;
+	}
 	err = alloc_fd(from, nofile, flags);
 	if (err >= 0) {
 		get_file(file);

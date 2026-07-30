@@ -19,6 +19,7 @@
 #include <linux/pipe_fs_i.h>
 #include <linux/security.h>
 #include <linux/ptrace.h>
+#include <linux/hardening.h>
 #include <linux/signal.h>
 #include <linux/rcupdate.h>
 #include <linux/pid_namespace.h>
@@ -178,6 +179,8 @@ int f_setown(struct file *filp, int who, int force)
 		if (!pid)
 			ret = -ESRCH;
 	}
+	if (!ret)
+		ret = hdn_authorize_chroot_fowner(pid, type);
 
 	if (!ret)
 		__f_setown(filp, pid, type, force);
@@ -251,7 +254,9 @@ static int f_setown_ex(struct file *filp, unsigned long arg)
 	if (owner.pid && !pid)
 		ret = -ESRCH;
 	else
-		 __f_setown(filp, pid, type, 1);
+		ret = hdn_authorize_chroot_fowner(pid, type);
+	if (!ret)
+		__f_setown(filp, pid, type, 1);
 	rcu_read_unlock();
 
 	return ret;

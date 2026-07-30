@@ -10,6 +10,8 @@
 #include <linux/bpf-cgroup.h>
 #include <linux/cleanup.h>
 #include <linux/error-injection.h>
+#include <linux/hardening.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/module.h>
 #include <linux/rculist.h>
 #include <linux/security.h>
@@ -941,6 +943,10 @@ static int trace_kprobe_create_internal(int argc, const char *argv[],
 		/* Check whether uprobe event specified */
 		if (strchr(argv[1], '/') && strchr(argv[1], ':'))
 			return -ECANCELED;
+
+		ret = hdn_authorize_kernel_symbol_lookup();
+		if (ret)
+			return ret;
 
 		/* a symbol specified */
 		symbol = kstrdup(argv[1], GFP_KERNEL);

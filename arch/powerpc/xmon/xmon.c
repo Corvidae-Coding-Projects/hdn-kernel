@@ -14,7 +14,7 @@
 #include <linux/mm.h>
 #include <linux/reboot.h>
 #include <linux/delay.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/kmsg_dump.h>
 #include <linux/cpumask.h>
 #include <linux/export.h>

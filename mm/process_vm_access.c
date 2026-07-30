@@ -6,6 +6,7 @@
  */
 
 #include <linux/compat.h>
+#include <linux/hardening.h>
 #include <linux/mm.h>
 #include <linux/uio.h>
 #include <linux/sched.h>
@@ -200,7 +201,8 @@ static ssize_t process_vm_rw_core(pid_t pid, struct iov_iter *iter,
 		goto free_proc_pages;
 	}
 
-	mm = mm_access(task, PTRACE_MODE_ATTACH_REALCREDS);
+	mm = mm_access(task, PTRACE_MODE_ATTACH_REALCREDS |
+		       PTRACE_MODE_HDN_PROCESS_MEMORY);
 	if (IS_ERR(mm)) {
 		rc = PTR_ERR(mm);
 		/*
@@ -211,6 +213,11 @@ static ssize_t process_vm_rw_core(pid_t pid, struct iov_iter *iter,
 			rc = -EPERM;
 		goto put_task_struct;
 	}
+	rc = hdn_authorize_process_memory(
+		task, mm, vm_write ? HDN_PROCESS_MEMORY_WRITE :
+				     HDN_PROCESS_MEMORY_READ);
+	if (rc)
+		goto put_mm;
 
 	for (i = 0; i < riovcnt && iov_iter_count(iter) && !rc; i++)
 		rc = process_vm_rw_single_vec(
@@ -226,6 +233,7 @@ static ssize_t process_vm_rw_core(pid_t pid, struct iov_iter *iter,
 	if (total_len)
 		rc = total_len;
 
+put_mm:
 	mmput(mm);
 
 put_task_struct:

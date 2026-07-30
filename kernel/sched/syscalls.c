@@ -9,6 +9,7 @@
  */
 #include <linux/sched.h>
 #include <linux/cpuset.h>
+#include <linux/hardening.h>
 #include <linux/sched/debug.h>
 
 #include <uapi/linux/sched/types.h>
@@ -117,7 +118,13 @@ static bool is_nice_reduction(const struct task_struct *p, const int nice)
  */
 int can_nice(const struct task_struct *p, const int nice)
 {
-	return is_nice_reduction(p, nice) || capable(CAP_SYS_NICE);
+	if (is_nice_reduction(p, nice))
+		return 1;
+	if (capable(CAP_SYS_NICE))
+		return 1;
+
+	hdn_record_resource_pressure(RLIMIT_NICE, nice_to_rlimit(nice));
+	return 0;
 }
 
 #ifdef __ARCH_WANT_SYS_NICE
@@ -144,6 +151,10 @@ SYSCALL_DEFINE1(nice, int, increment)
 	nice = clamp_val(nice, MIN_NICE, MAX_NICE);
 	if (increment < 0 && !can_nice(current, nice))
 		return -EPERM;
+
+	retval = hdn_authorize_chroot_nice(current, nice);
+	if (retval)
+		return retval;
 
 	retval = security_task_setnice(current, nice);
 	if (retval)
@@ -436,23 +447,37 @@ static int user_check_sched_setscheduler(struct task_struct *p,
 					 const struct sched_attr *attr,
 					 int policy, int reset_on_fork)
 {
+	unsigned long nice_wanted = 0;
+	unsigned long rtprio_wanted = 0;
+	bool nice_pressure = false;
+	bool rtprio_pressure = false;
+
 	if (fair_policy(policy)) {
 		if (attr->sched_nice < task_nice(p) &&
-		    !is_nice_reduction(p, attr->sched_nice))
+		    !is_nice_reduction(p, attr->sched_nice)) {
+			nice_pressure = true;
+			nice_wanted = nice_to_rlimit(attr->sched_nice);
 			goto req_priv;
+		}
 	}
 
 	if (rt_policy(policy)) {
 		unsigned long rlim_rtprio = task_rlimit(p, RLIMIT_RTPRIO);
 
 		/* Can't set/change the rt policy: */
-		if (policy != p->policy && !rlim_rtprio)
+		if (policy != p->policy && !rlim_rtprio) {
+			rtprio_pressure = true;
+			rtprio_wanted = attr->sched_priority;
 			goto req_priv;
+		}
 
 		/* Can't increase priority: */
 		if (attr->sched_priority > p->rt_priority &&
-		    attr->sched_priority > rlim_rtprio)
+		    attr->sched_priority > rlim_rtprio) {
+			rtprio_pressure = true;
+			rtprio_wanted = attr->sched_priority;
 			goto req_priv;
+		}
 	}
 
 	/*
@@ -469,8 +494,11 @@ static int user_check_sched_setscheduler(struct task_struct *p,
 	 * SCHED_NORMAL if the RLIMIT_NICE would normally permit it.
 	 */
 	if (task_has_idle_policy(p) && !idle_policy(policy)) {
-		if (!is_nice_reduction(p, task_nice(p)))
+		if (!is_nice_reduction(p, task_nice(p))) {
+			nice_pressure = true;
+			nice_wanted = nice_to_rlimit(task_nice(p));
 			goto req_priv;
+		}
 	}
 
 	/* Can't change other user's priorities: */
@@ -484,8 +512,14 @@ static int user_check_sched_setscheduler(struct task_struct *p,
 	return 0;
 
 req_priv:
-	if (!capable(CAP_SYS_NICE))
+	if (!capable(CAP_SYS_NICE)) {
+		if (nice_pressure)
+			hdn_record_resource_pressure(RLIMIT_NICE, nice_wanted);
+		if (rtprio_pressure)
+			hdn_record_resource_pressure(RLIMIT_RTPRIO,
+						     rtprio_wanted);
 		return -EPERM;
+	}
 
 	return 0;
 }

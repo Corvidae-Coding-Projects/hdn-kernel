@@ -30,6 +30,7 @@
 #include <linux/security.h>
 #include <linux/syscalls.h>
 #include <linux/tsacct_kern.h>
+#include <linux/hardening.h>
 #include <linux/cn_proc.h>
 #include <linux/audit.h>
 #include <linux/kmod.h>
@@ -881,8 +882,10 @@ static bool coredump_file(struct core_name *cn, struct coredump_params *cprm,
 	struct file *file __free(fput) = NULL;
 	int open_flags = O_CREAT | O_WRONLY | O_NOFOLLOW | O_LARGEFILE | O_EXCL;
 
-	if (cprm->limit < binfmt->min_coredump)
+	if (cprm->limit < binfmt->min_coredump) {
+		hdn_record_resource_pressure(RLIMIT_CORE, cprm->limit);
 		return false;
+	}
 
 	if (coredump_force_suid_safe(cprm) && cn->corename[0] != '/') {
 		coredump_report_failure("this process can only dump core to a fully qualified path, skipping core dump");
@@ -1180,6 +1183,8 @@ void vfs_coredump(const kernel_siginfo_t *siginfo)
 	audit_core_dumps(siginfo->si_signo);
 
 	if (coredump_skip(&cprm, binfmt))
+		return;
+	if (hdn_block_privileged_coredump(siginfo->si_signo))
 		return;
 
 	CLASS(prepare_creds, cred)();

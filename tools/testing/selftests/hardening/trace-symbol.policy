@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Policy used by the QEMU smoke test to prove tracefs and BPF access can be
+# granted without granting kernel symbol disclosure.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 trace-symbol-root
+
+allow 2 POLICY_ADMIN CRED_CHANGE TTY_ACCESS DEBUGFS BPF_LOAD

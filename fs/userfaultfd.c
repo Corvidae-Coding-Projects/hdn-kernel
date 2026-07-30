@@ -27,6 +27,7 @@
 #include <linux/userfaultfd_k.h>
 #include <linux/mempolicy.h>
 #include <linux/ioctl.h>
+#include <linux/kconfig.h>
 #include <linux/security.h>
 #include <linux/hugetlb.h>
 #include <linux/leafops.h>
@@ -44,7 +45,11 @@ static const struct ctl_table vm_userfaultfd_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= SYSCTL_ZERO,
+#if IS_ENABLED(CONFIG_SECURITY_HARDENING_USERFAULTFD_RESTRICT)
+		.extra2		= SYSCTL_ZERO,
+#else
 		.extra2		= SYSCTL_ONE,
+#endif
 	},
 };
 #endif

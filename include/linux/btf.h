@@ -115,6 +115,13 @@ union bpf_attr;
 struct btf_show;
 struct btf_id_set;
 struct bpf_prog;
+struct file;
+struct kobject;
+struct bin_attribute;
+
+ssize_t btf_sysfs_read(struct file *file, struct kobject *kobj,
+		       const struct bin_attribute *attr, char *buf,
+		       loff_t off, size_t len);
 
 typedef int (*btf_kfunc_filter_t)(const struct bpf_prog *prog, u32 kfunc_id);
 

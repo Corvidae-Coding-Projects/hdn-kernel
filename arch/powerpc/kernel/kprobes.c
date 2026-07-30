@@ -14,6 +14,7 @@
  */
 
 #include <linux/kprobes.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/ptrace.h>
 #include <linux/preempt.h>
 #include <linux/extable.h>

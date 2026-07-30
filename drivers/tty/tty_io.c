@@ -102,6 +102,7 @@
 #include <linux/uaccess.h>
 #include <linux/termios_internal.h>
 #include <linux/fs.h>
+#include <linux/hardening.h>
 
 #include <linux/kbd_kern.h>
 #include <linux/vt_kern.h>
@@ -469,6 +470,17 @@ static const struct file_operations tty_fops = {
 	.fasync		= tty_fasync,
 	.show_fdinfo	= tty_show_fdinfo,
 };
+
+#ifdef CONFIG_SECURITY_HARDENING
+void hdn_tty_record_received_file(struct file *file)
+{
+	if (!IS_ENABLED(CONFIG_SECURITY_HARDENING_TTY_ACCESS) || !file ||
+	    file->f_op != &tty_fops)
+		return;
+
+	hdn_tty_record_broker(file_tty(file));
+}
+#endif
 
 static const struct file_operations console_fops = {
 	.read_iter	= tty_read,
@@ -910,6 +922,9 @@ static ssize_t tty_read(struct kiocb *iocb, struct iov_iter *to)
 		return -EIO;
 	if (!tty || tty_io_error(tty))
 		return -EIO;
+	ret = hdn_authorize_tty_access(tty, HDN_TTY_ACCESS_READ);
+	if (ret)
+		return ret;
 
 	/* We want to wait for the line discipline to sort out in this
 	 * situation.
@@ -1069,6 +1084,9 @@ static ssize_t file_tty_write(struct file *file, struct kiocb *iocb, struct iov_
 		return -EIO;
 	if (!tty || !tty->ops->write ||	tty_io_error(tty))
 		return -EIO;
+	ret = hdn_authorize_tty_access(tty, HDN_TTY_ACCESS_WRITE);
+	if (ret)
+		return ret;
 	/* Short term debug to catch buggy drivers */
 	if (tty->ops->write_room == NULL)
 		tty_err(tty, "missing write_room method\n");
@@ -1528,6 +1546,7 @@ static void release_one_tty(struct work_struct *work)
 	list_del_init(&tty->tty_files);
 	spin_unlock(&tty->files_lock);
 
+	hdn_tty_release_session_broker(tty);
 	put_pid(tty->ctrl.pgrp);
 	put_pid(tty->ctrl.session);
 	free_tty_struct(tty);
@@ -2255,7 +2274,30 @@ static int tty_fasync(int fd, struct file *filp, int on)
 	return retval;
 }
 
-static bool tty_legacy_tiocsti __read_mostly = IS_ENABLED(CONFIG_LEGACY_TIOCSTI);
+static bool tty_legacy_tiocsti __read_mostly =
+	IS_ENABLED(CONFIG_LEGACY_TIOCSTI) &&
+	!IS_ENABLED(CONFIG_SECURITY_HARDENING_TTY_INJECTION);
+
+static int proc_dobool_legacy_tiocsti(const struct ctl_table *table, int write,
+				      void *buffer, size_t *lenp,
+				      loff_t *ppos)
+{
+	if (write && IS_ENABLED(CONFIG_SECURITY_HARDENING_TTY_INJECTION))
+		return -EPERM;
+
+	return proc_dobool(table, write, buffer, lenp, ppos);
+}
+
+static int proc_dointvec_minmax_ldisc_autoload(const struct ctl_table *table,
+					       int write, void *buffer,
+					       size_t *lenp, loff_t *ppos)
+{
+	if (write && IS_ENABLED(CONFIG_SECURITY_HARDENING_TTY_INJECTION))
+		return -EPERM;
+
+	return proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+}
+
 /**
  * tiocsti - fake input character
  * @tty: tty to fake input into
@@ -2273,6 +2315,11 @@ static int tiocsti(struct tty_struct *tty, u8 __user *p)
 {
 	struct tty_ldisc *ld;
 	u8 ch;
+	int ret;
+
+	ret = hdn_authorize_tty_injection(TIOCSTI);
+	if (ret)
+		return ret;
 
 	if (!tty_legacy_tiocsti && !capable(CAP_SYS_ADMIN))
 		return -EIO;
@@ -2677,6 +2724,17 @@ long tty_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return -EINVAL;
 
 	real_tty = tty_pair_get_tty(tty);
+	/*
+	 * TIOCSCTTY establishes the controlling-terminal relationship that
+	 * makes subsequent access legitimate.  Let tiocsctty() apply its
+	 * session-leader, ownership, and capability checks before TTY_ACCESS
+	 * starts enforcing that relationship.
+	 */
+	if (cmd != TIOCSTI && cmd != TIOCSCTTY) {
+		retval = hdn_authorize_tty_access(tty, HDN_TTY_ACCESS_IOCTL);
+		if (retval)
+			return retval;
+	}
 
 	/*
 	 * Factor out some common prep work
@@ -2960,6 +3018,9 @@ static long tty_compat_ioctl(struct file *file, unsigned int cmd,
 
 	if (tty_paranoia_check(tty, file_inode(file), "tty_ioctl"))
 		return -EINVAL;
+	retval = hdn_authorize_tty_access(tty, HDN_TTY_ACCESS_IOCTL);
+	if (retval)
+		return retval;
 
 	switch (cmd) {
 	case TIOCSSERIAL:
@@ -3606,14 +3667,14 @@ static const struct ctl_table tty_table[] = {
 		.data		= &tty_legacy_tiocsti,
 		.maxlen		= sizeof(tty_legacy_tiocsti),
 		.mode		= 0644,
-		.proc_handler	= proc_dobool,
+		.proc_handler	= proc_dobool_legacy_tiocsti,
 	},
 	{
 		.procname	= "ldisc_autoload",
 		.data		= &tty_ldisc_autoload,
 		.maxlen		= sizeof(tty_ldisc_autoload),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
+		.proc_handler	= proc_dointvec_minmax_ldisc_autoload,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_ONE,
 	},

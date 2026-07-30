@@ -8,6 +8,8 @@
 #include <linux/uaccess.h>
 #include <linux/module.h>
 #include <linux/ctype.h>
+#include <linux/hardening.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/mutex.h>
 #include <linux/perf_event.h>
 #include <linux/slab.h>
@@ -1762,6 +1764,12 @@ static int parse_pred(const char *str, void *data,
 			name = kmemdup_nul(str + s, len, GFP_KERNEL);
 			if (!name)
 				goto err_mem;
+			ret = hdn_authorize_kernel_symbol_lookup();
+			if (ret) {
+				kfree(name);
+				free_predicate(pred);
+				return ret;
+			}
 			ip = kallsyms_lookup_name(name);
 			kfree(name);
 			if (!ip) {

@@ -86,6 +86,7 @@
 #include <linux/filter.h>
 #include <linux/fs.h>
 #include <linux/fs_struct.h>
+#include <linux/hardening.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/mount.h>
@@ -224,6 +225,11 @@ static unsigned int unix_abstract_hash(struct sockaddr_un *sunaddr,
 
 	return UNIX_HASH_MOD + 1 + (hash & UNIX_HASH_MOD);
 }
+
+enum hdn_unix_object_op {
+	HDN_UNIX_OBJECT_CONNECT,
+	HDN_UNIX_OBJECT_SEND,
+};
 
 static void unix_table_double_lock(struct net *net,
 				   unsigned int hash1, unsigned int hash2)
@@ -632,6 +638,25 @@ static void unix_dgram_disconnected(struct sock *sk, struct sock *other)
 	}
 }
 
+static void unix_hdn_clear_bind_root(struct unix_sock *u)
+{
+	if (!u->hdn_bind_root.dentry)
+		return;
+
+	path_put(&u->hdn_bind_root);
+	u->hdn_bind_root.dentry = NULL;
+	u->hdn_bind_root.mnt = NULL;
+}
+
+static void unix_hdn_set_bind_root(struct unix_sock *u)
+{
+	if (!IS_ENABLED(CONFIG_SECURITY_HARDENING))
+		return;
+
+	unix_hdn_clear_bind_root(u);
+	get_fs_root(current->fs, &u->hdn_bind_root);
+}
+
 static void unix_sock_destructor(struct sock *sk)
 {
 	struct unix_sock *u = unix_sk(sk);
@@ -648,6 +673,7 @@ static void unix_sock_destructor(struct sock *sk)
 
 	if (u->addr)
 		unix_release_addr(u->addr);
+	unix_hdn_clear_bind_root(u);
 
 	atomic_long_dec(&unix_nr_socks);
 	sock_prot_inuse_add(sock_net(sk), sk->sk_prot, -1);
@@ -669,6 +695,8 @@ static void unix_release_sock(struct sock *sk, int embrion)
 	struct sk_buff *skb;
 	struct path path;
 	int state;
+
+	hdn_drop_unix_proc_ip(sk);
 
 	unix_remove_socket(sock_net(sk), sk);
 	unix_remove_bsd_socket(sk);
@@ -806,6 +834,57 @@ static bool unix_may_passcred(const struct sock *sk)
 	return sk->sk_scm_credentials || sk->sk_scm_pidfd;
 }
 
+static int hdn_authorize_unix_dgram_recv(const struct sock *sk)
+{
+	const struct unix_sock *u;
+
+	if (sk->sk_type != SOCK_DGRAM)
+		return 0;
+
+	u = unix_sk(sk);
+	if (!u->path.dentry || !u->path.mnt)
+		return hdn_authorize_object_unix_abstract(
+			u->addr ? u->addr->name : NULL,
+			u->addr ? u->addr->len : 0,
+			HDN_UNIX_ABSTRACT_RECV);
+
+	return hdn_authorize_object_unix_recv(&u->path);
+}
+
+static int hdn_authorize_unix_dgram_send_peer(const struct sock *sk,
+					      struct sock *other)
+{
+	struct path path;
+	bool have_path = false;
+	int err;
+
+	if (sk->sk_type != SOCK_DGRAM)
+		return 0;
+
+	unix_state_lock(other);
+	if (unix_sk(other)->path.dentry && unix_sk(other)->path.mnt) {
+		path = unix_sk(other)->path;
+		path_get(&path);
+		have_path = true;
+	} else if (unix_sk(other)->addr) {
+		err = hdn_authorize_object_unix_abstract(
+			unix_sk(other)->addr->name, unix_sk(other)->addr->len,
+			HDN_UNIX_ABSTRACT_SEND);
+		if (err) {
+			unix_state_unlock(other);
+			return err;
+		}
+	}
+	unix_state_unlock(other);
+
+	if (!have_path)
+		return 0;
+
+	err = hdn_authorize_object_unix_send(&path);
+	path_put(&path);
+	return err;
+}
+
 static int unix_listen(struct socket *sock, int backlog)
 {
 	int err;
@@ -819,6 +898,15 @@ static int unix_listen(struct socket *sock, int backlog)
 	err = -EINVAL;
 	if (!READ_ONCE(u->addr))
 		goto out;	/* No listens on an unbound socket */
+	if (u->path.dentry && u->path.mnt)
+		err = hdn_authorize_object_unix_listen(&u->path);
+	else
+		err = hdn_authorize_object_unix_abstract(
+			u->addr ? u->addr->name : NULL,
+			u->addr ? u->addr->len : 0,
+			HDN_UNIX_ABSTRACT_LISTEN);
+	if (err)
+		goto out;
 	err = prepare_peercred(&peercred);
 	if (err)
 		goto out;
@@ -1116,6 +1204,8 @@ static struct sock *unix_create1(struct net *net, struct socket *sock, int kern,
 	u->vertex = NULL;
 	u->path.dentry = NULL;
 	u->path.mnt = NULL;
+	u->hdn_bind_root.dentry = NULL;
+	u->hdn_bind_root.mnt = NULL;
 	spin_lock_init(&u->lock);
 	lock_set_cmp_fn(&u->lock, unix_state_lock_cmp_fn, NULL);
 	mutex_init(&u->iolock); /* single task reading lock */
@@ -1188,7 +1278,8 @@ static int unix_release(struct socket *sock)
 }
 
 static struct sock *unix_find_bsd(struct sockaddr_un *sunaddr, int addr_len,
-				  int type, int flags)
+				  int type, int flags,
+				  enum hdn_unix_object_op op)
 {
 	struct inode *inode;
 	struct path path;
@@ -1226,6 +1317,21 @@ static struct sock *unix_find_bsd(struct sockaddr_un *sunaddr, int addr_len,
 	if (!S_ISSOCK(inode->i_mode))
 		goto path_put;
 
+	if (op == HDN_UNIX_OBJECT_SEND)
+		err = hdn_authorize_object_unix_send(&path);
+	else
+		err = hdn_authorize_object_unix_connect(&path);
+	if (err)
+		goto path_put;
+
+	/*
+	 * The authorize helpers above leave err == 0 on the allow path. Restore
+	 * the not-found error so a NULL lookup below returns ERR_PTR(-ECONNREFUSED)
+	 * rather than ERR_PTR(0), which the caller would treat as a valid socket
+	 * and dereference (NULL unix_state_lock()).
+	 */
+	err = -ECONNREFUSED;
+
 	sk = unix_find_socket_byinode(inode);
 	if (!sk)
 		goto path_put;
@@ -1250,15 +1356,31 @@ fail:
 
 static struct sock *unix_find_abstract(struct net *net,
 				       struct sockaddr_un *sunaddr,
-				       int addr_len, int type)
+				       int addr_len, int type,
+				       enum hdn_unix_object_op op)
 {
 	unsigned int hash = unix_abstract_hash(sunaddr, addr_len, type);
 	struct dentry *dentry;
 	struct sock *sk;
+	int err;
 
 	sk = unix_find_socket_byname(net, sunaddr, addr_len, hash);
 	if (!sk)
 		return ERR_PTR(-ECONNREFUSED);
+
+	if (hdn_authorize_chroot_unix(&unix_sk(sk)->hdn_bind_root)) {
+		sock_put(sk);
+		return ERR_PTR(-EPERM);
+	}
+
+	err = hdn_authorize_object_unix_abstract(
+		sunaddr, addr_len,
+		op == HDN_UNIX_OBJECT_SEND ? HDN_UNIX_ABSTRACT_SEND :
+					     HDN_UNIX_ABSTRACT_CONNECT);
+	if (err) {
+		sock_put(sk);
+		return ERR_PTR(err);
+	}
 
 	dentry = unix_sk(sk)->path.dentry;
 	if (dentry)
@@ -1269,14 +1391,15 @@ static struct sock *unix_find_abstract(struct net *net,
 
 static struct sock *unix_find_other(struct net *net,
 				    struct sockaddr_un *sunaddr,
-				    int addr_len, int type, int flags)
+				    int addr_len, int type, int flags,
+				    enum hdn_unix_object_op op)
 {
 	struct sock *sk;
 
 	if (sunaddr->sun_path[0])
-		sk = unix_find_bsd(sunaddr, addr_len, type, flags);
+		sk = unix_find_bsd(sunaddr, addr_len, type, flags, op);
 	else
-		sk = unix_find_abstract(net, sunaddr, addr_len, type);
+		sk = unix_find_abstract(net, sunaddr, addr_len, type, op);
 
 	return sk;
 }
@@ -1336,6 +1459,7 @@ retry:
 	}
 
 	__unix_set_addr_hash(net, sk, addr, new_hash);
+	unix_hdn_set_bind_root(u);
 	unix_table_double_unlock(net, old_hash, new_hash);
 	err = 0;
 
@@ -1376,7 +1500,9 @@ static int unix_bind_bsd(struct sock *sk, struct sockaddr_un *sunaddr,
 	 * All right, let's create it.
 	 */
 	idmap = mnt_idmap(parent.mnt);
-	err = security_path_mknod(&parent, dentry, mode, 0);
+	err = hdn_authorize_object_unix_bind(parent.dentry);
+	if (!err)
+		err = security_path_mknod(&parent, dentry, mode, 0);
 	if (!err)
 		err = vfs_mknod(idmap, d_inode(parent.dentry), dentry, mode, 0, NULL);
 	if (err)
@@ -1425,6 +1551,11 @@ static int unix_bind_abstract(struct sock *sk, struct sockaddr_un *sunaddr,
 	if (!addr)
 		return -ENOMEM;
 
+	err = hdn_authorize_object_unix_abstract(
+		addr->name, addr->len, HDN_UNIX_ABSTRACT_BIND);
+	if (err)
+		goto out;
+
 	err = mutex_lock_interruptible(&u->bindlock);
 	if (err)
 		goto out;
@@ -1442,6 +1573,7 @@ static int unix_bind_abstract(struct sock *sk, struct sockaddr_un *sunaddr,
 		goto out_spin;
 
 	__unix_set_addr_hash(net, sk, addr, new_hash);
+	unix_hdn_set_bind_root(u);
 	unix_table_double_unlock(net, old_hash, new_hash);
 	mutex_unlock(&u->bindlock);
 	return 0;
@@ -1530,7 +1662,8 @@ static int unix_dgram_connect(struct socket *sock, struct sockaddr_unsized *addr
 		}
 
 restart:
-		other = unix_find_other(sock_net(sk), sunaddr, alen, sock->type, 0);
+		other = unix_find_other(sock_net(sk), sunaddr, alen, sock->type,
+					0, HDN_UNIX_OBJECT_CONNECT);
 		if (IS_ERR(other)) {
 			err = PTR_ERR(other);
 			goto out;
@@ -1670,7 +1803,8 @@ static int unix_stream_connect(struct socket *sock, struct sockaddr_unsized *uad
 
 restart:
 	/*  Find listening sock. */
-	other = unix_find_other(net, sunaddr, addr_len, sk->sk_type, flags);
+	other = unix_find_other(net, sunaddr, addr_len, sk->sk_type, flags,
+				HDN_UNIX_OBJECT_CONNECT);
 	if (IS_ERR(other)) {
 		err = PTR_ERR(other);
 		goto out_free_skb;
@@ -1780,6 +1914,8 @@ restart:
 
 	unix_state_unlock(sk);
 
+	hdn_track_unix_proc_ip(newsk);
+
 	/* take ten and send info to listening sock */
 	spin_lock(&other->sk_receive_queue.lock);
 	__skb_queue_tail(&other->sk_receive_queue, skb);
@@ -1845,6 +1981,16 @@ static int unix_accept(struct socket *sock, struct socket *newsock,
 
 	arg->err = -EINVAL;
 	if (READ_ONCE(sk->sk_state) != TCP_LISTEN)
+		goto out;
+	if (unix_sk(sk)->path.dentry && unix_sk(sk)->path.mnt)
+		arg->err = hdn_authorize_object_unix_accept(
+			&unix_sk(sk)->path);
+	else
+		arg->err = hdn_authorize_object_unix_abstract(
+			unix_sk(sk)->addr ? unix_sk(sk)->addr->name : NULL,
+			unix_sk(sk)->addr ? unix_sk(sk)->addr->len : 0,
+			HDN_UNIX_ABSTRACT_ACCEPT);
+	if (arg->err)
 		goto out;
 
 	/* If socket state is TCP_LISTEN it cannot change (for now...),
@@ -2156,7 +2302,8 @@ static int unix_dgram_sendmsg(struct socket *sock, struct msghdr *msg,
 	if (msg->msg_namelen) {
 lookup:
 		other = unix_find_other(sock_net(sk), msg->msg_name,
-					msg->msg_namelen, sk->sk_type, 0);
+					msg->msg_namelen, sk->sk_type, 0,
+					HDN_UNIX_OBJECT_SEND);
 		if (IS_ERR(other)) {
 			err = PTR_ERR(other);
 			goto out_free;
@@ -2167,6 +2314,10 @@ lookup:
 			err = -ENOTCONN;
 			goto out_free;
 		}
+
+		err = hdn_authorize_unix_dgram_send_peer(sk, other);
+		if (err)
+			goto out_sock_put;
 	}
 
 	if (sk_filter(other, skb) < 0) {
@@ -2672,6 +2823,11 @@ static int unix_dgram_recvmsg(struct socket *sock, struct msghdr *msg, size_t si
 			      int flags)
 {
 	struct sock *sk = sock->sk;
+	int err;
+
+	err = hdn_authorize_unix_dgram_recv(sk);
+	if (err)
+		return err;
 
 #ifdef CONFIG_BPF_SYSCALL
 	const struct proto *prot = READ_ONCE(sk->sk_prot);
@@ -2687,6 +2843,10 @@ static int unix_read_skb(struct sock *sk, skb_read_actor_t recv_actor)
 	struct unix_sock *u = unix_sk(sk);
 	struct sk_buff *skb;
 	int err;
+
+	err = hdn_authorize_unix_dgram_recv(sk);
+	if (err)
+		return err;
 
 	mutex_lock(&u->iolock);
 

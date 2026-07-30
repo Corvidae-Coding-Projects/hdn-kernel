@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/codetag.h>
 #include <linux/idr.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/module.h>
 #include <linux/seq_buf.h>
 #include <linux/slab.h>

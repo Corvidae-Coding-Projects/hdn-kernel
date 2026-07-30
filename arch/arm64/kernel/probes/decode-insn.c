@@ -8,7 +8,7 @@
 #include <linux/kernel.h>
 #include <linux/kprobes.h>
 #include <linux/module.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 #include <asm/insn.h>
 #include <asm/sections.h>
 

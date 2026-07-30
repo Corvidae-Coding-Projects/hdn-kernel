@@ -1209,6 +1209,18 @@ struct task_struct {
 
 	struct callback_head		*task_works;
 
+#ifdef CONFIG_SECURITY_HARDENING
+	u64				hardening_brute_fork_delay_until_ns;
+#endif
+
+#ifdef CONFIG_SECURITY_HARDENING_SETXID
+	struct callback_head		hardening_setxid_work;
+	const struct cred		*hardening_setxid_cred;
+	unsigned int			hardening_setxid_securebits;
+	bool				hardening_setxid_queued;
+	bool				hardening_setxid_applying;
+#endif
+
 #ifdef CONFIG_AUDIT
 #ifdef CONFIG_AUDITSYSCALL
 	struct audit_context		*audit_context;

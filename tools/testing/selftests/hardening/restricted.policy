@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Root-profile policy used by the QEMU smoke test to prove profile-denied
+# authority gates that normal Unix permissions would otherwise mask.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 restricted-root
+
+allow 1 IPC_ADMIN
+allow 2 POLICY_ADMIN CRED_CHANGE TTY_ACCESS
+feature 1 DENY_UNTRUSTED_USER_EXEC
+feature 2 ENFORCE_TRUSTED_EXEC CHROOT_CONTAINED PROTECT_SHM
+resource 2 NOFILE 64 128

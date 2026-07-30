@@ -27,6 +27,7 @@
 #include <linux/file.h>
 #include <linux/freezer.h>
 #include <linux/binfmts.h>
+#include <linux/hardening.h>
 #include <linux/nsproxy.h>
 #include <linux/pid_namespace.h>
 #include <linux/ptrace.h>
@@ -52,6 +53,7 @@
 #include <linux/task_work.h>
 #include <linux/fs_struct.h>
 #include <linux/init_task.h>
+#include <linux/hardening.h>
 #include <linux/perf_event.h>
 #include <trace/events/sched.h>
 #include <linux/hw_breakpoint.h>
@@ -249,6 +251,8 @@ void release_task(struct task_struct *p)
 	int zap_leader;
 repeat:
 	memset(&post, 0, sizeof(post));
+
+	hdn_drop_proc_ip_connection(p->signal);
 
 	/* don't need to get the RCU readlock here - the process is dead and
 	 * can't be modifying its own credentials. */
@@ -909,6 +913,7 @@ void __noreturn do_exit(long code)
 
 	kcov_task_exit(tsk);
 	kmsan_task_exit(tsk);
+	hdn_task_exit(code);
 
 	synchronize_group_exit(tsk, code);
 	ptrace_event(PTRACE_EVENT_EXIT, code);
@@ -939,6 +944,7 @@ void __noreturn do_exit(long code)
 			setmax_mm_hiwater_rss(&tsk->signal->maxrss, tsk->mm);
 	}
 	acct_collect(code, group_dead);
+	hdn_record_process_account(code, group_dead);
 	if (group_dead)
 		tty_audit_exit();
 	audit_free(tsk);

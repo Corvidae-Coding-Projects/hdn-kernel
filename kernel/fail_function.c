@@ -2,10 +2,12 @@
 /*
  * fail_function.c: Function-based error injection
  */
-#include <linux/error-injection.h>
+#include <linux/atomic.h>
 #include <linux/debugfs.h>
+#include <linux/error-injection.h>
 #include <linux/fault-inject.h>
-#include <linux/kallsyms.h>
+#include <linux/hardening.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/kprobes.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -27,10 +29,13 @@ struct fei_attr {
 	struct list_head list;
 	struct kprobe kp;
 	unsigned long retval;
+	u64 id;
+	char dir_name[32];
 };
 static DEFINE_MUTEX(fei_lock);
 static LIST_HEAD(fei_attr_list);
 static DECLARE_FAULT_ATTR(fei_fault_attr);
+static atomic64_t fei_next_id = ATOMIC64_INIT(0);
 static struct dentry *fei_debugfs_dir;
 
 static unsigned long adjust_error_retval(unsigned long addr, unsigned long retv)
@@ -67,6 +72,9 @@ static struct fei_attr *fei_attr_new(const char *sym, unsigned long addr)
 		attr->kp.pre_handler = fei_kprobe_handler;
 		attr->kp.post_handler = fei_post_handler;
 		attr->retval = adjust_error_retval(addr, 0);
+		attr->id = atomic64_inc_return(&fei_next_id);
+		snprintf(attr->dir_name, sizeof(attr->dir_name), "entry-%llu",
+			 (unsigned long long)attr->id);
 		INIT_LIST_HEAD(&attr->list);
 	}
 	return attr;
@@ -155,15 +163,20 @@ DEFINE_DEBUGFS_ATTRIBUTE(fei_retval_ops, fei_retval_get, fei_retval_set,
 static void fei_debugfs_add_attr(struct fei_attr *attr)
 {
 	struct dentry *dir;
+	const char *name = IS_ENABLED(CONFIG_SECURITY_HARDENING_SYMBOL_LOOKUP) ?
+			   attr->dir_name : attr->kp.symbol_name;
 
-	dir = debugfs_create_dir(attr->kp.symbol_name, fei_debugfs_dir);
+	dir = debugfs_create_dir(name, fei_debugfs_dir);
 
 	debugfs_create_file("retval", 0600, dir, attr, &fei_retval_ops);
 }
 
 static void fei_debugfs_remove_attr(struct fei_attr *attr)
 {
-	debugfs_lookup_and_remove(attr->kp.symbol_name, fei_debugfs_dir);
+	const char *name = IS_ENABLED(CONFIG_SECURITY_HARDENING_SYMBOL_LOOKUP) ?
+			   attr->dir_name : attr->kp.symbol_name;
+
+	debugfs_lookup_and_remove(name, fei_debugfs_dir);
 }
 
 static int fei_kprobe_handler(struct kprobe *kp, struct pt_regs *regs)
@@ -200,7 +213,17 @@ static int fei_seq_show(struct seq_file *m, void *v)
 {
 	struct fei_attr *attr = list_entry(v, struct fei_attr, list);
 
-	seq_printf(m, "%ps\n", attr->kp.addr);
+	if (!IS_ENABLED(CONFIG_SECURITY_HARDENING_SYMBOL_LOOKUP)) {
+		seq_printf(m, "%ps\n", attr->kp.addr);
+		return 0;
+	}
+
+	if (!hdn_kernel_symbol_disclose_allowed()) {
+		seq_printf(m, "%s [hidden]\n", attr->dir_name);
+		return 0;
+	}
+
+	seq_printf(m, "%s %ps\n", attr->dir_name, attr->kp.addr);
 	return 0;
 }
 
@@ -270,6 +293,10 @@ static ssize_t fei_write(struct file *file, const char __user *buffer,
 		ret = count;
 		goto out;
 	}
+
+	ret = hdn_authorize_kernel_symbol_lookup();
+	if (ret)
+		goto out;
 
 	addr = kallsyms_lookup_name(sym);
 	if (!addr) {

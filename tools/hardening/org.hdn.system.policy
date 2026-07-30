@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>HDN OS</vendor>
+  <vendor_url>https://github.com/dollspace-gay/hdn-linux</vendor_url>
+  <action id="org.hdn.system.modify">
+    <description>Change protected HDN OS system state</description>
+    <message>Authentication is required to make this system change</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/hdn-prompt-session</annotate>
+  </action>
+  <action id="org.hdn.system.recover">
+    <description>Repair or roll back protected HDN OS state</description>
+    <message>Authentication is required to recover this system</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/hdn-recovery-panel</annotate>
+  </action>
+</policyconfig>

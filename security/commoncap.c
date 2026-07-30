@@ -17,6 +17,7 @@
 #include <linux/ptrace.h>
 #include <linux/xattr.h>
 #include <linux/hugetlb.h>
+#include <linux/hardening.h>
 #include <linux/mount.h>
 #include <linux/sched.h>
 #include <linux/prctl.h>
@@ -126,6 +127,9 @@ int cap_capable(const struct cred *cred, struct user_namespace *target_ns,
 {
 	const struct user_namespace *cred_ns = cred->user_ns;
 	int ret = cap_capable_helper(cred, target_ns, cred_ns, cap);
+
+	if (!ret)
+		ret = hdn_authorize_capability(cred, cap, opts);
 
 	trace_cap_capable(cred, target_ns, cred_ns, cap, ret);
 	return ret;

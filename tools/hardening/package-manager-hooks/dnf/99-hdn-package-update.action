@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# DNF 4 post-transaction-actions integration for HDN protected system updates.
+# Install as /etc/dnf/plugins/post-transaction-actions.d/99-hdn-package-update.action.
+#
+# The command is intentionally a stable product action. Raw mountpoints,
+# workers, broker tokens, and helper paths remain in root-owned HDN config.
+
+*:any:/usr/libexec/hdn-package-hook image-seal-default

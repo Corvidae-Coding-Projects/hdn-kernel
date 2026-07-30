@@ -14,6 +14,7 @@
 #include <linux/file.h>
 #include <linux/uaccess.h>
 #include <linux/kernel.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/idr.h>
 #include <linux/sort.h>
 #include <linux/bpf_verifier.h>
@@ -22,6 +23,7 @@
 #include <linux/bpf.h>
 #include <linux/bpf_lsm.h>
 #include <linux/skmsg.h>
+#include <linux/hardening.h>
 #include <linux/perf_event.h>
 #include <linux/bsearch.h>
 #include <linux/kobject.h>
@@ -3969,15 +3971,20 @@ static int btf_parse_kptr(const struct btf *btf, struct btf_field *field,
 			}
 		}
 
-		/* We already verified dtor_func to be btf_type_is_func
-		 * in register_btf_id_dtor_kfuncs.
-		 */
-		dtor_func_name = __btf_name_by_offset(kptr_btf, dtor_func->name_off);
-		addr = kallsyms_lookup_name(dtor_func_name);
-		if (!addr) {
-			ret = -EINVAL;
-			goto end_mod;
-		}
+			/* We already verified dtor_func to be btf_type_is_func
+			 * in register_btf_id_dtor_kfuncs.
+			 */
+			dtor_func_name = __btf_name_by_offset(kptr_btf, dtor_func->name_off);
+			ret = hdn_authorize_kernel_symbol_lookup_transition(
+				HDN_TRANS_BPF_LOAD);
+			if (ret)
+				goto end_mod;
+
+			addr = kallsyms_lookup_name(dtor_func_name);
+			if (!addr) {
+				ret = -EINVAL;
+				goto end_mod;
+			}
 		field->kptr.dtor = (void *)addr;
 	}
 
@@ -8359,7 +8366,7 @@ static int btf_module_notify(struct notifier_block *nb, unsigned long op,
 			attr->attr.mode = 0444;
 			attr->size = btf->data_size;
 			attr->private = btf->data;
-			attr->read = sysfs_bin_attr_simple_read;
+			attr->read = btf_sysfs_read;
 
 			err = sysfs_create_bin_file(btf_kobj, attr);
 			if (err) {

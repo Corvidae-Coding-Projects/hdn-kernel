@@ -35,6 +35,7 @@
 #include <linux/fcntl.h>
 #include <linux/device_cgroup.h>
 #include <linux/fs_struct.h>
+#include <linux/hardening.h>
 #include <linux/posix_acl.h>
 #include <linux/hash.h>
 #include <linux/bitops.h>
@@ -739,6 +740,11 @@ struct nameidata {
 	struct filename	*name;
 	const char *pathname;
 	struct nameidata *saved;
+#ifdef CONFIG_SECURITY_HARDENING_SYMLINK_OWNER
+	vfsuid_t	*hdn_symlink_owner_stack;
+	vfsuid_t	hdn_symlink_owner_internal[EMBEDDED_LEVELS];
+	unsigned	hdn_symlink_owner_depth;
+#endif
 	unsigned	root_seq;
 	int		dfd;
 	vfsuid_t	dir_vfsuid;
@@ -754,6 +760,10 @@ static void __set_nameidata(struct nameidata *p, int dfd, struct filename *name)
 	struct nameidata *old = current->nameidata;
 	p->stack = p->internal;
 	p->depth = 0;
+#ifdef CONFIG_SECURITY_HARDENING_SYMLINK_OWNER
+	p->hdn_symlink_owner_stack = p->hdn_symlink_owner_internal;
+	p->hdn_symlink_owner_depth = 0;
+#endif
 	p->dfd = dfd;
 	p->name = name;
 	p->pathname = likely(name) ? name->name : "";
@@ -784,6 +794,10 @@ static void restore_nameidata(void)
 		old->total_link_count = now->total_link_count;
 	if (now->stack != now->internal)
 		kfree(now->stack);
+#ifdef CONFIG_SECURITY_HARDENING_SYMLINK_OWNER
+	if (now->hdn_symlink_owner_stack != now->hdn_symlink_owner_internal)
+		kfree(now->hdn_symlink_owner_stack);
+#endif
 }
 
 static bool nd_alloc_stack(struct nameidata *nd)
@@ -798,6 +812,93 @@ static bool nd_alloc_stack(struct nameidata *nd)
 	nd->stack = p;
 	return true;
 }
+
+#ifdef CONFIG_SECURITY_HARDENING_SYMLINK_OWNER
+static bool hdn_nd_alloc_symlink_owner_stack(struct nameidata *nd)
+{
+	vfsuid_t *owners;
+
+	if (likely(nd->hdn_symlink_owner_depth != EMBEDDED_LEVELS))
+		return true;
+	if (likely(nd->hdn_symlink_owner_stack !=
+		   nd->hdn_symlink_owner_internal))
+		return true;
+
+	owners = kmalloc_array(MAXSYMLINKS, sizeof(*owners), GFP_KERNEL);
+	if (unlikely(!owners))
+		return false;
+	memcpy(owners, nd->hdn_symlink_owner_internal,
+	       sizeof(nd->hdn_symlink_owner_internal));
+	nd->hdn_symlink_owner_stack = owners;
+	return true;
+}
+
+static int hdn_record_symlink_owner(struct nameidata *nd, struct path *link,
+				    const struct inode *inode)
+{
+	vfsuid_t owner;
+
+	if (unlikely(nd->flags & LOOKUP_RCU))
+		return -ECHILD;
+
+	owner = i_uid_into_vfsuid(mnt_idmap(link->mnt), inode);
+	if (!vfsuid_valid(owner) ||
+	    vfsuid_eq_kuid(owner, GLOBAL_ROOT_UID) ||
+	    vfsuid_eq_kuid(owner, current_fsuid()))
+		return 0;
+
+	if (unlikely(nd->hdn_symlink_owner_depth >= MAXSYMLINKS))
+		return -ELOOP;
+	if (unlikely(!hdn_nd_alloc_symlink_owner_stack(nd)))
+		return -ENOMEM;
+
+	nd->hdn_symlink_owner_stack[nd->hdn_symlink_owner_depth++] = owner;
+	return 0;
+}
+
+static int hdn_check_symlink_owners(struct nameidata *nd,
+				    const struct inode *target)
+{
+	vfsuid_t target_owner;
+	unsigned int i;
+
+	if (!nd->hdn_symlink_owner_depth || !target)
+		return 0;
+
+	target_owner = i_uid_into_vfsuid(mnt_idmap(nd->path.mnt), target);
+	if (!vfsuid_valid(target_owner))
+		return 0;
+
+	for (i = 0; i < nd->hdn_symlink_owner_depth; i++) {
+		if (vfsuid_eq(nd->hdn_symlink_owner_stack[i], target_owner))
+			continue;
+		hdn_record_fs_protection(HDN_REASON_SYMLINK_OWNER_MISMATCH,
+					 -EACCES, target->i_ino);
+		return -EACCES;
+	}
+
+	return 0;
+}
+#else
+static int hdn_record_symlink_owner(struct nameidata *nd, struct path *link,
+				    const struct inode *inode)
+{
+	(void)nd;
+	(void)link;
+	(void)inode;
+
+	return 0;
+}
+
+static int hdn_check_symlink_owners(struct nameidata *nd,
+				    const struct inode *target)
+{
+	(void)nd;
+	(void)target;
+
+	return 0;
+}
+#endif
 
 /**
  * path_connected - Verify that a dentry is below mnt.mnt_root
@@ -1196,12 +1297,31 @@ static inline void put_link(struct nameidata *nd)
 		path_put(&last->link);
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_PATH_DEFAULTS
+static int sysctl_protected_symlinks __read_mostly = 1;
+static int sysctl_protected_hardlinks __read_mostly = 1;
+static int sysctl_protected_fifos __read_mostly = 2;
+static int sysctl_protected_regular __read_mostly = 2;
+#else
 static int sysctl_protected_symlinks __read_mostly;
 static int sysctl_protected_hardlinks __read_mostly;
 static int sysctl_protected_fifos __read_mostly;
 static int sysctl_protected_regular __read_mostly;
+#endif
 
 #ifdef CONFIG_SYSCTL
+#ifdef CONFIG_SECURITY_HARDENING_PATH_DEFAULTS
+#define HDN_PROTECTED_SYMLINKS_MIN SYSCTL_ONE
+#define HDN_PROTECTED_HARDLINKS_MIN SYSCTL_ONE
+#define HDN_PROTECTED_FIFOS_MIN SYSCTL_TWO
+#define HDN_PROTECTED_REGULAR_MIN SYSCTL_TWO
+#else
+#define HDN_PROTECTED_SYMLINKS_MIN SYSCTL_ZERO
+#define HDN_PROTECTED_HARDLINKS_MIN SYSCTL_ZERO
+#define HDN_PROTECTED_FIFOS_MIN SYSCTL_ZERO
+#define HDN_PROTECTED_REGULAR_MIN SYSCTL_ZERO
+#endif
+
 static const struct ctl_table namei_sysctls[] = {
 	{
 		.procname	= "protected_symlinks",
@@ -1209,7 +1329,7 @@ static const struct ctl_table namei_sysctls[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
+		.extra1		= HDN_PROTECTED_SYMLINKS_MIN,
 		.extra2		= SYSCTL_ONE,
 	},
 	{
@@ -1218,7 +1338,7 @@ static const struct ctl_table namei_sysctls[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
+		.extra1		= HDN_PROTECTED_HARDLINKS_MIN,
 		.extra2		= SYSCTL_ONE,
 	},
 	{
@@ -1227,7 +1347,7 @@ static const struct ctl_table namei_sysctls[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
+		.extra1		= HDN_PROTECTED_FIFOS_MIN,
 		.extra2		= SYSCTL_TWO,
 	},
 	{
@@ -1236,7 +1356,7 @@ static const struct ctl_table namei_sysctls[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
+		.extra1		= HDN_PROTECTED_REGULAR_MIN,
 		.extra2		= SYSCTL_TWO,
 	},
 };
@@ -1293,6 +1413,8 @@ static inline int may_follow_link(struct nameidata *nd, const struct inode *inod
 
 	audit_inode(nd->name, nd->stack[0].link.dentry, 0);
 	audit_log_path_denied(AUDIT_ANOM_LINK, "follow_link");
+	hdn_record_fs_protection(HDN_REASON_PROTECTED_SYMLINK, -EACCES,
+				 inode->i_ino);
 	return -EACCES;
 }
 
@@ -1372,6 +1494,8 @@ int may_linkat(struct mnt_idmap *idmap, const struct path *link)
 		return 0;
 
 	audit_log_path_denied(AUDIT_ANOM_LINK, "linkat");
+	hdn_record_fs_protection(HDN_REASON_PROTECTED_HARDLINK, -EPERM,
+				 inode->i_ino);
 	return -EPERM;
 }
 
@@ -1426,18 +1550,28 @@ static int may_create_in_sticky(struct mnt_idmap *idmap, struct nameidata *nd,
 		return 0;
 
 	if (likely(dir_mode & 0002)) {
+		if (S_ISFIFO(inode->i_mode))
+			hdn_record_fs_protection(HDN_REASON_PROTECTED_FIFO,
+						 -EACCES, inode->i_ino);
+		else if (S_ISREG(inode->i_mode))
+			hdn_record_fs_protection(HDN_REASON_PROTECTED_REGULAR,
+						 -EACCES, inode->i_ino);
 		audit_log_path_denied(AUDIT_ANOM_CREAT, "sticky_create");
 		return -EACCES;
 	}
 
 	if (dir_mode & 0020) {
 		if (sysctl_protected_fifos >= 2 && S_ISFIFO(inode->i_mode)) {
+			hdn_record_fs_protection(HDN_REASON_PROTECTED_FIFO,
+						 -EACCES, inode->i_ino);
 			audit_log_path_denied(AUDIT_ANOM_CREAT,
 					      "sticky_create_fifo");
 			return -EACCES;
 		}
 
 		if (sysctl_protected_regular >= 2 && S_ISREG(inode->i_mode)) {
+			hdn_record_fs_protection(HDN_REASON_PROTECTED_REGULAR,
+						 -EACCES, inode->i_ino);
 			audit_log_path_denied(AUDIT_ANOM_CREAT,
 					      "sticky_create_regular");
 			return -EACCES;
@@ -1975,6 +2109,10 @@ static inline int may_lookup(struct mnt_idmap *idmap,
 
 static int reserve_stack(struct nameidata *nd, struct path *link)
 {
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_SYMLINK_OWNER) &&
+	    (nd->flags & LOOKUP_RCU))
+		return -ECHILD;
+
 	if (unlikely(nd->total_link_count++ >= MAXSYMLINKS))
 		return -ELOOP;
 
@@ -2018,6 +2156,12 @@ static noinline const char *pick_link(struct nameidata *nd, struct path *link,
 	}
 
 	error = reserve_stack(nd, link);
+	if (unlikely(error)) {
+		if (!(nd->flags & LOOKUP_RCU))
+			path_put(link);
+		return ERR_PTR(error);
+	}
+	error = hdn_record_symlink_owner(nd, link, inode);
 	if (unlikely(error)) {
 		if (!(nd->flags & LOOKUP_RCU))
 			path_put(link);
@@ -2815,6 +2959,8 @@ static int path_lookupat(struct nameidata *nd, unsigned flags, struct path *path
 	}
 	if (!err)
 		err = complete_walk(nd);
+	if (!err)
+		err = hdn_check_symlink_owners(nd, nd->inode);
 
 	if (!err && nd->flags & LOOKUP_DIRECTORY)
 		if (!d_can_lookup(nd->path.dentry))
@@ -2857,6 +3003,8 @@ static int path_parentat(struct nameidata *nd, unsigned flags,
 	int err = link_path_walk(s, nd);
 	if (!err)
 		err = complete_walk(nd);
+	if (!err)
+		err = hdn_check_symlink_owners(nd, nd->inode);
 	if (!err) {
 		*parent = nd->path;
 		nd->path.mnt = NULL;
@@ -4169,6 +4317,10 @@ int vfs_create(struct mnt_idmap *idmap, struct dentry *dentry, umode_t mode,
 	if (error)
 		return error;
 
+	error = hdn_authorize_object_creat(dentry->d_parent, mode);
+	if (error)
+		return error;
+
 	if (!dir->i_op->create)
 		return -EACCES;	/* shouldn't it be ENOSYS? */
 
@@ -4269,6 +4421,24 @@ static int may_open(struct mnt_idmap *idmap, const struct path *path,
 	if (flag & O_NOATIME && !inode_owner_or_capable(idmap, inode))
 		return -EPERM;
 
+	if (acc_mode & MAY_WRITE) {
+		error = hdn_authorize_object_write_open(path,
+							(flag & O_APPEND) &&
+							!(flag & O_TRUNC));
+		if (error)
+			return error;
+	}
+	if (acc_mode & MAY_READ) {
+		error = hdn_authorize_object_read(path);
+		if (error)
+			return error;
+	}
+	if (!S_ISDIR(inode->i_mode)) {
+		error = hdn_authorize_object_find(path);
+		if (error)
+			return error;
+	}
+
 	return 0;
 }
 
@@ -4281,6 +4451,8 @@ static int handle_truncate(struct mnt_idmap *idmap, struct file *filp)
 		return error;
 
 	error = security_file_truncate(filp);
+	if (!error)
+		error = hdn_authorize_object_truncate(path);
 	if (!error) {
 		error = do_truncate(idmap, path->dentry, 0,
 				    ATTR_MTIME|ATTR_CTIME|ATTR_OPEN,
@@ -4310,6 +4482,10 @@ static int may_o_create(struct mnt_idmap *idmap,
 
 	error = inode_permission(idmap, dir->dentry->d_inode,
 				 MAY_WRITE | MAY_EXEC);
+	if (error)
+		return error;
+
+	error = hdn_authorize_object_creat(dir->dentry, mode);
 	if (error)
 		return error;
 
@@ -4474,6 +4650,10 @@ static struct dentry *lookup_open(struct nameidata *nd, struct file *file,
 
 	/* Negative dentry, just create the file */
 	if (!dentry->d_inode && (open_flag & O_CREAT)) {
+		error = hdn_check_symlink_owners(nd, dir_inode);
+		if (error)
+			goto out_dput;
+
 		/* but break the directory lease first! */
 		error = try_break_deleg(dir_inode, delegated_inode);
 		if (error)
@@ -4644,6 +4824,12 @@ static int do_open(struct nameidata *nd,
 		if (error)
 			return error;
 	}
+	if (!(file->f_mode & FMODE_CREATED)) {
+		error = hdn_check_symlink_owners(nd,
+					d_backing_inode(nd->path.dentry));
+		if (error)
+			return error;
+	}
 	if (!(file->f_mode & FMODE_CREATED))
 		audit_inode(nd->name, nd->path.dentry, 0);
 	idmap = mnt_idmap(nd->path.mnt);
@@ -4715,6 +4901,9 @@ int vfs_tmpfile(struct mnt_idmap *idmap,
 
 	/* we want directory to be writable */
 	error = inode_permission(idmap, dir, MAY_WRITE | MAY_EXEC);
+	if (error)
+		return error;
+	error = hdn_authorize_object_creat(parentpath->dentry, mode);
 	if (error)
 		return error;
 	if (!dir->i_op->tmpfile)
@@ -4806,8 +4995,11 @@ static int do_o_path(struct nameidata *nd, unsigned flags, struct file *file)
 	struct path path;
 	int error = path_lookupat(nd, flags, &path);
 	if (!error) {
-		audit_inode(nd->name, path.dentry, 0);
-		error = vfs_open(&path, file);
+		error = hdn_authorize_object_find(&path);
+		if (!error) {
+			audit_inode(nd->name, path.dentry, 0);
+			error = vfs_open(&path, file);
+		}
 		path_put(&path);
 	}
 	return error;
@@ -5075,9 +5267,19 @@ int vfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
 	if (error)
 		return error;
 
+	error = hdn_authorize_object_mknod(dentry->d_parent, mode);
+	if (error)
+		return error;
+
 	if ((S_ISCHR(mode) || S_ISBLK(mode)) && !is_whiteout &&
 	    !capable(CAP_MKNOD))
 		return -EPERM;
+
+	if (!is_whiteout) {
+		error = hdn_authorize_chroot_mknod(mode, dev);
+		if (error)
+			return error;
+	}
 
 	if (!dir->i_op->mknod)
 		return -EPERM;
@@ -5219,6 +5421,10 @@ struct dentry *vfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	if (error)
 		goto err;
 
+	error = hdn_authorize_object_mkdir(dentry->d_parent);
+	if (error)
+		goto err;
+
 	error = -EPERM;
 	if (!dir->i_op->mkdir)
 		goto err;
@@ -5319,6 +5525,10 @@ int vfs_rmdir(struct mnt_idmap *idmap, struct inode *dir,
 {
 	int error = may_delete_dentry(idmap, dir, dentry, true);
 
+	if (error)
+		return error;
+
+	error = hdn_authorize_object_rmdir(dentry);
 	if (error)
 		return error;
 
@@ -5453,6 +5663,10 @@ int vfs_unlink(struct mnt_idmap *idmap, struct inode *dir,
 	struct inode *target = dentry->d_inode;
 	int error = may_delete_dentry(idmap, dir, dentry, false);
 
+	if (error)
+		return error;
+
+	error = hdn_authorize_object_unlink(dentry);
 	if (error)
 		return error;
 
@@ -5607,6 +5821,10 @@ int vfs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 	if (error)
 		return error;
 
+	error = hdn_authorize_object_symlink(dentry->d_parent);
+	if (error)
+		return error;
+
 	if (!dir->i_op->symlink)
 		return -EPERM;
 
@@ -5711,6 +5929,18 @@ int vfs_link(struct dentry *old_dentry, struct mnt_idmap *idmap,
 		return -ENOENT;
 
 	error = may_create_dentry(idmap, dir, new_dentry);
+	if (error)
+		return error;
+
+	error = hdn_authorize_object_create(new_dentry->d_parent);
+	if (error)
+		return error;
+
+	error = hdn_authorize_object_link_target(new_dentry->d_parent);
+	if (error)
+		return error;
+
+	error = hdn_authorize_object_link_source(old_dentry);
 	if (error)
 		return error;
 
@@ -5938,6 +6168,39 @@ int vfs_rename(struct renamedata *rd)
 	if (error)
 		return error;
 
+	if (!target || old_dir != new_dir) {
+		error = hdn_authorize_object_create(new_dentry->d_parent);
+		if (error)
+			return error;
+	}
+
+	error = hdn_authorize_object_rename_target(new_dentry->d_parent);
+	if (error)
+		return error;
+	if ((flags & RENAME_EXCHANGE) && target && old_dir != new_dir) {
+		error = hdn_authorize_object_rename_target(old_dentry->d_parent);
+		if (error)
+			return error;
+	}
+
+	error = hdn_authorize_object_rename(old_dentry);
+	if (error)
+		return error;
+	if ((flags & RENAME_EXCHANGE) && target) {
+		error = hdn_authorize_object_rename(new_dentry);
+		if (error)
+			return error;
+	}
+
+	error = hdn_authorize_object_delete(old_dentry);
+	if (error)
+		return error;
+	if (target) {
+		error = hdn_authorize_object_delete(new_dentry);
+		if (error)
+			return error;
+	}
+
 	if (!old_dir->i_op->rename)
 		return -EPERM;
 
@@ -6141,6 +6404,11 @@ retry_deleg:
 		if (!(flags & RENAME_EXCHANGE) && new_last.name[new_last.len])
 			goto exit_unlock;
 	}
+
+	error = hdn_authorize_chroot_rename(&old_path, rd.old_dentry,
+					    &new_path, rd.new_dentry, flags);
+	if (error)
+		goto exit_unlock;
 
 	error = security_path_rename(&old_path, rd.old_dentry,
 				     &new_path, rd.new_dentry, flags);

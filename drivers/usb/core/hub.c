@@ -22,6 +22,7 @@
 #include <linux/kcov.h>
 #include <linux/ioctl.h>
 #include <linux/usb.h>
+#include <linux/hardening.h>
 #include <linux/usbdevice_fs.h>
 #include <linux/usb/hcd.h>
 #include <linux/usb/onboard_dev.h>
@@ -5448,6 +5449,11 @@ static void hub_port_connect(struct usb_hub *hub, int port1, u16 portstatus,
 			goto done;
 		return;
 	}
+
+	status = hdn_authorize_usb_attach(hdev->bus->busnum, port1);
+	if (status)
+		goto done;
+
 	if (hub_is_superspeed(hub->hdev))
 		unit_load = 150;
 	else

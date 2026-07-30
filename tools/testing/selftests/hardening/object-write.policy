@@ -1,0 +1,123 @@
+# Root-profile policy used by the QEMU smoke test to prove object
+# read/write/delete/create/creat/mkdir/mknod/symlink/unlink/rmdir/exec/link/link-target/attr/chmod/chown/utime/setid/ptrace/xattr/setxattr/removexattr/access/stat/list/find/ioctl/lock/watch/receive/fcntl/chdir/mount/umount/truncate/rename/rename-target/unix-connect/unix-bind/unix-listen/unix-accept/unix-send/unix-recv denial,
+# recursive tree denial, recursive tree denial for descriptor and IPC
+# operations, recursive split-operation and split metadata tree denial, and
+# append-only enforcement, including deny-find ordinary-open hiding
+# by signed file or directory identity.
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 object-write-root
+
+allow 2 POLICY_ADMIN CRED_CHANGE TTY_ACCESS BLOCK_DEVICE_ACCESS MOUNT_ADMIN
+
+object 2 deny-write path /hdn-object-write-protected
+object 2 deny-write path /hdn-object-write-fifo-protected
+object 2 deny-write path /hdn-object-write-chrdev-protected
+object 2 deny-write path /hdn-object-write-blkdev-protected
+object 2 deny-read path /hdn-object-read-protected
+object 2 deny-read path /hdn-object-read-fifo-protected
+object 2 deny-read path /hdn-object-read-chrdev-protected
+object 2 deny-read path /hdn-object-read-blkdev-protected
+object 2 deny-read nofollow-path /hdn-object-readlink-protected
+object 2 deny-delete path /hdn-object-delete-protected
+object 2 deny-delete path /hdn-object-delete-protected-dir
+object 2 deny-create path /hdn-object-create-protected
+object 2 deny-creat path /hdn-object-creat-protected
+object 2 deny-mkdir path /hdn-object-mkdir-protected
+object 2 deny-mknod path /hdn-object-mknod-protected
+object 2 deny-symlink path /hdn-object-symlink-protected
+object 2 deny-unlink path /hdn-object-unlink-protected
+object 2 deny-rmdir path /hdn-object-rmdir-protected
+object 2 deny-exec path /hdn-object-exec-protected
+object 2 append-only path /hdn-object-append-protected
+object 2 deny-link path /hdn-object-link-protected
+object 2 deny-link-target path /hdn-object-link-target-protected
+object 2 deny-attr path /hdn-object-attr-protected
+object 2 deny-attr path /hdn-object-fileattr-tmpfs/protected
+object 2 deny-chmod path /hdn-object-chmod-protected
+object 2 deny-chown path /hdn-object-chown-protected
+object 2 deny-utime path /hdn-object-utime-protected
+object 2 deny-setid path /hdn-object-setid-protected
+object 2 deny-setid path /hdn-object-setid-create-protected
+object 2 deny-ptrace path /hdn-ptrace-object-target
+object 2 deny-access path /hdn-object-access-protected
+object 2 deny-stat path /hdn-object-stat-protected
+object 2 deny-stat path /hdn-object-fileattr-tmpfs/stat-protected
+object 2 deny-list path /hdn-object-list-protected
+object 2 deny-find path /hdn-object-find-protected
+object 2 deny-ioctl path /hdn-object-ioctl-protected
+object 2 deny-lock path /hdn-object-lock-protected
+object 2 deny-watch path /hdn-object-watch-protected
+object 2 deny-watch path /hdn-object-watch-dir-protected
+object 2 deny-xattr path /hdn-object-xattr-protected
+object 2 deny-setxattr path /hdn-object-setxattr-protected
+object 2 deny-removexattr path /hdn-object-removexattr-protected
+object 2 deny-receive path /hdn-object-receive-protected
+object 2 deny-fcntl path /hdn-object-fcntl-protected
+object 2 deny-chdir path /hdn-object-chdir-protected
+object 2 deny-mount path /hdn-object-mount-protected
+object 2 deny-mount-source path /hdn-object-mount-source-protected
+object 2 deny-umount path /hdn-object-umount-protected
+object 2 deny-truncate path /hdn-object-truncate-protected
+object 2 deny-rename path /hdn-object-rename-protected
+object 2 deny-rename-target path /hdn-object-rename-target-protected
+object 2 deny-unix-connect path /hdn-object-unix-connect-protected
+object 2 deny-unix-bind path /hdn-object-unix-bind-protected
+object 2 deny-unix-listen path /hdn-object-unix-listen-protected
+object 2 deny-unix-accept path /hdn-object-unix-accept-protected
+object 2 deny-unix-send path /hdn-object-unix-send-protected
+object 2 deny-unix-recv path /hdn-object-unix-recv-protected
+object 2 deny-unix-connect abstract hdn-object-abstract-connect-protected
+object 2 deny-unix-bind abstract hdn-object-abstract-bind-protected
+object 2 deny-unix-listen abstract hdn-object-abstract-listen-protected
+object 2 deny-unix-accept abstract hdn-object-abstract-accept-protected
+object 2 deny-unix-send abstract hdn-object-abstract-send-protected
+object 2 deny-unix-recv abstract hdn-object-abstract-recv-protected
+object 2 deny-find path /hdn-object-find-dir/hidden
+object 2 deny-read tree /hdn-object-tree-protected
+object 2 deny-write tree /hdn-object-tree-protected
+object 2 deny-delete tree /hdn-object-tree-protected
+object 2 deny-create tree /hdn-object-tree-protected
+object 2 deny-attr tree /hdn-object-tree-protected
+object 2 deny-access tree /hdn-object-tree-protected
+object 2 deny-stat tree /hdn-object-tree-protected
+object 2 deny-list tree /hdn-object-tree-protected
+object 2 deny-find tree /hdn-object-tree-protected
+object 2 deny-find tree /hdn-object-find-tree
+object 2 deny-exec tree /hdn-object-tree-ops
+object 2 deny-link tree /hdn-object-tree-ops
+object 2 deny-ioctl tree /hdn-object-tree-ops
+object 2 deny-lock tree /hdn-object-tree-ops
+object 2 deny-watch tree /hdn-object-tree-ops
+object 2 deny-fcntl tree /hdn-object-tree-ops
+object 2 deny-chdir tree /hdn-object-tree-ops
+object 2 deny-truncate tree /hdn-object-tree-ops
+object 2 deny-rename tree /hdn-object-tree-ops
+object 2 deny-rename-target tree /hdn-object-tree-ops
+object 2 deny-link-target tree /hdn-object-tree-ops
+object 2 deny-unix-connect tree /hdn-object-tree-ops
+object 2 deny-chmod tree /hdn-object-tree-meta
+object 2 deny-chown tree /hdn-object-tree-meta
+object 2 deny-utime tree /hdn-object-tree-meta
+object 2 deny-xattr tree /hdn-object-tree-meta
+object 2 deny-setxattr tree /hdn-object-tree-meta
+object 2 deny-removexattr tree /hdn-object-tree-meta
+object 2 deny-receive tree /hdn-object-tree-receive
+object 2 deny-mount tree /hdn-object-tree-mount
+object 2 deny-umount tree /hdn-object-tree-umount/nested/umount-target
+object 2 deny-unix-bind tree /hdn-object-tree-ipc-bind
+object 2 deny-unix-listen tree /hdn-object-tree-ipc-listen
+object 2 deny-unix-accept tree /hdn-object-tree-ipc-accept
+object 2 deny-unix-send tree /hdn-object-tree-ipc-send
+object 2 deny-unix-recv tree /hdn-object-tree-ipc-recv
+object 2 deny-creat tree /hdn-object-tree-split
+object 2 deny-mkdir tree /hdn-object-tree-split
+object 2 deny-mknod tree /hdn-object-tree-split
+object 2 deny-symlink tree /hdn-object-tree-split
+object 2 deny-unlink tree /hdn-object-tree-split
+object 2 deny-rmdir tree /hdn-object-tree-split
+object 2 append-only tree /hdn-object-tree-append

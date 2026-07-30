@@ -25,6 +25,7 @@
 #include <linux/sched/signal.h>
 #include <linux/fs.h>
 #include <linux/file.h>
+#include <linux/hardening.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/percpu.h>
@@ -1626,6 +1627,9 @@ static int aio_write(struct kiocb *req, const struct iocb *iocb,
 	if (ret < 0)
 		return ret;
 	ret = rw_verify_area(WRITE, file, &req->ki_pos, iov_iter_count(&iter));
+	if (!ret)
+		ret = hdn_authorize_object_write_file(file,
+						      req->ki_flags & IOCB_APPEND);
 	if (!ret) {
 		if (S_ISREG(file_inode(file)->i_mode))
 			kiocb_start_write(req);

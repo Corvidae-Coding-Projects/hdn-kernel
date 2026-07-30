@@ -7,7 +7,7 @@
 #include <linux/cleanup.h>
 #include <linux/err.h>
 #include <linux/fprobe.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/kprobes.h>
 #include <linux/list.h>
 #include <linux/mutex.h>

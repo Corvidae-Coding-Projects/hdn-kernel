@@ -3913,8 +3913,13 @@ struct vm_unmapped_area_info {
 	unsigned long align_mask;
 	unsigned long align_offset;
 	unsigned long start_gap;
+	unsigned long threadstack_offset;
 };
 
+unsigned long hdn_rand_threadstack_offset(const struct file *filp,
+					  unsigned long addr,
+					  unsigned long flags,
+					  vm_flags_t vm_flags);
 extern unsigned long vm_unmapped_area(struct vm_unmapped_area_info *info);
 
 /* truncate.c */

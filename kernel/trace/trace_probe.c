@@ -13,6 +13,8 @@
 
 #include <linux/bpf.h>
 #include <linux/fs.h>
+#include <linux/hardening.h>
+#include <linux/kallsyms-lookup.h>
 
 #include "trace_btf.h"
 #include "trace_probe.h"
@@ -58,7 +60,7 @@ DEFINE_BASIC_PRINT_TYPE_FUNC(char, u8, "'%c'")
 
 int PRINT_TYPE_FUNC_NAME(symbol)(struct trace_seq *s, void *data, void *ent)
 {
-	trace_seq_printf(s, "%pS", (void *)*(unsigned long *)data);
+	trace_seq_print_sym(s, *(unsigned long *)data, true);
 	return !trace_seq_has_overflowed(s);
 }
 const char PRINT_TYPE_FMT_NAME(symbol)[] = "%pS";
@@ -1875,6 +1877,10 @@ int traceprobe_update_arg(struct probe_arg *arg)
 		if (code->op == FETCH_NOP_SYMBOL) {
 			if (code[1].op != FETCH_OP_IMM)
 				return -EINVAL;
+
+			ret = hdn_authorize_kernel_symbol_lookup();
+			if (ret)
+				return ret;
 
 			tmp = strpbrk(code->data, "+-");
 			if (tmp)

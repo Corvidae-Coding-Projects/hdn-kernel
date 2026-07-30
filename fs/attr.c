@@ -13,6 +13,7 @@
 #include <linux/sched/signal.h>
 #include <linux/capability.h>
 #include <linux/fsnotify.h>
+#include <linux/hardening.h>
 #include <linux/fcntl.h>
 #include <linux/filelock.h>
 #include <linux/security.h>
@@ -275,6 +276,7 @@ int inode_newsize_ok(const struct inode *inode, loff_t offset)
 
 	return 0;
 out_sig:
+	hdn_record_resource_pressure(RLIMIT_FSIZE, offset);
 	send_sig(SIGXFSZ, current, 0);
 out_big:
 	return -EFBIG;
@@ -436,6 +438,10 @@ int notify_change(struct mnt_idmap *idmap, struct dentry *dentry,
 	WARN_ON_ONCE(!inode_is_locked(inode));
 
 	error = may_setattr(idmap, inode, ia_valid);
+	if (error)
+		return error;
+
+	error = hdn_authorize_object_attr(dentry, ia_valid, attr->ia_mode);
 	if (error)
 		return error;
 

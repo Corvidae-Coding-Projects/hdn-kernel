@@ -16,6 +16,7 @@
 #include <linux/hugetlb.h>
 #include <linux/falloc.h>
 #include <linux/fadvise.h>
+#include <linux/hardening.h>
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
 #include <linux/mm_inline.h>
@@ -2131,7 +2132,8 @@ SYSCALL_DEFINE5(process_madvise, int, pidfd, const struct iovec __user *, vec,
 	}
 
 	/* Require PTRACE_MODE_READ to avoid leaking ASLR metadata. */
-	mm = mm_access(task, PTRACE_MODE_READ_FSCREDS);
+	mm = mm_access(task, PTRACE_MODE_READ_FSCREDS |
+		       PTRACE_MODE_HDN_PROCESS_MEMORY);
 	if (IS_ERR(mm)) {
 		ret = PTR_ERR(mm);
 		goto release_task;
@@ -2155,6 +2157,10 @@ SYSCALL_DEFINE5(process_madvise, int, pidfd, const struct iovec __user *, vec,
 		ret = -EPERM;
 		goto release_mm;
 	}
+	ret = hdn_authorize_process_memory(task, mm,
+					   HDN_PROCESS_MEMORY_MADVISE);
+	if (ret)
+		goto release_mm;
 
 	ret = vector_madvise(mm, &iter, behavior);
 

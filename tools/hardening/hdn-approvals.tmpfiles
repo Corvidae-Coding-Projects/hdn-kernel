@@ -1,0 +1,2 @@
+# Runtime handoff directory for one-use, root-owned admin approval tokens.
+d /run/hdn/approvals 0700 root root -

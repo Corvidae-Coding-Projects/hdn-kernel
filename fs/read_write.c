@@ -12,6 +12,7 @@
 #include <linux/file.h>
 #include <linux/uio.h>
 #include <linux/fsnotify.h>
+#include <linux/hardening.h>
 #include <linux/security.h>
 #include <linux/export.h>
 #include <linux/syscalls.h>
@@ -476,6 +477,16 @@ int rw_verify_area(int read_write, struct file *file, const loff_t *ppos, size_t
 	if (ret)
 		return ret;
 
+	if (read_write == READ) {
+		ret = hdn_authorize_object_read(&file->f_path);
+		if (ret)
+			return ret;
+	} else {
+		ret = hdn_authorize_object_write(&file->f_path);
+		if (ret)
+			return ret;
+	}
+
 	return fsnotify_file_area_perm(file, mask, ppos, count);
 }
 EXPORT_SYMBOL(rw_verify_area);
@@ -582,6 +593,21 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 	return ret;
 }
 
+static bool hdn_write_flags_append(const struct file *file, rwf_t flags)
+{
+	if (flags & RWF_APPEND)
+		return true;
+	if (flags & RWF_NOAPPEND)
+		return false;
+
+	return file->f_flags & O_APPEND;
+}
+
+static bool hdn_iocb_append(const struct kiocb *iocb)
+{
+	return iocb->ki_flags & IOCB_APPEND;
+}
+
 static ssize_t new_sync_write(struct file *filp, const char __user *buf, size_t len, loff_t *ppos)
 {
 	struct kiocb kiocb;
@@ -658,6 +684,10 @@ ssize_t kernel_write(struct file *file, const void *buf, size_t count,
 	if (ret)
 		return ret;
 
+	ret = hdn_authorize_object_write_file(file, false);
+	if (ret)
+		return ret;
+
 	file_start_write(file);
 	ret =  __kernel_write(file, buf, count, pos);
 	file_end_write(file);
@@ -681,6 +711,10 @@ ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_
 		return ret;
 	if (count > MAX_RW_COUNT)
 		count =  MAX_RW_COUNT;
+	ret = hdn_authorize_object_write_file(file,
+					      hdn_write_flags_append(file, 0));
+	if (ret)
+		return ret;
 	file_start_write(file);
 	if (file->f_op->write)
 		ret = file->f_op->write(file, buf, count, pos);
@@ -947,6 +981,10 @@ ssize_t vfs_iocb_iter_write(struct file *file, struct kiocb *iocb,
 	if (ret < 0)
 		return ret;
 
+	ret = hdn_authorize_object_write_file(file, hdn_iocb_append(iocb));
+	if (ret)
+		return ret;
+
 	kiocb_start_write(iocb);
 	ret = file->f_op->write_iter(iocb, iter);
 	if (ret != -EIOCBQUEUED)
@@ -977,6 +1015,12 @@ ssize_t vfs_iter_write(struct file *file, struct iov_iter *iter, loff_t *ppos,
 
 	ret = rw_verify_area(WRITE, file, ppos, tot_len);
 	if (ret < 0)
+		return ret;
+
+	ret = hdn_authorize_object_write_file(file,
+					      hdn_write_flags_append(file,
+								     flags));
+	if (ret)
 		return ret;
 
 	file_start_write(file);
@@ -1052,6 +1096,12 @@ static ssize_t vfs_writev(struct file *file, const struct iovec __user *vec,
 
 	ret = rw_verify_area(WRITE, file, pos, tot_len);
 	if (ret < 0)
+		goto out;
+
+	ret = hdn_authorize_object_write_file(file,
+					      hdn_write_flags_append(file,
+								     flags));
+	if (ret)
 		goto out;
 
 	file_start_write(file);
@@ -1575,6 +1625,14 @@ ssize_t vfs_copy_file_range(struct file *file_in, loff_t pos_in,
 	if (unlikely(ret))
 		return ret;
 
+	ret = hdn_authorize_object_read(&file_in->f_path);
+	if (unlikely(ret))
+		return ret;
+
+	ret = hdn_authorize_object_write_file(file_out, false);
+	if (unlikely(ret))
+		return ret;
+
 	if (len == 0)
 		return 0;
 
@@ -1716,6 +1774,7 @@ int generic_write_check_limits(struct file *file, loff_t pos, loff_t *count)
 
 	if (limit != RLIM_INFINITY) {
 		if (pos >= limit) {
+			hdn_record_resource_pressure(RLIMIT_FSIZE, pos);
 			send_sig(SIGXFSZ, current, 0);
 			return -EFBIG;
 		}

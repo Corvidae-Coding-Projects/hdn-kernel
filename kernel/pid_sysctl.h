@@ -10,15 +10,19 @@ static int pid_mfd_noexec_dointvec_minmax(const struct ctl_table *table,
 {
 	struct pid_namespace *ns = task_active_pid_ns(current);
 	struct ctl_table table_copy;
-	int err, scope, parent_scope;
+	int err, scope, parent_scope, floor_scope = MEMFD_NOEXEC_SCOPE_EXEC;
 
 	if (write && !ns_capable(ns->user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
 	table_copy = *table;
 
+#ifdef CONFIG_SECURITY_HARDENING_MEMFD_NOEXEC
+	floor_scope = MEMFD_NOEXEC_SCOPE_NOEXEC_ENFORCED;
+#endif
+
 	/* You cannot set a lower enforcement value than your parent. */
-	parent_scope = pidns_memfd_noexec_scope(ns->parent);
+	parent_scope = max(pidns_memfd_noexec_scope(ns->parent), floor_scope);
 	/* Equivalent to pidns_memfd_noexec_scope(ns). */
 	scope = max(READ_ONCE(ns->memfd_noexec_scope), parent_scope);
 

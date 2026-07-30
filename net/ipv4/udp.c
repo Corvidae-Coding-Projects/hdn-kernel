@@ -90,6 +90,7 @@
 #include <linux/errno.h>
 #include <linux/timer.h>
 #include <linux/mm.h>
+#include <linux/hardening.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/slab.h>
@@ -2763,7 +2764,8 @@ no_sk:
 
 	drop_reason = SKB_DROP_REASON_NO_SOCKET;
 	__UDP_INC_STATS(net, UDP_MIB_NOPORTS, proto == IPPROTO_UDPLITE);
-	icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0);
+	if (!hdn_blackhole_remote_skb(skb))
+		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0);
 
 	/*
 	 * Hmm.  We got an UDP packet to a port to which we

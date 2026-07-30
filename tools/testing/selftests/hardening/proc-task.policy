@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Policy used by the QEMU smoke test to prove process-list visibility can be
+# granted without broader kernel proc disclosure.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 proc-task-root
+
+allow 2 POLICY_ADMIN CRED_CHANGE TTY_ACCESS PROC_TASK_VIEW

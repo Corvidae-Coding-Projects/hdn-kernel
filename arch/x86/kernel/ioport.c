@@ -4,6 +4,7 @@
  * by Linus. 32/64 bits code unification by Miguel Botón.
  */
 #include <linux/capability.h>
+#include <linux/hardening.h>
 #include <linux/security.h>
 #include <linux/syscalls.h>
 #include <linux/bitmap.h>
@@ -78,6 +79,9 @@ long ksys_ioperm(unsigned long from, unsigned long num, int turn_on)
 		return -EINVAL;
 	if (turn_on && (!capable(CAP_SYS_RAWIO) ||
 			security_locked_down(LOCKDOWN_IOPORT)))
+		return -EPERM;
+	if (turn_on && hdn_authorize(HDN_AUTH_RAW_IO, HDN_TRANS_RAW_IO,
+				     HDN_REASON_PROFILE_DENIED, -EPERM))
 		return -EPERM;
 
 	/*
@@ -194,6 +198,9 @@ SYSCALL_DEFINE1(iopl, unsigned int, level)
 	if (level > old) {
 		if (!capable(CAP_SYS_RAWIO) ||
 		    security_locked_down(LOCKDOWN_IOPORT))
+			return -EPERM;
+		if (hdn_authorize(HDN_AUTH_RAW_IO, HDN_TRANS_RAW_IO,
+				  HDN_REASON_PROFILE_DENIED, -EPERM))
 			return -EPERM;
 	}
 

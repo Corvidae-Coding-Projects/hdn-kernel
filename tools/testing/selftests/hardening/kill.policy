@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Root-profile policy used by the QEMU smoke test to prove exploit response
+# policy can turn memory-execution denials into task termination.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 kill-memory-root
+
+allow 2 POLICY_ADMIN CRED_CHANGE TTY_ACCESS
+response 2 KILL_MEMORY

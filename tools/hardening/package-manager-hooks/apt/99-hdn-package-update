@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// APT/dpkg integration for HDN protected system updates.
+// Install as /etc/apt/apt.conf.d/99-hdn-package-update.
+
+DPkg::Post-Invoke {
+	"/usr/libexec/hdn-package-hook image-seal-default";
+};

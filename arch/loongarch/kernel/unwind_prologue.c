@@ -5,7 +5,7 @@
 #include <linux/cpumask.h>
 #include <linux/export.h>
 #include <linux/ftrace.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 
 #include <asm/inst.h>
 #include <asm/loongson.h>

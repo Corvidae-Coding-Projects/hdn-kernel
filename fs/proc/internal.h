@@ -394,6 +394,7 @@ struct proc_maps_private {
 	struct vma_iterator iter;
 	loff_t last_pos;
 	struct proc_maps_locking_ctx lock_ctx;
+	bool memmap_disclose;
 #ifdef CONFIG_NUMA
 	struct mempolicy *task_mempolicy;
 #endif

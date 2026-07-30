@@ -29,6 +29,7 @@
 #include <linux/audit.h>
 #include <linux/falloc.h>
 #include <linux/fs_struct.h>
+#include <linux/hardening.h>
 #include <linux/dnotify.h>
 #include <linux/compat.h>
 #include <linux/mnt_idmapping.h>
@@ -90,6 +91,14 @@ int vfs_truncate(const struct path *path, loff_t length)
 		return error;
 
 	error = fsnotify_truncate_perm(path, length);
+	if (error)
+		return error;
+
+	error = hdn_authorize_object_write_open(path, false);
+	if (error)
+		return error;
+
+	error = hdn_authorize_object_truncate(path);
 	if (error)
 		return error;
 
@@ -189,6 +198,14 @@ int do_ftruncate(struct file *file, loff_t length, int small)
 		return error;
 
 	error = fsnotify_truncate_perm(&file->f_path, length);
+	if (error)
+		return error;
+
+	error = hdn_authorize_object_write_open(&file->f_path, false);
+	if (error)
+		return error;
+
+	error = hdn_authorize_object_truncate(&file->f_path);
 	if (error)
 		return error;
 
@@ -314,6 +331,14 @@ int vfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 		return ret;
 
 	ret = fsnotify_file_area_perm(file, MAY_WRITE, &offset, len);
+	if (ret)
+		return ret;
+
+	ret = hdn_authorize_object_write_open(&file->f_path, false);
+	if (ret)
+		return ret;
+
+	ret = hdn_authorize_object_truncate(&file->f_path);
 	if (ret)
 		return ret;
 
@@ -505,20 +530,24 @@ retry:
 
 	res = inode_permission(mnt_idmap(path.mnt), inode, mode | MAY_ACCESS);
 	/* SuS v2 requires we report a read only fs too */
-	if (res || !(mode & S_IWOTH) || special_file(inode->i_mode))
+	if (res)
 		goto out_path_release;
-	/*
-	 * This is a rare case where using __mnt_is_readonly()
-	 * is OK without a mnt_want/drop_write() pair.  Since
-	 * no actual write to the fs is performed here, we do
-	 * not need to telegraph to that to anyone.
-	 *
-	 * By doing this, we accept that this access is
-	 * inherently racy and know that the fs may change
-	 * state before we even see this result.
-	 */
-	if (__mnt_is_readonly(path.mnt))
-		res = -EROFS;
+	if ((mode & S_IWOTH) && !special_file(inode->i_mode)) {
+		/*
+		 * This is a rare case where using __mnt_is_readonly()
+		 * is OK without a mnt_want/drop_write() pair.  Since
+		 * no actual write to the fs is performed here, we do
+		 * not need to telegraph to that to anyone.
+		 *
+		 * By doing this, we accept that this access is
+		 * inherently racy and know that the fs may change
+		 * state before we even see this result.
+		 */
+		if (__mnt_is_readonly(path.mnt))
+			res = -EROFS;
+	}
+	if (!res)
+		res = hdn_authorize_object_access(&path, mode);
 
 out_path_release:
 	path_put(&path);
@@ -560,7 +589,11 @@ retry:
 	if (!error) {
 		error = path_permission(&path, MAY_EXEC | MAY_CHDIR);
 		if (!error)
+			error = hdn_authorize_chdir(&path);
+		if (!error) {
 			set_fs_pwd(current->fs, &path);
+			hdn_record_chdir(&path);
+		}
 		path_put(&path);
 		if (retry_estale(error, lookup_flags)) {
 			lookup_flags |= LOOKUP_REVAL;
@@ -583,7 +616,11 @@ SYSCALL_DEFINE1(fchdir, unsigned int, fd)
 
 	error = file_permission(fd_file(f), MAY_EXEC | MAY_CHDIR);
 	if (!error)
+		error = hdn_authorize_chdir(&fd_file(f)->f_path);
+	if (!error) {
 		set_fs_pwd(current->fs, &fd_file(f)->f_path);
+		hdn_record_chdir(&fd_file(f)->f_path);
+	}
 	return error;
 }
 
@@ -607,7 +644,11 @@ retry:
 		goto dput_and_out;
 	error = security_path_chroot(&path);
 	if (!error)
+		error = hdn_authorize_chroot(&path);
+	if (!error) {
 		set_fs_root(current->fs, &path);
+		hdn_chroot_committed(&path);
+	}
 dput_and_out:
 	path_put(&path);
 	if (retry_estale(error, lookup_flags)) {
@@ -627,6 +668,9 @@ int chmod_common(const struct path *path, umode_t mode)
 	error = mnt_want_write(path->mnt);
 	if (error)
 		return error;
+	error = hdn_authorize_chroot_chmod(path, mode);
+	if (error)
+		goto out_mnt_unlock;
 retry_deleg:
 	error = inode_lock_killable(inode);
 	if (error)

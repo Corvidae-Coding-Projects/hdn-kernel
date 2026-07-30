@@ -12,6 +12,7 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/highmem.h>
+#include <linux/hardening.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -5219,6 +5220,7 @@ static int vmalloc_info_show(struct seq_file *m, void *p)
 	struct vmap_area *va;
 	struct vm_struct *v;
 	unsigned int *counters;
+	bool disclose_symbols = hdn_kernel_symbol_disclose_allowed();
 
 	if (IS_ENABLED(CONFIG_NUMA))
 		counters = kmalloc_array(nr_node_ids, sizeof(unsigned int), GFP_KERNEL);
@@ -5245,8 +5247,12 @@ static int vmalloc_info_show(struct seq_file *m, void *p)
 			seq_printf(m, "0x%pK-0x%pK %7ld",
 				v->addr, v->addr + v->size, v->size);
 
-			if (v->caller)
-				seq_printf(m, " %pS", v->caller);
+			if (v->caller) {
+				if (disclose_symbols)
+					seq_printf(m, " %pS", v->caller);
+				else
+					seq_puts(m, " [hidden]");
+			}
 
 			if (v->nr_pages)
 				seq_printf(m, " pages=%d", v->nr_pages);

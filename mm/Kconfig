@@ -188,6 +188,7 @@ config SLUB_TINY
 
 config SLAB_MERGE_DEFAULT
 	bool "Allow slab caches to be merged"
+	default n if SECURITY_HARDENING_EXPLOIT_MITIGATIONS
 	default y
 	help
 	  For reduced kernel memory fragmentation, slab caches can be
@@ -203,6 +204,7 @@ config SLAB_MERGE_DEFAULT
 config SLAB_FREELIST_RANDOM
 	bool "Randomize slab freelist"
 	depends on !SLUB_TINY
+	default y if SECURITY_HARDENING_EXPLOIT_MITIGATIONS
 	help
 	  Randomizes the freelist order used on creating new pages. This
 	  security feature reduces the predictability of the kernel slab
@@ -211,6 +213,7 @@ config SLAB_FREELIST_RANDOM
 config SLAB_FREELIST_HARDENED
 	bool "Harden slab freelist metadata"
 	depends on !SLUB_TINY
+	default y if SECURITY_HARDENING_EXPLOIT_MITIGATIONS
 	help
 	  Many kernel heap attacks try to target slab cache metadata and
 	  other infrastructure. This options makes minor performance
@@ -248,6 +251,7 @@ config SLUB_STATS
 	  Try running: slabinfo -DA
 
 config RANDOM_KMALLOC_CACHES
+	default y if SECURITY_HARDENING_EXPLOIT_MITIGATIONS
 	default n
 	depends on !SLUB_TINY
 	bool "Randomize slab caches for normal kmalloc"

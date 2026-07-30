@@ -42,6 +42,7 @@
 #include <linux/objtool.h>
 #include <linux/kmsg_dump.h>
 #include <linux/dma-map-ops.h>
+#include <linux/hardening.h>
 #include <linux/sysfs.h>
 
 #include <asm/page.h>
@@ -1115,6 +1116,9 @@ bool kexec_load_permitted(int kexec_image_type)
 	 * been disabled.
 	 */
 	if (!capable(CAP_SYS_BOOT) || kexec_load_disabled)
+		return false;
+	if (hdn_authorize(HDN_AUTH_KEXEC_LOAD, HDN_TRANS_KEXEC_LOAD,
+			  HDN_REASON_PROFILE_DENIED, -EPERM))
 		return false;
 
 	/* Check limit counter and decrease it.*/

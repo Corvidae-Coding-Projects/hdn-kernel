@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Boot integration for HDN protected-system mount sealing.
+
+[Unit]
+Description=Seal protected system image
+Documentation=man:hdn-package-hook(8)
+DefaultDependencies=no
+After=local-fs.target hdn-policy-load.service
+Before=sysinit.target
+ConditionPathExists=/etc/hdn/package-hooks.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/hdn-package-hook image-seal-default
+
+[Install]
+WantedBy=sysinit.target

@@ -10,6 +10,7 @@
 #include <linux/sched/task.h>
 #include <linux/tty.h>
 #include <linux/fcntl.h>
+#include <linux/hardening.h>
 #include <linux/uaccess.h>
 #include "tty.h"
 
@@ -117,6 +118,7 @@ static void __proc_set_tty(struct tty_struct *tty)
 	put_pid(current->signal->tty_old_pgrp);
 	current->signal->tty = tty_kref_get(tty);
 	current->signal->tty_old_pgrp = NULL;
+	hdn_tty_record_session_broker(tty);
 }
 
 static void proc_set_tty(struct tty_struct *tty)

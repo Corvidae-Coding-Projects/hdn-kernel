@@ -4,6 +4,8 @@
  * VMA-specific functions.
  */
 
+#include <linux/hardening.h>
+
 #include "vma_internal.h"
 #include "vma.h"
 
@@ -2955,13 +2957,22 @@ unacct_fail:
 unsigned long unmapped_area(struct vm_unmapped_area_info *info)
 {
 	unsigned long length, gap;
+	unsigned long old_length;
 	unsigned long low_limit, high_limit;
 	struct vm_area_struct *tmp;
 	VMA_ITERATOR(vmi, current->mm, 0);
 
 	/* Adjust search length to account for worst case alignment overhead */
-	length = info->length + info->align_mask + info->start_gap;
+	length = info->length + info->align_mask;
 	if (length < info->length)
+		return -ENOMEM;
+	old_length = length;
+	length += info->start_gap;
+	if (length < old_length)
+		return -ENOMEM;
+	old_length = length;
+	length += info->threadstack_offset;
+	if (length < old_length)
 		return -ENOMEM;
 
 	low_limit = info->low_limit;
@@ -2996,6 +3007,7 @@ retry:
 		}
 	}
 
+	gap += info->threadstack_offset;
 	return gap;
 }
 
@@ -3012,13 +3024,22 @@ retry:
 unsigned long unmapped_area_topdown(struct vm_unmapped_area_info *info)
 {
 	unsigned long length, gap, gap_end;
+	unsigned long old_length;
 	unsigned long low_limit, high_limit;
 	struct vm_area_struct *tmp;
 	VMA_ITERATOR(vmi, current->mm, 0);
 
 	/* Adjust search length to account for worst case alignment overhead */
-	length = info->length + info->align_mask + info->start_gap;
+	length = info->length + info->align_mask;
 	if (length < info->length)
+		return -ENOMEM;
+	old_length = length;
+	length += info->start_gap;
+	if (length < old_length)
+		return -ENOMEM;
+	old_length = length;
+	length += info->threadstack_offset;
+	if (length < old_length)
 		return -ENOMEM;
 
 	low_limit = info->low_limit;
@@ -3048,6 +3069,7 @@ retry:
 		}
 	}
 
+	gap -= info->threadstack_offset;
 	return gap;
 }
 
@@ -3067,8 +3089,10 @@ static int acct_stack_growth(struct vm_area_struct *vma,
 		return -ENOMEM;
 
 	/* Stack limit test */
-	if (size > rlimit(RLIMIT_STACK))
+	if (size > rlimit(RLIMIT_STACK)) {
+		hdn_record_resource_pressure(RLIMIT_STACK, size);
 		return -ENOMEM;
+	}
 
 	/* mlock limit tests */
 	if (!mlock_future_ok(mm, vma->vm_flags & VM_LOCKED, grow << PAGE_SHIFT))

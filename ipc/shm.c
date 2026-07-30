@@ -44,6 +44,7 @@
 #include <linux/nsproxy.h>
 #include <linux/mount.h>
 #include <linux/ipc_namespace.h>
+#include <linux/hardening.h>
 #include <linux/rhashtable.h>
 #include <linux/nstree.h>
 
@@ -63,6 +64,7 @@ struct shmid_kernel /* private to the kernel */
 	struct pid		*shm_cprid;
 	struct pid		*shm_lprid;
 	struct ucounts		*mlock_ucounts;
+	u64			hardening_profile_id;
 
 	/*
 	 * The task created the shm object, for
@@ -775,6 +777,7 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 	shp->shm_nattch = 0;
 	shp->shm_file = file;
 	shp->shm_creator = current;
+	shp->hardening_profile_id = hdn_current_profile_id();
 
 	/* ipc_addid() locks shp upon success. */
 	error = ipc_addid(&shm_ids(ns), &shp->shm_perm, ns->shm_ctlmni);
@@ -1587,6 +1590,14 @@ long do_shmat(int shmid, char __user *shmaddr, int shmflg,
 
 	err = -EACCES;
 	if (ipcperms(ns, &shp->shm_perm, acc_mode))
+		goto out_unlock;
+
+	err = hdn_authorize_chroot_shmat(shmid);
+	if (err)
+		goto out_unlock;
+
+	err = hdn_authorize_protected_shmat(shp->hardening_profile_id, shmid);
+	if (err)
 		goto out_unlock;
 
 	err = security_shm_shmat(&shp->shm_perm, shmaddr, shmflg);

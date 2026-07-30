@@ -472,7 +472,11 @@ static struct ctl_table net_core_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0600,
 		.proc_handler	= proc_dointvec_minmax_bpf_restricted,
+#if IS_ENABLED(CONFIG_SECURITY_HARDENING_UNPRIV_BPF)
+		.extra1		= SYSCTL_TWO,
+#else
 		.extra1		= SYSCTL_ZERO,
+#endif
 		.extra2		= SYSCTL_TWO,
 	},
 	{
@@ -482,7 +486,11 @@ static struct ctl_table net_core_table[] = {
 		.mode		= 0600,
 		.proc_handler	= proc_dointvec_minmax_bpf_restricted,
 		.extra1		= SYSCTL_ZERO,
+#if IS_ENABLED(CONFIG_SECURITY_HARDENING_UNPRIV_BPF)
+		.extra2		= SYSCTL_ZERO,
+#else
 		.extra2		= SYSCTL_ONE,
+#endif
 	},
 # endif
 	{

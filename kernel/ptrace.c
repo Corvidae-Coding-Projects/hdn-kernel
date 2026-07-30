@@ -16,6 +16,7 @@
 #include <linux/sched/task.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
+#include <linux/hardening.h>
 #include <linux/highmem.h>
 #include <linux/pagemap.h>
 #include <linux/ptrace.h>
@@ -358,11 +359,23 @@ ok:
 
 bool ptrace_may_access(struct task_struct *task, unsigned int mode)
 {
+	bool hdn_process_memory = mode & PTRACE_MODE_HDN_PROCESS_MEMORY;
+	bool hdn_memory_migrate = mode & PTRACE_MODE_HDN_MEMORY_MIGRATE;
+	bool hdn_process_fd = mode & PTRACE_MODE_HDN_PROCESS_FD;
 	int err;
+
+	mode &= ~(PTRACE_MODE_HDN_PROCESS_MEMORY |
+		  PTRACE_MODE_HDN_MEMORY_MIGRATE |
+		  PTRACE_MODE_HDN_PROCESS_FD);
 	task_lock(task);
 	err = __ptrace_may_access(task, mode);
 	task_unlock(task);
-	return !err;
+	if (err)
+		return false;
+	if (hdn_process_memory || hdn_memory_migrate || hdn_process_fd)
+		return true;
+
+	return !hdn_authorize_ptrace_access(task, mode);
 }
 
 static int check_ptrace_options(unsigned long data)
@@ -1401,7 +1414,9 @@ SYSCALL_DEFINE4(ptrace, long, request, long, pid, unsigned long, addr,
 	long ret;
 
 	if (request == PTRACE_TRACEME) {
-		ret = ptrace_traceme();
+		ret = hdn_authorize_ptrace(current, request, addr, data);
+		if (!ret)
+			ret = ptrace_traceme();
 		goto out;
 	}
 
@@ -1411,8 +1426,13 @@ SYSCALL_DEFINE4(ptrace, long, request, long, pid, unsigned long, addr,
 		goto out;
 	}
 
+	ret = hdn_authorize_ptrace(child, request, addr, data);
+	if (ret)
+		goto out_put_task_struct;
+
 	if (request == PTRACE_ATTACH || request == PTRACE_SEIZE) {
 		ret = ptrace_attach(child, request, addr, data);
+		hdn_record_ptrace_audit(child, request, ret);
 		goto out_put_task_struct;
 	}
 
@@ -1540,7 +1560,9 @@ COMPAT_SYSCALL_DEFINE4(ptrace, compat_long_t, request, compat_long_t, pid,
 	long ret;
 
 	if (request == PTRACE_TRACEME) {
-		ret = ptrace_traceme();
+		ret = hdn_authorize_ptrace(current, request, addr, data);
+		if (!ret)
+			ret = ptrace_traceme();
 		goto out;
 	}
 
@@ -1550,8 +1572,13 @@ COMPAT_SYSCALL_DEFINE4(ptrace, compat_long_t, request, compat_long_t, pid,
 		goto out;
 	}
 
+	ret = hdn_authorize_ptrace(child, request, addr, data);
+	if (ret)
+		goto out_put_task_struct;
+
 	if (request == PTRACE_ATTACH || request == PTRACE_SEIZE) {
 		ret = ptrace_attach(child, request, addr, data);
+		hdn_record_ptrace_audit(child, request, ret);
 		goto out_put_task_struct;
 	}
 

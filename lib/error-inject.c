@@ -2,7 +2,8 @@
 // error-inject.c: Function-level error injection table
 #include <linux/error-injection.h>
 #include <linux/debugfs.h>
-#include <linux/kallsyms.h>
+#include <linux/hardening.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/kprobes.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -197,6 +198,12 @@ static const char *error_type_string(int etype)
 static int ei_seq_show(struct seq_file *m, void *v)
 {
 	struct ei_entry *ent = list_entry(v, struct ei_entry, list);
+
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_SYMBOL_LOOKUP) &&
+	    !hdn_kernel_symbol_disclose_allowed()) {
+		seq_printf(m, "[hidden]\t%s\n", error_type_string(ent->etype));
+		return 0;
+	}
 
 	seq_printf(m, "%ps\t%s\n", (void *)ent->start_addr,
 		   error_type_string(ent->etype));

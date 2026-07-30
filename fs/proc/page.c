@@ -10,6 +10,7 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/hugetlb.h>
+#include <linux/hardening.h>
 #include <linux/memremap.h>
 #include <linux/memcontrol.h>
 #include <linux/mmu_notifier.h>
@@ -73,6 +74,11 @@ static ssize_t kpage_read(struct file *file, char __user *buf,
 	pfn = src / KPMSIZE;
 	if (src & KPMMASK || count & KPMMASK)
 		return -EINVAL;
+	if (!count)
+		return 0;
+	ret = hdn_authorize_proc_resource_read();
+	if (ret)
+		return ret;
 	if (src >= max_dump_pfn * KPMSIZE)
 		return 0;
 	count = min_t(unsigned long, count, (max_dump_pfn * KPMSIZE) - src);

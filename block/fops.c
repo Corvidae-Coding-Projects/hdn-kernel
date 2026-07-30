@@ -14,6 +14,7 @@
 #include <linux/namei.h>
 #include <linux/task_io_accounting_ops.h>
 #include <linux/falloc.h>
+#include <linux/hardening.h>
 #include <linux/suspend.h>
 #include <linux/fs.h>
 #include <linux/iomap.h>
@@ -688,6 +689,12 @@ static int blkdev_open(struct inode *inode, struct file *filp)
 	bdev = blkdev_get_no_open(inode->i_rdev, true);
 	if (!bdev)
 		return -ENXIO;
+
+	ret = hdn_authorize_block_device(inode->i_rdev);
+	if (ret) {
+		blkdev_put_no_open(bdev);
+		return ret;
+	}
 
 	if (bdev_can_atomic_write(bdev))
 		filp->f_mode |= FMODE_CAN_ATOMIC_WRITE;

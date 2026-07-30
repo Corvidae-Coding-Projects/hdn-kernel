@@ -116,7 +116,8 @@ static void put_ldops(struct tty_ldisc_ops *ldops)
 	raw_spin_unlock_irqrestore(&tty_ldiscs_lock, flags);
 }
 
-int tty_ldisc_autoload = IS_BUILTIN(CONFIG_LDISC_AUTOLOAD);
+int tty_ldisc_autoload = IS_BUILTIN(CONFIG_LDISC_AUTOLOAD) &&
+			  !IS_ENABLED(CONFIG_SECURITY_HARDENING_TTY_INJECTION);
 
 /**
  * tty_ldisc_get	-	take a reference to an ldisc

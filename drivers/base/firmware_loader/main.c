@@ -35,6 +35,7 @@
 #include <linux/syscore_ops.h>
 #include <linux/reboot.h>
 #include <linux/security.h>
+#include <linux/hardening.h>
 #include <linux/zstd.h>
 #include <linux/xz.h>
 
@@ -499,6 +500,10 @@ fw_get_filesystem_firmware(struct device *device, struct fw_priv *fw_priv,
 	char *path, *nt = NULL;
 	size_t msize = INT_MAX;
 	void *buffer = NULL;
+
+	rc = hdn_authorize_firmware(fw_priv->fw_name);
+	if (rc)
+		return rc;
 
 	/* Already populated data member means we're loading into a buffer */
 	if (!decompress && fw_priv->data) {

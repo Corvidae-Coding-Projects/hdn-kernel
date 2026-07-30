@@ -33,6 +33,7 @@
 #include <linux/uaccess.h>
 
 #include <linux/nospec.h>
+#include <linux/hardening.h>
 
 #include <linux/kbd_kern.h>
 #include <linux/vt_kern.h>
@@ -750,6 +751,9 @@ int vt_ioctl(struct tty_struct *tty,
 
 	switch (cmd) {
 	case TIOCLINUX:
+		ret = hdn_authorize_tty_injection(TIOCLINUX);
+		if (ret)
+			return ret;
 		return tioclinux(tty, arg);
 	case VT_SETMODE:
 	{

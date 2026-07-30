@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Root-profile policy used by the QEMU smoke test to prove unprivileged users
+# cannot execute privileged helpers even when the target profile can otherwise
+# accept credential changes.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 no-unprivileged-privexec-root
+
+allow 2 POLICY_ADMIN CRED_CHANGE TTY_ACCESS
+feature 2 DENY_UNPRIVILEGED_PRIVEXEC

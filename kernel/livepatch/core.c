@@ -13,7 +13,7 @@
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/list.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/livepatch.h>
 #include <linux/elf.h>
 #include <linux/moduleloader.h>

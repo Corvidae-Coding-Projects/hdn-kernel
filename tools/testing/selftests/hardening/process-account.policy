@@ -1,0 +1,11 @@
+# Process-accounting audit profile used by the QEMU smoke test.
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 process-account-root
+
+allow 2 POLICY_ADMIN TTY_ACCESS
+feature 2 AUDIT_PROCESS_ACCOUNT

@@ -1291,6 +1291,18 @@ struct mm_struct {
 #endif
 		struct user_namespace *user_ns;
 
+#ifdef CONFIG_SECURITY_HARDENING
+		u64 hardening_profile_id;
+		u64 hardening_exec_dev_major;
+		u64 hardening_exec_dev_minor;
+		u64 hardening_exec_ino;
+		u64 hardening_exec_profile_id;
+		u64 hardening_exec_memory_flags;
+		bool hardening_exec_privileged;
+		bool hardening_exec_profile_pinned;
+		bool hardening_privileged_lineage;
+#endif
+
 		/* store ref to file /proc/<pid>/exe symlink points to */
 		struct file __rcu *exe_file;
 #ifdef CONFIG_MMU_NOTIFIER

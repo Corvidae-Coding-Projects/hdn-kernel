@@ -252,6 +252,15 @@ struct signal_struct {
 						 * and may have inconsistent
 						 * permissions.
 						 */
+#ifdef CONFIG_SECURITY_HARDENING_PROC_IPADDR
+	__be32 hdn_curr_ip;
+	__be32 hdn_conn_saddr;
+	__be32 hdn_conn_daddr;
+	__be16 hdn_conn_sport;
+	__be16 hdn_conn_dport;
+	bool hdn_used_accept;
+	bool hdn_conn_tracked;
+#endif
 } __randomize_layout;
 
 /*

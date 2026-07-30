@@ -16,6 +16,7 @@
 #include <linux/kallsyms.h>
 #include <linux/buildid.h>
 #include <linux/fs.h>
+#include <linux/hardening.h>
 #include <linux/kernel.h>
 #include <linux/kernel_read_file.h>
 #include <linux/kstrtox.h>
@@ -37,6 +38,8 @@
 #include <linux/device.h>
 #include <linux/string.h>
 #include <linux/mutex.h>
+#include <linux/mnt_idmapping.h>
+#include <linux/namei.h>
 #include <linux/rculist.h>
 #include <linux/uaccess.h>
 #include <asm/cacheflush.h>
@@ -129,13 +132,132 @@ static void mod_update_bounds(struct module *mod)
 static int modules_disabled;
 core_param(nomodule, modules_disabled, bint, 0);
 
+static bool modprobe_inode_root_unwritable(const struct path *path,
+					   const struct inode *inode)
+{
+	struct mnt_idmap *idmap;
+	kuid_t uid;
+
+	if (!inode)
+		return false;
+
+	idmap = mnt_idmap(path->mnt);
+	uid = vfsuid_into_kuid(i_uid_into_vfsuid(idmap, inode));
+	if (!uid_valid(uid) || !uid_eq(uid, GLOBAL_ROOT_UID))
+		return false;
+	if (inode->i_mode & (S_IWGRP | S_IWOTH))
+		return false;
+
+	return true;
+}
+
+static bool modprobe_path_root_unwritable(const struct path *path)
+{
+	struct path walker;
+	struct dentry *dentry;
+	bool trusted = false;
+
+	if (!path || !path->dentry)
+		return false;
+
+	walker = *path;
+	path_get(&walker);
+	for (;;) {
+		if (!modprobe_inode_root_unwritable(&walker,
+						    d_inode(walker.dentry)))
+			goto out;
+
+		if (walker.dentry == walker.mnt->mnt_root) {
+			if (follow_up(&walker))
+				continue;
+			break;
+		}
+
+		if (unlikely(IS_ROOT(walker.dentry))) {
+			dput(walker.dentry);
+			walker.dentry = dget(walker.mnt->mnt_root);
+			continue;
+		}
+
+		dentry = dget_parent(walker.dentry);
+		dput(walker.dentry);
+		walker.dentry = dentry;
+	}
+
+	trusted = true;
+out:
+	path_put(&walker);
+	return trusted;
+}
+
+static bool modprobe_path_allowed(const char *name)
+{
+	struct inode *inode;
+	struct path path;
+	bool allowed = false;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_SECURITY_HARDENING_MODULE_AUTOLOAD_PATH))
+		return true;
+	if (!name[0])
+		return true;
+	if (name[0] != '/')
+		return false;
+
+	ret = kern_path(name, LOOKUP_NO_SYMLINKS | LOOKUP_NO_MAGICLINKS, &path);
+	if (ret)
+		return false;
+
+	inode = d_inode(path.dentry);
+	if (!S_ISREG(inode->i_mode))
+		goto out;
+	if (!(inode->i_mode & (S_IXUSR | S_IXGRP | S_IXOTH)))
+		goto out;
+	if (!modprobe_path_root_unwritable(&path))
+		goto out;
+
+	allowed = true;
+out:
+	path_put(&path);
+	return allowed;
+}
+
+static int proc_dostring_modprobe(const struct ctl_table *table, int write,
+				  void *buffer, size_t *lenp, loff_t *ppos)
+{
+	char new_path[KMOD_PATH_LEN];
+	struct ctl_table tmp;
+	int ret;
+
+	if (!write)
+		return proc_dostring(table, write, buffer, lenp, ppos);
+
+	ret = hdn_authorize_module_autoload_control();
+	if (ret)
+		return ret;
+
+	strscpy(new_path, table->data, sizeof(new_path));
+	tmp = *table;
+	tmp.data = new_path;
+	tmp.maxlen = sizeof(new_path);
+
+	ret = proc_dostring(&tmp, write, buffer, lenp, ppos);
+	if (ret)
+		return ret;
+	if (!modprobe_path_allowed(new_path))
+		return -EINVAL;
+
+	strscpy(table->data, new_path, table->maxlen);
+	return 0;
+}
+
 static const struct ctl_table module_sysctl_table[] = {
 	{
 		.procname	= "modprobe",
 		.data		= &modprobe_path,
 		.maxlen		= KMOD_PATH_LEN,
 		.mode		= 0644,
-		.proc_handler	= proc_dostring,
+		.proc_handler	= proc_dostring_modprobe,
 	},
 	{
 		.procname	= "modules_disabled",
@@ -3577,6 +3699,10 @@ SYSCALL_DEFINE3(init_module, void __user *, umod,
 	if (err)
 		return err;
 
+	err = hdn_authorize_module_from_user(len);
+	if (err)
+		return err;
+
 	pr_debug("init_module: umod=%p, len=%lu, uargs=%p\n",
 	       umod, len, uargs);
 
@@ -3748,6 +3874,11 @@ SYSCALL_DEFINE3(finit_module, int, fd, const char __user *, uargs, int, flags)
 	CLASS(fd, f)(fd);
 	if (fd_empty(f))
 		return -EBADF;
+
+	err = hdn_authorize_module_from_file(fd_file(f), flags);
+	if (err)
+		return err;
+
 	return idempotent_init_module(fd_file(f), uargs, flags);
 }
 

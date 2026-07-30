@@ -78,6 +78,7 @@
 #include <linux/sched/sysctl.h>
 #include <linux/pgalloc.h>
 #include <linux/uaccess.h>
+#include <linux/hardening.h>
 
 #include <trace/events/kmem.h>
 
@@ -6995,6 +6996,11 @@ static int __access_remote_vm(struct mm_struct *mm, unsigned long addr,
 
 	/* Untag the address before looking up the VMA */
 	addr = untagged_addr_remote(mm, addr);
+
+	if (hdn_authorize_ptrace_exec_read(mm, addr, len, gup_flags)) {
+		mmap_read_unlock(mm);
+		return 0;
+	}
 
 	/* Avoid triggering the temporary warning in __get_user_pages */
 	if (!vma_lookup(mm, addr) && !expand_stack(mm, addr))

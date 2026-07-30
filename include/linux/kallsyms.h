@@ -68,25 +68,6 @@ static inline void *dereference_symbol_descriptor(void *ptr)
 extern bool kallsyms_show_value(const struct cred *cred);
 
 #ifdef CONFIG_KALLSYMS
-unsigned long kallsyms_sym_address(int idx);
-int kallsyms_on_each_symbol(int (*fn)(void *, const char *, unsigned long),
-			    void *data);
-int kallsyms_on_each_match_symbol(int (*fn)(void *, unsigned long),
-				  const char *name, void *data);
-
-/* Lookup the address for a symbol. Returns 0 if not found. */
-unsigned long kallsyms_lookup_name(const char *name);
-
-extern int kallsyms_lookup_size_offset(unsigned long addr,
-				  unsigned long *symbolsize,
-				  unsigned long *offset);
-
-/* Lookup an address.  modname is set to NULL if it's in the kernel. */
-const char *kallsyms_lookup(unsigned long addr,
-			    unsigned long *symbolsize,
-			    unsigned long *offset,
-			    char **modname, char *namebuf);
-
 /* Look up a kernel symbol and return it in a text buffer. */
 extern int sprint_symbol(char *buffer, unsigned long address);
 extern int sprint_symbol_build_id(char *buffer, unsigned long address);
@@ -94,29 +75,7 @@ extern int sprint_symbol_no_offset(char *buffer, unsigned long address);
 extern int sprint_backtrace(char *buffer, unsigned long address);
 extern int sprint_backtrace_build_id(char *buffer, unsigned long address);
 
-int lookup_symbol_name(unsigned long addr, char *symname);
-
 #else /* !CONFIG_KALLSYMS */
-
-static inline unsigned long kallsyms_lookup_name(const char *name)
-{
-	return 0;
-}
-
-static inline int kallsyms_lookup_size_offset(unsigned long addr,
-					      unsigned long *symbolsize,
-					      unsigned long *offset)
-{
-	return 0;
-}
-
-static inline const char *kallsyms_lookup(unsigned long addr,
-					  unsigned long *symbolsize,
-					  unsigned long *offset,
-					  char **modname, char *namebuf)
-{
-	return NULL;
-}
 
 static inline int sprint_symbol(char *buffer, unsigned long addr)
 {
@@ -146,23 +105,6 @@ static inline int sprint_backtrace_build_id(char *buffer, unsigned long addr)
 {
 	*buffer = '\0';
 	return 0;
-}
-
-static inline int lookup_symbol_name(unsigned long addr, char *symname)
-{
-	return -ERANGE;
-}
-
-static inline int kallsyms_on_each_symbol(int (*fn)(void *, const char *, unsigned long),
-					  void *data)
-{
-	return -EOPNOTSUPP;
-}
-
-static inline int kallsyms_on_each_match_symbol(int (*fn)(void *, unsigned long),
-						const char *name, void *data)
-{
-	return -EOPNOTSUPP;
 }
 #endif /*CONFIG_KALLSYMS*/
 

@@ -19,6 +19,7 @@
 #include <linux/kernel.h>
 #include <linux/kernel_read_file.h>
 #include <linux/lsm_hooks.h>
+#include <linux/hardening.h>
 #include <linux/mman.h>
 #include <linux/mount.h>
 #include <linux/personality.h>
@@ -1196,6 +1197,12 @@ int security_move_mount(const struct path *from_path,
 int security_path_notify(const struct path *path, u64 mask,
 			 unsigned int obj_type)
 {
+	int ret;
+
+	ret = hdn_authorize_object_watch(path);
+	if (ret)
+		return ret;
+
 	return call_int_hook(path_notify, path, mask, obj_type);
 }
 
@@ -2152,6 +2159,12 @@ void security_inode_post_removexattr(struct dentry *dentry, const char *name)
  */
 int security_inode_file_setattr(struct dentry *dentry, struct file_kattr *fa)
 {
+	int ret;
+
+	ret = hdn_authorize_object_fileattr(dentry);
+	if (ret)
+		return ret;
+
 	return call_int_hook(inode_file_setattr, dentry, fa);
 }
 
@@ -2167,6 +2180,12 @@ int security_inode_file_setattr(struct dentry *dentry, struct file_kattr *fa)
  */
 int security_inode_file_getattr(struct dentry *dentry, struct file_kattr *fa)
 {
+	int ret;
+
+	ret = hdn_authorize_object_filegetattr(dentry);
+	if (ret)
+		return ret;
+
 	return call_int_hook(inode_file_getattr, dentry, fa);
 }
 
@@ -2509,6 +2528,12 @@ void security_backing_file_free(struct file *backing_file)
  */
 int security_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
+	int ret;
+
+	ret = hdn_authorize_object_ioctl(file, cmd);
+	if (ret)
+		return ret;
+
 	return call_int_hook(file_ioctl, file, cmd, arg);
 }
 EXPORT_SYMBOL_GPL(security_file_ioctl);
@@ -2527,6 +2552,12 @@ EXPORT_SYMBOL_GPL(security_file_ioctl);
 int security_file_ioctl_compat(struct file *file, unsigned int cmd,
 			       unsigned long arg)
 {
+	int ret;
+
+	ret = hdn_authorize_object_ioctl(file, cmd);
+	if (ret)
+		return ret;
+
 	return call_int_hook(file_ioctl_compat, file, cmd, arg);
 }
 EXPORT_SYMBOL_GPL(security_file_ioctl_compat);
@@ -2649,6 +2680,12 @@ int security_file_mprotect(struct vm_area_struct *vma, unsigned long reqprot,
  */
 int security_file_lock(struct file *file, unsigned int cmd)
 {
+	int ret;
+
+	ret = hdn_authorize_object_lock(file, cmd);
+	if (ret)
+		return ret;
+
 	return call_int_hook(file_lock, file, cmd);
 }
 
@@ -2668,6 +2705,12 @@ int security_file_lock(struct file *file, unsigned int cmd)
  */
 int security_file_fcntl(struct file *file, unsigned int cmd, unsigned long arg)
 {
+	int ret;
+
+	ret = hdn_authorize_object_fcntl(file, cmd);
+	if (ret)
+		return ret;
+
 	return call_int_hook(file_fcntl, file, cmd, arg);
 }
 
@@ -2718,6 +2761,12 @@ int security_file_send_sigiotask(struct task_struct *tsk,
  */
 int security_file_receive(struct file *file)
 {
+	int ret;
+
+	ret = hdn_authorize_object_receive(file);
+	if (ret)
+		return ret;
+
 	return call_int_hook(file_receive, file);
 }
 

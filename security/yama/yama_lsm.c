@@ -17,6 +17,7 @@
 #include <linux/string_helpers.h>
 #include <linux/task_work.h>
 #include <linux/sched.h>
+#include <linux/kconfig.h>
 #include <linux/spinlock.h>
 #include <uapi/linux/lsm.h>
 
@@ -446,6 +447,11 @@ static int yama_dointvec_minmax(const struct ctl_table *table, int write,
 }
 
 static int max_scope = YAMA_SCOPE_NO_ATTACH;
+#if IS_ENABLED(CONFIG_SECURITY_HARDENING_EXPLOIT_MITIGATIONS)
+static int min_scope = YAMA_SCOPE_RELATIONAL;
+#else
+static int min_scope = YAMA_SCOPE_DISABLED;
+#endif
 
 static const struct ctl_table yama_sysctl_table[] = {
 	{
@@ -454,7 +460,7 @@ static const struct ctl_table yama_sysctl_table[] = {
 		.maxlen         = sizeof(int),
 		.mode           = 0644,
 		.proc_handler   = yama_dointvec_minmax,
-		.extra1         = SYSCTL_ZERO,
+		.extra1         = &min_scope,
 		.extra2         = &max_scope,
 	},
 };

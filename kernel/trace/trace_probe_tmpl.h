@@ -3,6 +3,8 @@
  * Traceprobe fetch helper inlines
  */
 
+#include <linux/hardening.h>
+
 static nokprobe_inline void
 fetch_store_raw(unsigned long val, struct fetch_insn *code, void *buf)
 {
@@ -73,6 +75,9 @@ fetch_store_symstrlen(unsigned long addr)
 	char namebuf[KSYM_SYMBOL_LEN];
 	int ret;
 
+	if (!hdn_kernel_symbol_disclose_allowed())
+		return sizeof("[hidden]");
+
 	ret = sprint_symbol(namebuf, addr);
 	if (ret < 0)
 		return 0;
@@ -94,6 +99,11 @@ fetch_store_symstring(unsigned long addr, void *dest, void *base)
 		return -ENOMEM;
 
 	__dest = get_loc_data(dest, base);
+
+	if (!hdn_kernel_symbol_disclose_allowed()) {
+		strscpy(__dest, "[hidden]", maxlen);
+		return strlen(__dest);
+	}
 
 	return sprint_symbol(__dest, addr);
 }

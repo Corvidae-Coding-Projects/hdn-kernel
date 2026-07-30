@@ -5,6 +5,7 @@
 
 #include <linux/sched/signal.h>
 #include <linux/sched/cputime.h>
+#include <linux/hardening.h>
 #include <linux/posix-timers.h>
 #include <linux/errno.h>
 #include <linux/math64.h>
@@ -889,11 +890,14 @@ static void check_thread_timers(struct task_struct *tsk,
 
 		/* At the hard limit, send SIGKILL. No further action. */
 		if (hard != RLIM_INFINITY &&
-		    check_rlimit(rttime, hard, SIGKILL, true, true))
+		    check_rlimit(rttime, hard, SIGKILL, true, true)) {
+			hdn_record_resource_pressure(RLIMIT_RTTIME, hard);
 			return;
+		}
 
 		/* At the soft limit, send a SIGXCPU every second */
 		if (check_rlimit(rttime, soft, SIGXCPU, true, false)) {
+			hdn_record_resource_pressure(RLIMIT_RTTIME, soft);
 			soft += USEC_PER_SEC;
 			tsk->signal->rlim[RLIMIT_RTTIME].rlim_cur = soft;
 		}
@@ -983,19 +987,22 @@ static void check_process_timers(struct task_struct *tsk,
 		/* RLIMIT_CPU is in seconds. Samples are nanoseconds */
 		unsigned long hard = task_rlimit_max(tsk, RLIMIT_CPU);
 		u64 ptime = samples[CPUCLOCK_PROF];
-		u64 softns = (u64)soft * NSEC_PER_SEC;
-		u64 hardns = (u64)hard * NSEC_PER_SEC;
+			u64 softns = (u64)soft * NSEC_PER_SEC;
+			u64 hardns = (u64)hard * NSEC_PER_SEC;
 
-		/* At the hard limit, send SIGKILL. No further action. */
-		if (hard != RLIM_INFINITY &&
-		    check_rlimit(ptime, hardns, SIGKILL, false, true))
-			return;
+			/* At the hard limit, send SIGKILL. No further action. */
+			if (hard != RLIM_INFINITY &&
+			    check_rlimit(ptime, hardns, SIGKILL, false, true)) {
+				hdn_record_resource_pressure(RLIMIT_CPU, hard);
+				return;
+			}
 
-		/* At the soft limit, send a SIGXCPU every second */
-		if (check_rlimit(ptime, softns, SIGXCPU, false, false)) {
-			sig->rlim[RLIMIT_CPU].rlim_cur = soft + 1;
-			softns += NSEC_PER_SEC;
-		}
+			/* At the soft limit, send a SIGXCPU every second */
+			if (check_rlimit(ptime, softns, SIGXCPU, false, false)) {
+				hdn_record_resource_pressure(RLIMIT_CPU, soft);
+				sig->rlim[RLIMIT_CPU].rlim_cur = soft + 1;
+				softns += NSEC_PER_SEC;
+			}
 
 		/* Update the expiry cache */
 		if (softns < pct->bases[CPUCLOCK_PROF].nextevt)

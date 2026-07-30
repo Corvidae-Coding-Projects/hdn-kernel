@@ -68,6 +68,7 @@
 #include <linux/mutex.h>
 #include <linux/if_bridge.h>
 #include <linux/if_vlan.h>
+#include <linux/hardening.h>
 #include <linux/ptp_classify.h>
 #include <linux/init.h>
 #include <linux/poll.h>
@@ -1560,6 +1561,9 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	err = security_socket_create(family, type, protocol, kern);
 	if (err)
 		return err;
+	err = hdn_authorize_socket_create(family, type, protocol, kern);
+	if (err)
+		return err;
 
 	/*
 	 *	Allocate the socket and allow the family to set things up. if
@@ -1868,6 +1872,11 @@ int __sys_bind_socket(struct socket *sock, struct sockaddr_storage *address,
 {
 	int err;
 
+	err = hdn_authorize_socket_server(sock, (struct sockaddr *)address,
+					  addrlen);
+	if (err)
+		return err;
+
 	err = security_socket_bind(sock, (struct sockaddr *)address,
 				   addrlen);
 	if (!err)
@@ -1919,6 +1928,10 @@ int __sys_listen_socket(struct socket *sock, int backlog)
 {
 	int somaxconn, err;
 
+	err = hdn_authorize_socket_server(sock, NULL, 0);
+	if (err)
+		return err;
+
 	somaxconn = READ_ONCE(sock_net(sock->sk)->core.sysctl_somaxconn);
 	if ((unsigned int)backlog > somaxconn)
 		backlog = somaxconn;
@@ -1962,6 +1975,10 @@ struct file *do_accept(struct file *file, struct proto_accept_arg *arg,
 	if (!sock)
 		return ERR_PTR(-ENOTSOCK);
 
+	err = hdn_authorize_socket_server(sock, NULL, 0);
+	if (err)
+		return ERR_PTR(err);
+
 	newsock = sock_alloc();
 	if (!newsock)
 		return ERR_PTR(-ENFILE);
@@ -2000,6 +2017,8 @@ struct file *do_accept(struct file *file, struct proto_accept_arg *arg,
 		if (err < 0)
 			goto out_fd;
 	}
+
+	hdn_attach_proc_ip(newsock->sk);
 
 	/* File flags are not inherited via accept() unlike another OSes. */
 	return newfile;
@@ -2080,6 +2099,11 @@ int __sys_connect_file(struct file *file, struct sockaddr_storage *address,
 		err = -ENOTSOCK;
 		goto out;
 	}
+
+	err = hdn_authorize_socket_connect(sock, (struct sockaddr *)address,
+					   addrlen);
+	if (err)
+		goto out;
 
 	err =
 	    security_socket_connect(sock, (struct sockaddr *)address, addrlen);

@@ -12,6 +12,7 @@
 #include <linux/mman.h>
 #include <linux/reboot.h>
 #include <linux/prctl.h>
+#include <linux/hardening.h>
 #include <linux/highuid.h>
 #include <linux/fs.h>
 #include <linux/kmod.h>
@@ -249,6 +250,9 @@ static int set_one_prio(struct task_struct *p, int niceval, int error)
 		error = no_nice;
 		goto out;
 	}
+	error = hdn_authorize_chroot_nice(p, niceval);
+	if (error)
+		goto out;
 	if (error == -ESRCH)
 		error = 0;
 	set_user_nice(p, niceval);
@@ -1501,6 +1505,7 @@ static int do_prlimit(struct task_struct *tsk, unsigned int resource,
 		      struct rlimit *new_rlim, struct rlimit *old_rlim)
 {
 	struct rlimit *rlim;
+	bool resource_authorized = false;
 	int retval = 0;
 
 	if (resource >= RLIM_NLIMITS)
@@ -1513,21 +1518,35 @@ static int do_prlimit(struct task_struct *tsk, unsigned int resource,
 		if (resource == RLIMIT_NOFILE &&
 				new_rlim->rlim_max > sysctl_nr_open)
 			return -EPERM;
+		retval = hdn_authorize_profile_resource_limit(tsk, resource,
+							      new_rlim);
+		if (retval)
+			return retval;
 	}
 
 	/* Holding a refcount on tsk protects tsk->signal from disappearing. */
 	rlim = tsk->signal->rlim + resource;
+retry:
 	task_lock(tsk->group_leader);
 	if (new_rlim) {
+		bool hard_raise = new_rlim->rlim_max > rlim->rlim_max;
+
 		/*
 		 * Keep the capable check against init_user_ns until cgroups can
 		 * contain all limits.
 		 */
-		if (new_rlim->rlim_max > rlim->rlim_max &&
-				!capable(CAP_SYS_RESOURCE))
+		if (hard_raise && !capable(CAP_SYS_RESOURCE))
 			retval = -EPERM;
 		if (!retval)
 			retval = security_task_setrlimit(tsk, resource, new_rlim);
+		if (!retval && hard_raise && !resource_authorized) {
+			task_unlock(tsk->group_leader);
+			retval = hdn_authorize_resource_limit(resource);
+			if (retval)
+				return retval;
+			resource_authorized = true;
+			goto retry;
+		}
 	}
 	if (!retval) {
 		if (old_rlim)
@@ -1556,6 +1575,9 @@ static int do_prlimit(struct task_struct *tsk, unsigned int resource,
 		 */
 		update_rlimit_cpu(tsk->group_leader, new_rlim->rlim_cur);
 	}
+
+	if (!retval && new_rlim)
+		hdn_record_resource_limit(resource);
 
 	return retval;
 }

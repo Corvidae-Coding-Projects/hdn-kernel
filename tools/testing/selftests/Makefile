@@ -43,6 +43,7 @@ TARGETS += fpu
 TARGETS += ftrace
 TARGETS += futex
 TARGETS += gpio
+TARGETS += hardening
 TARGETS += hid
 TARGETS += intel_pstate
 TARGETS += iommu

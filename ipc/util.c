@@ -65,6 +65,7 @@
 #include <linux/ipc_namespace.h>
 #include <linux/rhashtable.h>
 #include <linux/log2.h>
+#include <linux/hardening.h>
 
 #include <asm/unistd.h>
 
@@ -563,6 +564,9 @@ int ipcperms(struct ipc_namespace *ns, struct kern_ipc_perm *ipcp, short flag)
 		granted_mode >>= 6;
 	else if (in_group_p(ipcp->cgid) || in_group_p(ipcp->gid))
 		granted_mode >>= 3;
+	if (hdn_authorize_sysvipc_access(ns, ipcp, requested_mode,
+					 granted_mode))
+		return -1;
 	/* is there some bit set in requested_mode but not in granted_mode? */
 	if ((requested_mode & ~granted_mode & 0007) &&
 	    !ns_capable(ns->user_ns, CAP_IPC_OWNER))

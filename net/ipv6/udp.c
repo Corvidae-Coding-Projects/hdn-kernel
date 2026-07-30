@@ -21,6 +21,7 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
+#include <linux/hardening.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
 #include <linux/in6.h>
@@ -1167,7 +1168,9 @@ no_sk:
 		goto csum_error;
 
 	__UDP6_INC_STATS(net, UDP_MIB_NOPORTS, proto == IPPROTO_UDPLITE);
-	icmpv6_send(skb, ICMPV6_DEST_UNREACH, ICMPV6_PORT_UNREACH, 0);
+	if (!hdn_blackhole_remote_skb(skb))
+		icmpv6_send(skb, ICMPV6_DEST_UNREACH,
+			    ICMPV6_PORT_UNREACH, 0);
 
 	sk_skb_reason_drop(sk, skb, reason);
 	return 0;

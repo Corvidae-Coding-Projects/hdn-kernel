@@ -16,6 +16,7 @@
 #include <linux/wait.h>
 #include <linux/vmalloc.h>
 #include <linux/memblock.h>
+#include <linux/hardening.h>
 
 #include <net/addrconf.h>
 #include <net/inet_connection_sock.h>
@@ -1057,6 +1058,8 @@ int __inet_hash_connect(struct inet_timewait_death_row *death_row,
 		local_bh_disable();
 		ret = check_established(death_row, sk, port, NULL, false,
 					hash_port0 + port);
+		if (!ret)
+			hdn_track_proc_ip_connection(sk);
 		local_bh_enable();
 		return ret;
 	}
@@ -1191,6 +1194,7 @@ ok:
 
 	if (tw)
 		inet_twsk_deschedule_put(tw);
+	hdn_track_proc_ip_connection(sk);
 	local_bh_enable();
 	return 0;
 

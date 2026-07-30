@@ -13,6 +13,7 @@
 #include <linux/fs.h>
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
+#include <linux/hardening.h>
 #include <linux/kobject.h>
 #include <linux/namei.h>
 #include <linux/tracefs.h>
@@ -215,7 +216,16 @@ static void set_tracefs_inode_owner(struct inode *inode)
 static int tracefs_permission(struct mnt_idmap *idmap,
 			      struct inode *inode, int mask)
 {
+	int ret;
+
 	set_tracefs_inode_owner(inode);
+	ret = hdn_authorize_profile(HDN_AUTH_DEBUGFS,
+				    HDN_TRANS_DEBUGFS_ACCESS,
+				    HDN_REASON_PROFILE_DENIED, -EPERM,
+				    hdn_current_mntns_profile_id());
+	if (ret)
+		return ret;
+
 	return generic_permission(idmap, inode, mask);
 }
 

@@ -11,7 +11,7 @@
 #include <kunit/test.h>
 #include <linux/stringify.h>
 #include <linux/kprobes.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 
 #define DI(name) s##name##name
 #define DDI(name) DI(n##name##name)

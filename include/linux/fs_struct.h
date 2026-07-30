@@ -42,9 +42,18 @@ static inline void get_fs_pwd(struct fs_struct *fs, struct path *pwd)
 
 extern bool current_chrooted(void);
 
+#ifdef CONFIG_SECURITY_HARDENING
+extern int hdn_current_umask(void);
+#else
+static inline int hdn_current_umask(void)
+{
+	return 0;
+}
+#endif
+
 static inline int current_umask(void)
 {
-	return current->fs->umask;
+	return current->fs->umask | hdn_current_umask();
 }
 
 #endif /* _LINUX_FS_STRUCT_H */

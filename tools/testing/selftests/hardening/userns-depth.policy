@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Policy used by the QEMU smoke test to prove sandbox launchers can create a
+# bounded user-namespace hierarchy without receiving unlimited nesting.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 bounded-root
+
+allow 2 POLICY_ADMIN CRED_CHANGE TTY_ACCESS USERNS_CREATE
+userns-max 2 2

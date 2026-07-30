@@ -15,6 +15,7 @@
 #include <linux/mm.h>
 #include <linux/swap.h> /* mm_account_reclaimed_pages() */
 #include <linux/module.h>
+#include <linux/hardening.h>
 #include <linux/bit_spinlock.h>
 #include <linux/interrupt.h>
 #include <linux/swab.h>
@@ -8975,6 +8976,8 @@ static ssize_t ctor_show(struct kmem_cache *s, char *buf)
 {
 	if (!s->ctor)
 		return 0;
+	if (!hdn_kernel_symbol_disclose_allowed())
+		return sysfs_emit(buf, "[hidden]\n");
 	return sysfs_emit(buf, "%pS\n", s->ctor);
 }
 SLAB_ATTR_RO(ctor);
@@ -9614,6 +9617,7 @@ static int slab_debugfs_show(struct seq_file *seq, void *v)
 	struct loc_track *t = seq->private;
 	struct location *l;
 	unsigned long idx;
+	bool disclose_symbols = hdn_kernel_symbol_disclose_allowed();
 
 	idx = (unsigned long) t->idx;
 	if (idx < t->count) {
@@ -9621,10 +9625,14 @@ static int slab_debugfs_show(struct seq_file *seq, void *v)
 
 		seq_printf(seq, "%7ld ", l->count);
 
-		if (l->addr)
-			seq_printf(seq, "%pS", (void *)l->addr);
-		else
+		if (l->addr) {
+			if (disclose_symbols)
+				seq_printf(seq, "%pS", (void *)l->addr);
+			else
+				seq_puts(seq, "[hidden]");
+		} else {
 			seq_puts(seq, "<not-available>");
+		}
 
 		if (l->waste)
 			seq_printf(seq, " waste=%lu/%lu",
@@ -9661,8 +9669,13 @@ static int slab_debugfs_show(struct seq_file *seq, void *v)
 			if (handle) {
 				nr_entries = stack_depot_fetch(handle, &entries);
 				seq_puts(seq, "\n");
-				for (j = 0; j < nr_entries; j++)
-					seq_printf(seq, "        %pS\n", (void *)entries[j]);
+				for (j = 0; j < nr_entries; j++) {
+					if (disclose_symbols)
+						seq_printf(seq, "        %pS\n",
+							   (void *)entries[j]);
+					else
+						seq_puts(seq, "        [hidden]\n");
+				}
 			}
 		}
 #endif

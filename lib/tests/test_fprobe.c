@@ -5,6 +5,7 @@
 
 #include <linux/kernel.h>
 #include <linux/fprobe.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/random.h>
 #include <kunit/test.h>
 
@@ -324,4 +325,3 @@ static struct kunit_suite fprobe_test_suite = {
 };
 
 kunit_test_suites(&fprobe_test_suite);
-

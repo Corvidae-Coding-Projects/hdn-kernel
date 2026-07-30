@@ -7,6 +7,7 @@
 
 #include <linux/proc_fs.h>
 #include <linux/module.h>
+#include <linux/hardening.h>
 #include <linux/spinlock.h>
 #include <linux/sched.h>
 #include <linux/seq_file.h>
@@ -42,11 +43,20 @@ static void SEQ_printf(struct seq_file *m, const char *fmt, ...)
 	va_end(args);
 }
 
+#define SEQ_print_symbol(m, prefix, sym)				\
+	do {								\
+		if (hdn_kernel_symbol_disclose_allowed())		\
+			SEQ_printf(m, "%s%ps", prefix, sym);		\
+		else							\
+			SEQ_printf(m, "%s[hidden]", prefix);		\
+	} while (0)
+
 static void
 print_timer(struct seq_file *m, struct hrtimer *taddr, struct hrtimer *timer,
 	    int idx, u64 now)
 {
-	SEQ_printf(m, " #%d: <%p>, %ps", idx, taddr, ACCESS_PRIVATE(timer, function));
+	SEQ_printf(m, " #%d: <%p>,", idx, taddr);
+	SEQ_print_symbol(m, " ", ACCESS_PRIVATE(timer, function));
 	SEQ_printf(m, ", S:%02x", timer->state);
 	SEQ_printf(m, "\n");
 	SEQ_printf(m, " # expires at %Lu-%Lu nsecs [in %Ld to %Ld nsecs]\n",
@@ -205,29 +215,40 @@ print_tickdevice(struct seq_file *m, struct tick_device *td, int cpu)
 	SEQ_printf(m, " next_event:     %Ld nsecs\n",
 		   (unsigned long long) ktime_to_ns(dev->next_event));
 
-	SEQ_printf(m, " set_next_event: %ps\n", dev->set_next_event);
+	SEQ_print_symbol(m, " set_next_event: ", dev->set_next_event);
+	SEQ_printf(m, "\n");
 
-	if (dev->set_state_shutdown)
-		SEQ_printf(m, " shutdown:       %ps\n",
-			dev->set_state_shutdown);
+	if (dev->set_state_shutdown) {
+		SEQ_print_symbol(m, " shutdown:       ",
+				 dev->set_state_shutdown);
+		SEQ_printf(m, "\n");
+	}
 
-	if (dev->set_state_periodic)
-		SEQ_printf(m, " periodic:       %ps\n",
-			dev->set_state_periodic);
+	if (dev->set_state_periodic) {
+		SEQ_print_symbol(m, " periodic:       ",
+				 dev->set_state_periodic);
+		SEQ_printf(m, "\n");
+	}
 
-	if (dev->set_state_oneshot)
-		SEQ_printf(m, " oneshot:        %ps\n",
-			dev->set_state_oneshot);
+	if (dev->set_state_oneshot) {
+		SEQ_print_symbol(m, " oneshot:        ",
+				 dev->set_state_oneshot);
+		SEQ_printf(m, "\n");
+	}
 
-	if (dev->set_state_oneshot_stopped)
-		SEQ_printf(m, " oneshot stopped: %ps\n",
-			dev->set_state_oneshot_stopped);
+	if (dev->set_state_oneshot_stopped) {
+		SEQ_print_symbol(m, " oneshot stopped: ",
+				 dev->set_state_oneshot_stopped);
+		SEQ_printf(m, "\n");
+	}
 
-	if (dev->tick_resume)
-		SEQ_printf(m, " resume:         %ps\n",
-			dev->tick_resume);
+	if (dev->tick_resume) {
+		SEQ_print_symbol(m, " resume:         ", dev->tick_resume);
+		SEQ_printf(m, "\n");
+	}
 
-	SEQ_printf(m, " event_handler:  %ps\n", dev->event_handler);
+	SEQ_print_symbol(m, " event_handler:  ", dev->event_handler);
+	SEQ_printf(m, "\n");
 	SEQ_printf(m, "\n");
 	SEQ_printf(m, " retries:        %lu\n", dev->retries);
 

@@ -11,8 +11,9 @@
 #include <linux/bsearch.h>
 #include <linux/bug.h>
 #include <linux/debugfs.h>
+#include <linux/hardening.h>
 #include <linux/init.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/sched.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
@@ -138,12 +139,17 @@ static void set_report_filterlist_whitelist(bool whitelist)
 static ssize_t insert_report_filterlist(const char *func)
 {
 	unsigned long flags;
-	unsigned long addr = kallsyms_lookup_name(func);
+	unsigned long addr;
 	unsigned long *delay_free = NULL;
 	unsigned long *new_addrs = NULL;
 	size_t new_size = 0;
 	ssize_t ret = 0;
 
+	ret = hdn_authorize_kernel_symbol_lookup();
+	if (ret)
+		return ret;
+
+	addr = kallsyms_lookup_name(func);
 	if (!addr) {
 		pr_err("could not find function: '%s'\n", func);
 		return -ENOENT;
@@ -192,6 +198,7 @@ static int show_info(struct seq_file *file, void *v)
 {
 	int i;
 	unsigned long flags;
+	bool disclose_symbols = hdn_kernel_symbol_disclose_allowed();
 
 	/* show stats */
 	seq_printf(file, "enabled: %i\n", READ_ONCE(kcsan_enabled));
@@ -205,8 +212,13 @@ static int show_info(struct seq_file *file, void *v)
 	seq_printf(file, "\n%s functions: %s\n",
 		   report_filterlist.whitelist ? "whitelisted" : "blacklisted",
 		   report_filterlist.used == 0 ? "none" : "");
-	for (i = 0; i < report_filterlist.used; ++i)
-		seq_printf(file, " %ps\n", (void *)report_filterlist.addrs[i]);
+	for (i = 0; i < report_filterlist.used; ++i) {
+		if (disclose_symbols)
+			seq_printf(file, " %ps\n",
+				   (void *)report_filterlist.addrs[i]);
+		else
+			seq_puts(file, " [hidden]\n");
+	}
 	raw_spin_unlock_irqrestore(&report_filterlist_lock, flags);
 
 	return 0;

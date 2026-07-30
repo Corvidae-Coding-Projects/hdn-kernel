@@ -12,12 +12,15 @@
 #include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/sched/coredump.h>
+#include <linux/sched/signal.h>
 #include <linux/key.h>
 #include <linux/keyctl.h>
 #include <linux/init_task.h>
 #include <linux/security.h>
 #include <linux/binfmts.h>
 #include <linux/cn_proc.h>
+#include <linux/hardening.h>
+#include <linux/task_work.h>
 #include <linux/uidgid.h>
 
 #if 0
@@ -351,6 +354,107 @@ static bool cred_cap_issubset(const struct cred *set, const struct cred *subset)
 	return false;
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_SETXID
+static bool hdn_setxid_should_propagate(const struct cred *new,
+					const struct cred *old)
+{
+	if (current->hardening_setxid_applying)
+		return false;
+	if (thread_group_empty(current))
+		return false;
+	if (!uid_eq(old->uid, GLOBAL_ROOT_UID))
+		return false;
+	return !uid_eq(new->uid, GLOBAL_ROOT_UID);
+}
+
+static void hdn_setxid_task_work(struct callback_head *work)
+{
+	const struct cred *new;
+	const struct cred *old;
+	unsigned int securebits;
+	int ret;
+
+	task_lock(current);
+	new = current->hardening_setxid_cred;
+	securebits = current->hardening_setxid_securebits;
+	current->hardening_setxid_cred = NULL;
+	current->hardening_setxid_queued = false;
+	task_unlock(current);
+
+	if (!new)
+		return;
+
+	old = current_cred();
+	if (old == new || !uid_eq(old->uid, GLOBAL_ROOT_UID) ||
+	    old->securebits != securebits) {
+		put_cred(new);
+		return;
+	}
+
+	current->hardening_setxid_applying = true;
+	ret = commit_creds((struct cred *)new);
+	current->hardening_setxid_applying = false;
+	if (ret)
+		do_group_exit(SIGKILL);
+}
+
+static void hdn_setxid_queue_thread(struct task_struct *task,
+				    const struct cred *new,
+				    unsigned int securebits)
+{
+	const struct cred *old_pending;
+	const struct cred *drop = NULL;
+	int ret;
+
+	get_cred(new);
+	task_lock(task);
+	old_pending = task->hardening_setxid_cred;
+	task->hardening_setxid_cred = new;
+	task->hardening_setxid_securebits = securebits;
+	if (!task->hardening_setxid_queued) {
+		task->hardening_setxid_queued = true;
+		init_task_work(&task->hardening_setxid_work,
+			       hdn_setxid_task_work);
+		ret = task_work_add(task, &task->hardening_setxid_work,
+				    TWA_SIGNAL);
+		if (ret) {
+			task->hardening_setxid_queued = false;
+			task->hardening_setxid_cred = NULL;
+			drop = new;
+		}
+	}
+	task_unlock(task);
+
+	if (old_pending)
+		put_cred(old_pending);
+	if (drop)
+		put_cred(drop);
+}
+
+static void hdn_setxid_queue_thread_group(const struct cred *new,
+					  unsigned int securebits)
+{
+	struct task_struct *task;
+
+	read_lock(&tasklist_lock);
+	for (task = next_thread(current); task != current;
+	     task = next_thread(task))
+		hdn_setxid_queue_thread(task, new, securebits);
+	read_unlock(&tasklist_lock);
+}
+#else
+static inline bool hdn_setxid_should_propagate(const struct cred *new,
+					       const struct cred *old)
+{
+	return false;
+}
+
+static inline void hdn_setxid_queue_thread_group(const struct cred *new,
+						 unsigned int securebits)
+{
+}
+#endif
+
 /**
  * commit_creds - Install new credentials upon the current task
  * @new: The credentials to be assigned
@@ -362,19 +466,30 @@ static bool cred_cap_issubset(const struct cred *set, const struct cred *subset)
  *
  * This function eats the caller's reference to the new credentials.
  *
- * Always returns 0 thus allowing this function to be tail-called at the end
- * of, say, sys_setgid().
+ * Returns 0 on success or a hardening denial. This still eats the caller's
+ * reference to the new credentials on either path.
  */
 int commit_creds(struct cred *new)
 {
 	struct task_struct *task = current;
 	const struct cred *old = task->real_cred;
+	bool propagate_setxid;
+	unsigned int setxid_securebits = old->securebits;
+	int ret;
 
 	kdebug("commit_creds(%p{%ld})", new,
 	       atomic_long_read(&new->usage));
 
 	BUG_ON(task->cred != old);
 	BUG_ON(atomic_long_read(&new->usage) < 1);
+
+	ret = hdn_authorize_creds(new, old);
+	if (ret) {
+		abort_creds(new);
+		return ret;
+	}
+
+	propagate_setxid = hdn_setxid_should_propagate(new, old);
 
 	get_cred(new); /* we will require a ref for the subj creds too */
 
@@ -418,6 +533,10 @@ int commit_creds(struct cred *new)
 		dec_rlimit_ucounts(old->ucounts, UCOUNT_RLIMIT_NPROC, 1);
 	if (new->user_ns != old->user_ns)
 		switch_cred_namespaces(old, new);
+
+	hdn_creds_committed(new, old);
+	if (propagate_setxid)
+		hdn_setxid_queue_thread_group(new, setxid_securebits);
 
 	/* send notifications */
 	if (!uid_eq(new->uid,   old->uid)  ||

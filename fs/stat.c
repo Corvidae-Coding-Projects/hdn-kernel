@@ -10,6 +10,7 @@
 #include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/file.h>
+#include <linux/hardening.h>
 #include <linux/highuid.h>
 #include <linux/fs.h>
 #include <linux/namei.h>
@@ -257,6 +258,9 @@ int vfs_getattr(const struct path *path, struct kstat *stat,
 	int retval;
 
 	retval = security_inode_getattr(path);
+	if (unlikely(retval))
+		return retval;
+	retval = hdn_authorize_object_stat(path);
 	if (unlikely(retval))
 		return retval;
 	return vfs_getattr_nosec(path, stat, request_mask, query_flags);
@@ -578,6 +582,8 @@ retry:
 	if (d_is_symlink(path.dentry) ||
 	    d_backing_inode(path.dentry)->i_op->readlink) {
 		error = security_inode_readlink(path.dentry);
+		if (!error)
+			error = hdn_authorize_object_readlink(&path);
 		if (!error) {
 			touch_atime(&path);
 			error = vfs_readlink(path.dentry, buf, bufsiz);

@@ -131,6 +131,8 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr, unsigned long len,
 	struct vm_area_struct *vma;
 	struct vm_unmapped_area_info info = {};
 	unsigned long begin, end;
+	unsigned long threadstack_offset =
+		hdn_rand_threadstack_offset(filp, addr, flags, vm_flags);
 
 	if (flags & MAP_FIXED)
 		return addr;
@@ -151,6 +153,7 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr, unsigned long len,
 	info.length = len;
 	info.low_limit = begin;
 	info.high_limit = end;
+	info.threadstack_offset = threadstack_offset;
 	if (!(filp && is_file_hugepages(filp))) {
 		info.align_offset = pgoff << PAGE_SHIFT;
 		info.start_gap = stack_guard_placement(vm_flags);
@@ -172,6 +175,8 @@ arch_get_unmapped_area_topdown(struct file *filp, unsigned long addr0,
 	struct mm_struct *mm = current->mm;
 	unsigned long addr = addr0;
 	struct vm_unmapped_area_info info = {};
+	unsigned long threadstack_offset =
+		hdn_rand_threadstack_offset(filp, addr0, flags, vm_flags);
 
 	/* requested length too big for entire address space */
 	if (len > TASK_SIZE)
@@ -205,6 +210,7 @@ get_unmapped_area:
 		info.low_limit = PAGE_SIZE;
 
 	info.high_limit = get_mmap_base(0);
+	info.threadstack_offset = threadstack_offset;
 	if (!(filp && is_file_hugepages(filp))) {
 		info.start_gap = stack_guard_placement(vm_flags);
 		info.align_offset = pgoff << PAGE_SHIFT;

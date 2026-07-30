@@ -37,6 +37,7 @@
 #include <linux/init_task.h>
 #include <linux/syscalls.h>
 #include <linux/proc_ns.h>
+#include <linux/hardening.h>
 #include <linux/refcount.h>
 #include <linux/anon_inodes.h>
 #include <linux/sched/signal.h>
@@ -78,7 +79,11 @@ struct pid_namespace init_pid_ns = {
 	.user_ns = &init_user_ns,
 	.pid_max = PID_MAX_DEFAULT,
 #if defined(CONFIG_SYSCTL) && defined(CONFIG_MEMFD_CREATE)
+#ifdef CONFIG_SECURITY_HARDENING_MEMFD_NOEXEC
+	.memfd_noexec_scope = MEMFD_NOEXEC_SCOPE_NOEXEC_ENFORCED,
+#else
 	.memfd_noexec_scope = MEMFD_NOEXEC_SCOPE_EXEC,
+#endif
 #endif
 };
 EXPORT_SYMBOL_GPL(init_pid_ns);
@@ -473,9 +478,16 @@ EXPORT_SYMBOL(pid_task);
  */
 struct task_struct *find_task_by_pid_ns(pid_t nr, struct pid_namespace *ns)
 {
+	struct task_struct *task;
+
 	RCU_LOCKDEP_WARN(!rcu_read_lock_held(),
 			 "find_task_by_pid_ns() needs rcu_read_lock() protection");
-	return pid_task(find_pid_ns(nr, ns), PIDTYPE_PID);
+
+	task = pid_task(find_pid_ns(nr, ns), PIDTYPE_PID);
+	if (!hdn_task_visible_from_chroot(task))
+		return NULL;
+
+	return task;
 }
 
 struct task_struct *find_task_by_vpid(pid_t vnr)
@@ -687,8 +699,11 @@ static int pidfd_create(struct pid *pid, unsigned int flags)
  */
 SYSCALL_DEFINE2(pidfd_open, pid_t, pid, unsigned int, flags)
 {
+	enum pid_type type;
+	struct task_struct *task;
 	int fd;
 	struct pid *p;
+	int ret;
 
 	if (flags & ~(PIDFD_NONBLOCK | PIDFD_THREAD))
 		return -EINVAL;
@@ -699,6 +714,17 @@ SYSCALL_DEFINE2(pidfd_open, pid_t, pid, unsigned int, flags)
 	p = find_get_pid(pid);
 	if (!p)
 		return -ESRCH;
+
+	type = flags & PIDFD_THREAD ? PIDTYPE_PID : PIDTYPE_TGID;
+	task = get_pid_task(p, type);
+	if (task) {
+		ret = hdn_authorize_pidfd_open(task);
+		put_task_struct(task);
+		if (ret) {
+			put_pid(p);
+			return ret;
+		}
+	}
 
 	fd = pidfd_create(p, flags);
 
@@ -878,10 +904,16 @@ static struct file *__pidfd_fget(struct task_struct *task, int fd)
 	if (ret)
 		return ERR_PTR(ret);
 
-	if (ptrace_may_access(task, PTRACE_MODE_ATTACH_REALCREDS))
-		file = fget_task(task, fd);
-	else
+	if (!ptrace_may_access(task, PTRACE_MODE_ATTACH_REALCREDS |
+				     PTRACE_MODE_HDN_PROCESS_FD)) {
 		file = ERR_PTR(-EPERM);
+	} else {
+		ret = hdn_authorize_process_fd(task, HDN_PROCESS_FD_GETFD);
+		if (ret)
+			file = ERR_PTR(ret);
+		else
+			file = fget_task(task, fd);
+	}
 
 	up_read(&task->signal->exec_update_lock);
 

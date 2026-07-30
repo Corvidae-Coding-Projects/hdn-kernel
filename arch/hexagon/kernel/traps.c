@@ -10,7 +10,7 @@
 #include <linux/sched/debug.h>
 #include <linux/sched/task_stack.h>
 #include <linux/module.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/kdebug.h>
 #include <linux/syscalls.h>
 #include <linux/signal.h>

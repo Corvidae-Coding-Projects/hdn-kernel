@@ -15,6 +15,7 @@
 #include <linux/export.h>
 #include <linux/mutex.h>
 #include <linux/debugfs.h>
+#include <linux/hardening.h>
 #include <linux/scatterlist.h>
 #include <linux/uaccess.h>
 
@@ -329,6 +330,9 @@ static int mon_text_open(struct inode *inode, struct file *file)
 
 	mutex_lock(&mon_lock);
 	mbus = inode->i_private;
+	rc = hdn_authorize_usb_monitor(mbus->u_bus ? mbus->u_bus->busnum : 0);
+	if (rc)
+		goto err_alloc;
 
 	rp = kzalloc_obj(struct mon_reader_text);
 	if (rp == NULL) {

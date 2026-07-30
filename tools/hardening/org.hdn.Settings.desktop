@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=HDN System Security
+Comment=Review system security and install protected updates
+Icon=hdn-logo-icon
+TryExec=/usr/bin/hdn-security-center
+Exec=/usr/bin/hdn-security-center
+Terminal=false
+Categories=Settings;System;Security;
+Keywords=Security;Updates;Hardening;System;
+StartupNotify=true

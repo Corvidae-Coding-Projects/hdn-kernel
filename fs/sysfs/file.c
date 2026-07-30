@@ -16,6 +16,7 @@
 #include <linux/mutex.h>
 #include <linux/seq_file.h>
 #include <linux/mm.h>
+#include <linux/hardening.h>
 
 #include "sysfs.h"
 
@@ -38,6 +39,68 @@ static const struct sysfs_ops *sysfs_file_ops(struct kernfs_node *kn)
 	return kobj->ktype ? kobj->ktype->sysfs_ops : NULL;
 }
 
+static bool sysfs_owner_only_readable(struct kernfs_open_file *of)
+{
+	umode_t mode = file_inode(of->file)->i_mode;
+
+	return mode & 0400 && !(mode & 0044);
+}
+
+static bool sysfs_kobject_named(const struct kobject *kobj, const char *name)
+{
+	const char *kobj_name;
+
+	if (!kobj)
+		return false;
+	kobj_name = kobject_name(kobj);
+
+	return kobj_name && !strcmp(kobj_name, name);
+}
+
+static bool sysfs_sensitive_readable(struct kernfs_open_file *of)
+{
+	const struct attribute *attr = of->kn->priv;
+	struct kobject *kobj = sysfs_file_kobj(of->kn);
+	struct kobject *parent = kobj->parent;
+	struct kobject *grandparent = parent ? parent->parent : NULL;
+	struct kobject *greatgrandparent = grandparent ? grandparent->parent : NULL;
+	const char *parent_name = kobj->parent ? kobject_name(kobj->parent) : NULL;
+	const char *kobj_name = kobject_name(kobj);
+
+	if (!attr || !attr->name)
+		return false;
+	if (!kobj_name)
+		return false;
+
+	if (!strcmp(kobj_name, "kernel"))
+		return !strcmp(attr->name, "vmcoreinfo") ||
+		       !strcmp(attr->name, "notes");
+	if (parent_name && !strcmp(parent_name, "memmap") &&
+	    sysfs_kobject_named(grandparent, "firmware"))
+		return !strcmp(attr->name, "start") ||
+		       !strcmp(attr->name, "end");
+	if (parent_name && !strcmp(parent_name, "runtime-map") &&
+	    sysfs_kobject_named(grandparent, "efi") &&
+	    sysfs_kobject_named(greatgrandparent, "firmware"))
+		return !strcmp(attr->name, "phys_addr") ||
+		       !strcmp(attr->name, "virt_addr");
+
+	return parent_name && !strcmp(parent_name, "kernel") &&
+	       !strcmp(kobj_name, "boot_params") &&
+	       !strcmp(attr->name, "data");
+}
+
+static int hdn_authorize_sysfs_read(struct kernfs_open_file *of)
+{
+	if (!sysfs_owner_only_readable(of) &&
+	    !sysfs_sensitive_readable(of))
+		return 0;
+
+	return hdn_authorize_profile(HDN_AUTH_SYSFS_READ, HDN_TRANS_SYSFS_READ,
+				     HDN_REASON_PROFILE_DENIED, -EPERM,
+				     hdn_current_mntns_profile_id());
+}
+
 /*
  * Reads on sysfs are handled through seq_file, which takes care of hairy
  * details like buffering and seeking.  The following function pipes
@@ -53,6 +116,10 @@ static int sysfs_kf_seq_show(struct seq_file *sf, void *v)
 
 	if (WARN_ON_ONCE(!ops->show))
 		return -EINVAL;
+
+	count = hdn_authorize_sysfs_read(of);
+	if (count)
+		return count;
 
 	/* acquire buffer and ensure that it's >= PAGE_SIZE and clear */
 	count = seq_get_buf(sf, &buf);
@@ -86,9 +153,14 @@ static ssize_t sysfs_kf_bin_read(struct kernfs_open_file *of, char *buf,
 	const struct bin_attribute *battr = of->kn->priv;
 	struct kobject *kobj = sysfs_file_kobj(of->kn);
 	loff_t size = file_inode(of->file)->i_size;
+	int ret;
 
 	if (!count)
 		return 0;
+
+	ret = hdn_authorize_sysfs_read(of);
+	if (ret)
+		return ret;
 
 	if (size) {
 		if (pos >= size)
@@ -117,6 +189,10 @@ static ssize_t sysfs_kf_read(struct kernfs_open_file *of, char *buf,
 	 */
 	if (WARN_ON_ONCE(buf != of->prealloc_buf))
 		return 0;
+	len = hdn_authorize_sysfs_read(of);
+	if (len)
+		return len;
+
 	len = ops->show(kobj, of->kn->priv, buf);
 	if (len < 0)
 		return len;
@@ -138,6 +214,11 @@ static ssize_t sysfs_kf_write(struct kernfs_open_file *of, char *buf,
 
 	if (!count)
 		return 0;
+	if (hdn_authorize_profile(HDN_AUTH_SYSFS_MUTATE,
+				  HDN_TRANS_SYSFS_WRITE,
+				  HDN_REASON_PROFILE_DENIED, -EPERM,
+				  hdn_current_mntns_profile_id()))
+		return -EPERM;
 
 	return ops->store(kobj, of->kn->priv, buf, count);
 }
@@ -160,6 +241,11 @@ static ssize_t sysfs_kf_bin_write(struct kernfs_open_file *of, char *buf,
 
 	if (!battr->write)
 		return -EIO;
+	if (hdn_authorize_profile(HDN_AUTH_SYSFS_MUTATE,
+				  HDN_TRANS_SYSFS_WRITE,
+				  HDN_REASON_PROFILE_DENIED, -EPERM,
+				  hdn_current_mntns_profile_id()))
+		return -EPERM;
 
 	return battr->write(of->file, kobj, battr, buf, pos, count);
 }
@@ -169,6 +255,11 @@ static int sysfs_kf_bin_mmap(struct kernfs_open_file *of,
 {
 	const struct bin_attribute *battr = of->kn->priv;
 	struct kobject *kobj = sysfs_file_kobj(of->kn);
+	int ret;
+
+	ret = hdn_authorize_sysfs_read(of);
+	if (ret)
+		return ret;
 
 	return battr->mmap(of->file, kobj, battr, vma);
 }

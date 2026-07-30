@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Root-profile policy used by the QEMU smoke test to prove that narrow JIT
+# compatibility grants work without enabling broad exec-after-write behavior.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 jit-root
+
+allow 2 POLICY_ADMIN CRED_CHANGE TTY_ACCESS
+mem 2 ALLOW_JIT_EXEC_AFTER_WRITE

@@ -37,7 +37,8 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
+#include <linux/hardening.h>
 #include <linux/interrupt.h>
 #include <linux/stacktrace.h>
 #include <linux/debug_locks.h>
@@ -667,6 +668,11 @@ static const char *usage_str[] =
 
 const char *__get_key_name(const struct lockdep_subclass_key *key, char *str)
 {
+	if (!hdn_kernel_symbol_disclose_allowed()) {
+		strscpy(str, "[hidden]", KSYM_NAME_LEN);
+		return str;
+	}
+
 	return kallsyms_lookup((unsigned long)key, NULL, NULL, NULL, str);
 }
 

@@ -29,7 +29,8 @@
 #include <linux/bpf_mem_alloc.h>
 #include <net/xdp.h>
 #include <linux/trace_events.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
+#include <linux/hardening.h>
 
 #include "disasm.h"
 
@@ -3504,6 +3505,13 @@ static int add_kfunc_call(struct bpf_verifier_env *env, u32 func_id, s16 offset)
 	err = fetch_kfunc_meta(env, func_id, offset, &kfunc);
 	if (err)
 		return err;
+
+	err = hdn_authorize_kernel_symbol_lookup_transition(HDN_TRANS_BPF_LOAD);
+	if (err) {
+		verbose(env, "kernel symbol disclosure denied for kernel function %s\n",
+			kfunc.name);
+		return err;
+	}
 
 	addr = kallsyms_lookup_name(kfunc.name);
 	if (!addr) {
@@ -21572,6 +21580,7 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 	u32 type, id = insn->imm;
 	s32 datasec_id;
 	u64 addr;
+	int err;
 	int i;
 
 	t = btf_type_by_id(btf, id);
@@ -21586,6 +21595,12 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 	}
 
 	sym_name = btf_name_by_offset(btf, t->name_off);
+	err = hdn_authorize_kernel_symbol_lookup();
+	if (err) {
+		verbose(env, "kernel symbol disclosure denied for pseudo btf_id %d.\n", id);
+		return err;
+	}
+
 	addr = kallsyms_lookup_name(sym_name);
 	if (!addr) {
 		verbose(env, "ldimm64 failed to find the address for kernel symbol '%s'.\n",
@@ -25279,10 +25294,19 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 
 		if (tgt_prog) {
 			if (subprog == 0)
-				addr = (long) tgt_prog->bpf_func;
+				addr = (long)tgt_prog->bpf_func;
 			else
-				addr = (long) tgt_prog->aux->func[subprog]->bpf_func;
+				addr = (long)tgt_prog->aux->func[subprog]->bpf_func;
 		} else {
+			ret = hdn_authorize_kernel_symbol_lookup_transition(
+				HDN_TRANS_BPF_LOAD);
+			if (ret) {
+				bpf_log(log,
+					"kernel symbol disclosure denied for attach target %s\n",
+					tname);
+				return ret;
+			}
+
 			if (btf_is_module(btf)) {
 				mod = btf_try_get_module(btf);
 				if (mod)

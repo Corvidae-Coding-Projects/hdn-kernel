@@ -19,6 +19,7 @@
  *		Jorge Cwik, <jorge@laser.satlink.net>
  */
 
+#include <linux/hardening.h>
 #include <net/tcp.h>
 #include <net/tcp_ecn.h>
 #include <net/xfrm.h>
@@ -958,10 +959,12 @@ embryonic_reset:
 	if (!(flg & TCP_FLAG_RST)) {
 		/* Received a bad SYN pkt - for TFO We try not to reset
 		 * the local connection unless it's really necessary to
-		 * avoid becoming vulnerable to outside attack aiming at
-		 * resetting legit local connections.
-		 */
-		req->rsk_ops->send_reset(sk, skb, SK_RST_REASON_INVALID_SYN);
+	 * avoid becoming vulnerable to outside attack aiming at
+	 * resetting legit local connections.
+	 */
+		if (!hdn_blackhole_remote_skb(skb))
+			req->rsk_ops->send_reset(sk, skb,
+						 SK_RST_REASON_INVALID_SYN);
 	} else if (fastopen) { /* received a valid RST pkt */
 		reqsk_fastopen_remove(sk, req, true);
 		tcp_reset(sk, skb);

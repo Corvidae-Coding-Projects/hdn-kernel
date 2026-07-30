@@ -13,6 +13,7 @@
 #include <linux/idr.h>
 #include <linux/slab.h>
 #include <linux/security.h>
+#include <linux/hardening.h>
 #include <linux/hash.h>
 #include <linux/ns_common.h>
 
@@ -1911,6 +1912,67 @@ static struct kernfs_node *kernfs_dir_next_pos(const struct ns_common *ns,
 	return pos;
 }
 
+static bool hdn_kernfs_readdir_visible(struct kernfs_root *root,
+				       struct kernfs_node *kn)
+{
+	struct kernfs_node *parent;
+	struct kernfs_node *grandparent;
+	bool sensitive = false;
+
+	if (root->syscall_ops)
+		return true;
+	if (kernfs_type(kn) != KERNFS_FILE)
+		return true;
+
+	parent = kernfs_parent(kn);
+	if (parent && !strcmp(kernfs_rcu_name(parent), "kernel")) {
+		const char *name = kernfs_rcu_name(kn);
+
+		sensitive = !strcmp(name, "vmcoreinfo") ||
+			    !strcmp(name, "notes");
+	} else if (parent && !strcmp(kernfs_rcu_name(parent), "boot_params")) {
+		grandparent = kernfs_parent(parent);
+		const char *name = kernfs_rcu_name(kn);
+
+		sensitive = grandparent &&
+			    !strcmp(kernfs_rcu_name(grandparent), "kernel") &&
+			    !strcmp(name, "data");
+	} else if (parent) {
+		struct kernfs_node *greatgrandparent;
+		const char *name = kernfs_rcu_name(kn);
+
+		grandparent = kernfs_parent(parent);
+		greatgrandparent = grandparent ?
+			kernfs_parent(grandparent) : NULL;
+		if (grandparent &&
+		    !strcmp(kernfs_rcu_name(grandparent), "memmap") &&
+		    greatgrandparent &&
+		    !strcmp(kernfs_rcu_name(greatgrandparent), "firmware"))
+			sensitive = !strcmp(name, "start") ||
+				    !strcmp(name, "end");
+		else if (grandparent &&
+			 !strcmp(kernfs_rcu_name(grandparent), "runtime-map") &&
+			 greatgrandparent &&
+			 !strcmp(kernfs_rcu_name(greatgrandparent), "efi")) {
+			struct kernfs_node *firmware =
+				kernfs_parent(greatgrandparent);
+
+			sensitive = firmware &&
+				    !strcmp(kernfs_rcu_name(firmware), "firmware") &&
+				    (!strcmp(name, "phys_addr") ||
+				     !strcmp(name, "virt_addr"));
+		}
+	}
+
+	if (!(kn->mode & 0400) || ((kn->mode & 0044) && !sensitive))
+		return true;
+
+	return !hdn_authorize_profile(HDN_AUTH_SYSFS_READ,
+				      HDN_TRANS_SYSFS_READ,
+				      HDN_REASON_PROFILE_DENIED, -EPERM,
+				      hdn_current_mntns_profile_id());
+}
+
 static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 {
 	struct dentry *dentry = file->f_path.dentry;
@@ -1939,6 +2001,9 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 		ctx->pos = pos->hash;
 		file->private_data = pos;
 		kernfs_get(pos);
+
+		if (!hdn_kernfs_readdir_visible(root, pos))
+			continue;
 
 		if (!dir_emit(ctx, name, len, ino, type)) {
 			up_read(&root->kernfs_rwsem);

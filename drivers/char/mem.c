@@ -30,6 +30,7 @@
 #include <linux/uio.h>
 #include <linux/uaccess.h>
 #include <linux/security.h>
+#include <linux/hardening.h>
 
 #define DEVMEM_MINOR	1
 #define DEVPORT_MINOR	4
@@ -621,6 +622,11 @@ static int open_port(struct inode *inode, struct file *filp)
 		return -EPERM;
 
 	rc = security_locked_down(LOCKDOWN_DEV_MEM);
+	if (rc)
+		return rc;
+
+	rc = hdn_authorize(HDN_AUTH_RAW_IO, HDN_TRANS_RAW_IO,
+			   HDN_REASON_PROFILE_DENIED, -EPERM);
 	if (rc)
 		return rc;
 

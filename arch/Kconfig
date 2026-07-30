@@ -923,6 +923,7 @@ config ARCH_USES_CFI_GENERIC_LLVM_PASS
 
 config CFI
 	bool "Use Kernel Control Flow Integrity (kCFI)"
+	default y if SECURITY_HARDENING_EXPLOIT_MITIGATIONS
 	default CFI_CLANG
 	depends on ARCH_SUPPORTS_CFI
 	depends on $(cc-option,-fsanitize=kcfi)
@@ -1553,6 +1554,7 @@ config RANDOMIZE_KSTACK_OFFSET
 config RANDOMIZE_KSTACK_OFFSET_DEFAULT
 	bool "Default state of kernel stack offset randomization"
 	depends on RANDOMIZE_KSTACK_OFFSET
+	default y if SECURITY_HARDENING_EXPLOIT_MITIGATIONS
 	help
 	  Kernel stack offset randomization is controlled by kernel boot param
 	  "randomize_kstack_offset=on/off", and this config chooses the default

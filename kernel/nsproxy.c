@@ -20,8 +20,10 @@
 #include <linux/ipc_namespace.h>
 #include <linux/time_namespace.h>
 #include <linux/fs_struct.h>
+#include <linux/hardening.h>
 #include <linux/proc_fs.h>
 #include <linux/proc_ns.h>
+#include <linux/user_namespace.h>
 #include <linux/file.h>
 #include <linux/syscalls.h>
 #include <linux/cgroup.h>
@@ -169,6 +171,7 @@ int copy_namespaces(u64 flags, struct task_struct *tsk)
 	struct nsproxy *old_ns = tsk->nsproxy;
 	struct user_namespace *user_ns = task_cred_xxx(tsk, user_ns);
 	struct nsproxy *new_ns;
+	int ret;
 
 	if (likely(!(flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			      CLONE_NEWPID | CLONE_NEWNET |
@@ -191,6 +194,10 @@ int copy_namespaces(u64 flags, struct task_struct *tsk)
 	if ((flags & (CLONE_NEWIPC | CLONE_SYSVSEM)) ==
 		(CLONE_NEWIPC | CLONE_SYSVSEM))
 		return -EINVAL;
+
+	ret = hdn_authorize_namespace_create(flags);
+	if (ret)
+		return ret;
 
 	new_ns = create_new_namespaces(flags, tsk, user_ns, tsk->fs);
 	if (IS_ERR(new_ns))
@@ -222,6 +229,10 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
 	if (!ns_capable(user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
+
+	err = hdn_authorize_namespace_create(unshare_flags);
+	if (err)
+		return err;
 
 	*new_nsp = create_new_namespaces(unshare_flags, current, user_ns,
 					 new_fs ? new_fs : current->fs);
@@ -379,6 +390,18 @@ out:
 
 static inline int validate_ns(struct nsset *nsset, struct ns_common *ns)
 {
+	struct user_namespace *owner;
+	int ret;
+
+	if (ns->ns_type == CLONE_NEWUSER)
+		owner = to_user_ns(ns);
+	else
+		owner = ns->ops->owner(ns);
+
+	ret = hdn_authorize_namespace_join(owner, ns->ns_type);
+	if (ret)
+		return ret;
+
 	return ns->ops->install(nsset, ns);
 }
 
@@ -564,6 +587,8 @@ SYSCALL_DEFINE2(setns, int, fd, int, flags)
 {
 	CLASS(fd, f)(fd);
 	struct ns_common *ns = NULL;
+	struct task_struct *task __free(put_task) = NULL;
+	struct pid *pid = NULL;
 	struct nsset nsset = {};
 	int err = 0;
 
@@ -576,7 +601,15 @@ SYSCALL_DEFINE2(setns, int, fd, int, flags)
 			err = -EINVAL;
 		flags = ns->ns_type;
 	} else if (!IS_ERR(pidfd_pid(fd_file(f)))) {
+		pid = pidfd_pid(fd_file(f));
 		err = check_setns_flags(flags);
+		if (!err) {
+			task = get_pid_task(pid, PIDTYPE_PID);
+			if (!task)
+				err = -ESRCH;
+			else
+				err = hdn_authorize_pidfd_open(task);
+		}
 	} else {
 		err = -EINVAL;
 	}
@@ -590,7 +623,7 @@ SYSCALL_DEFINE2(setns, int, fd, int, flags)
 	if (proc_ns_file(fd_file(f)))
 		err = validate_ns(&nsset, ns);
 	else
-		err = validate_nsset(&nsset, pidfd_pid(fd_file(f)));
+		err = validate_nsset(&nsset, pid);
 	if (!err) {
 		commit_nsset(&nsset);
 		perf_event_namespaces(current);

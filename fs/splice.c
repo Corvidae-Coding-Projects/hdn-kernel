@@ -31,6 +31,7 @@
 #include <linux/syscalls.h>
 #include <linux/uio.h>
 #include <linux/fsnotify.h>
+#include <linux/hardening.h>
 #include <linux/security.h>
 #include <linux/gfp.h>
 #include <linux/net.h>
@@ -1005,6 +1006,10 @@ ssize_t vfs_splice_read(struct file *in, loff_t *ppos,
 	if (unlikely(ret < 0))
 		return ret;
 
+	ret = hdn_authorize_object_read(&in->f_path);
+	if (unlikely(ret))
+		return ret;
+
 	return do_splice_read(in, ppos, pipe, len, flags);
 }
 EXPORT_SYMBOL_GPL(vfs_splice_read);
@@ -1199,6 +1204,14 @@ static ssize_t do_splice_direct_actor(struct file *in, loff_t *ppos,
 	if (unlikely(out->f_flags & O_APPEND))
 		return -EINVAL;
 
+	ret = hdn_authorize_object_read(&in->f_path);
+	if (unlikely(ret))
+		return ret;
+
+	ret = hdn_authorize_object_write_file(out, false);
+	if (unlikely(ret))
+		return ret;
+
 	ret = splice_direct_to_actor(in, &sd, actor);
 	if (ret > 0)
 		*ppos = sd.pos;
@@ -1284,6 +1297,10 @@ ssize_t splice_file_to_pipe(struct file *in,
 {
 	ssize_t ret;
 
+	ret = hdn_authorize_object_read(&in->f_path);
+	if (unlikely(ret))
+		return ret;
+
 	pipe_lock(opipe);
 	ret = wait_for_space(opipe, flags);
 	if (!ret)
@@ -1340,6 +1357,10 @@ ssize_t do_splice(struct file *in, loff_t *off_in, struct file *out,
 
 		ret = rw_verify_area(WRITE, out, &offset, len);
 		if (unlikely(ret < 0))
+			return ret;
+
+		ret = hdn_authorize_object_write_file(out, false);
+		if (unlikely(ret))
 			return ret;
 
 		if (in->f_flags & O_NONBLOCK)

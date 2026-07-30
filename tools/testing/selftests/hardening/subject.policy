@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Policy used by the QEMU smoke test to prove UID/GID subject rules can select
+# a user's baseline profile without relying on exec path identity.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 privileged-root
+profile 7 nobody-uid
+profile 8 nobody-gid
+
+allow 2 POLICY_ADMIN CRED_CHANGE TTY_ACCESS
+umask 7 077
+subject uid 65534 7
+subject gid 65534 8

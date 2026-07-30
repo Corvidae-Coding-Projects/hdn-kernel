@@ -27,6 +27,7 @@
 #include <linux/poll.h>
 #include <linux/mount.h>
 #include <linux/file.h>
+#include <linux/hardening.h>
 #include <linux/ioctl.h>
 #include <linux/compat.h>
 #include "tty.h"
@@ -401,6 +402,7 @@ static int pty_common_install(struct tty_driver *driver, struct tty_struct *tty,
 	/* Establish the links in both directions */
 	tty->link   = o_tty;
 	o_tty->link = tty;
+	hdn_tty_record_broker(o_tty);
 	tty_port_init(ports[0]);
 	tty_port_init(ports[1]);
 	tty_buffer_set_limit(ports[0], 8192);

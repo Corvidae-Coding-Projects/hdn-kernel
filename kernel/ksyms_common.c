@@ -4,6 +4,7 @@
  * Contains a few generic function definations independent of config KALLSYMS.
  */
 #include <linux/kallsyms.h>
+#include <linux/hardening.h>
 #include <linux/security.h>
 
 static inline int kallsyms_for_perf(void)
@@ -30,12 +31,20 @@ bool kallsyms_show_value(const struct cred *cred)
 	switch (kptr_restrict) {
 	case 0:
 		if (kallsyms_for_perf())
-			return true;
+			return !hdn_authorize_profile(HDN_AUTH_PROC_DISCLOSE,
+						      HDN_TRANS_PROCFS_READ,
+						      HDN_REASON_PROFILE_DENIED,
+						      -EACCES,
+						      hdn_current_mntns_profile_id());
 		fallthrough;
 	case 1:
 		if (security_capable(cred, &init_user_ns, CAP_SYSLOG,
 				     CAP_OPT_NOAUDIT) == 0)
-			return true;
+			return !hdn_authorize_profile(HDN_AUTH_PROC_DISCLOSE,
+						      HDN_TRANS_PROCFS_READ,
+						      HDN_REASON_PROFILE_DENIED,
+						      -EACCES,
+						      hdn_current_mntns_profile_id());
 		fallthrough;
 	default:
 		return false;

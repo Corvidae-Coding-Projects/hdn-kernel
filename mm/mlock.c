@@ -19,6 +19,7 @@
 #include <linux/syscalls.h>
 #include <linux/sched.h>
 #include <linux/export.h>
+#include <linux/hardening.h>
 #include <linux/rmap.h>
 #include <linux/mmzone.h>
 #include <linux/hugetlb.h>
@@ -27,6 +28,14 @@
 #include <linux/secretmem.h>
 
 #include "internal.h"
+
+static unsigned long hdn_mlock_pages_to_bytes_saturated(unsigned long pages)
+{
+	if (pages > ULONG_MAX >> PAGE_SHIFT)
+		return ULONG_MAX;
+
+	return pages << PAGE_SHIFT;
+}
 
 struct mlock_fbatch {
 	local_lock_t lock;
@@ -647,6 +656,10 @@ static __must_check int do_mlock(unsigned long start, size_t len, vm_flags_t fla
 	/* check against resource limits */
 	if ((locked <= lock_limit) || capable(CAP_IPC_LOCK))
 		error = apply_vma_lock_flags(start, len, flags);
+	else
+		hdn_record_resource_pressure(RLIMIT_MEMLOCK,
+					     hdn_mlock_pages_to_bytes_saturated(
+						     locked));
 
 	mmap_write_unlock(current->mm);
 	if (error)
@@ -766,6 +779,10 @@ SYSCALL_DEFINE1(mlockall, int, flags)
 	if (!(flags & MCL_CURRENT) || (current->mm->total_vm <= lock_limit) ||
 	    capable(CAP_IPC_LOCK))
 		ret = apply_mlockall_flags(flags);
+	else
+		hdn_record_resource_pressure(RLIMIT_MEMLOCK,
+					     hdn_mlock_pages_to_bytes_saturated(
+						     current->mm->total_vm));
 	mmap_write_unlock(current->mm);
 	if (!ret && (flags & MCL_CURRENT))
 		mm_populate(0, TASK_SIZE);
@@ -804,6 +821,10 @@ int user_shm_lock(size_t size, struct ucounts *ucounts)
 	memlock = inc_rlimit_ucounts(ucounts, UCOUNT_RLIMIT_MEMLOCK, locked);
 
 	if ((memlock == LONG_MAX || memlock > lock_limit) && !capable(CAP_IPC_LOCK)) {
+		hdn_record_resource_pressure(RLIMIT_MEMLOCK,
+					     memlock == LONG_MAX ? ULONG_MAX :
+					     hdn_mlock_pages_to_bytes_saturated(
+						     memlock));
 		dec_rlimit_ucounts(ucounts, UCOUNT_RLIMIT_MEMLOCK, locked);
 		goto out;
 	}

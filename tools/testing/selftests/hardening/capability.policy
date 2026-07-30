@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Signed per-profile capability ceiling and allow-audit policy.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 capability-restricted-root
+
+role policy-admin allow POLICY_ADMIN TTY_ACCESS
+role capability-ceiling capability-deny CAP_CHOWN
+role capability-observer capability-audit CAP_FOWNER
+role capability-service include policy-admin capability-ceiling capability-observer
+
+use-role 2 capability-service

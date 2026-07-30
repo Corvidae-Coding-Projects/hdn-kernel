@@ -17,6 +17,7 @@
 #include <linux/compat.h>
 #include <linux/io_uring.h>
 #include <linux/io_uring_types.h>
+#include <linux/hardening.h>
 
 #include "filetable.h"
 #include "io_uring.h"
@@ -37,6 +38,25 @@
 
 #define IORING_MAX_RESTRICTIONS	(IORING_RESTRICTION_LAST + \
 				 IORING_REGISTER_LAST + IORING_OP_LAST)
+
+static int io_register_hardening_restricted(unsigned int opcode)
+{
+	switch (opcode) {
+	case IORING_REGISTER_IOWQ_AFF:
+	case IORING_REGISTER_IOWQ_MAX_WORKERS:
+	case IORING_REGISTER_NAPI:
+	case IORING_UNREGISTER_NAPI:
+	case IORING_REGISTER_ZCRX_IFQ:
+	case IORING_REGISTER_ZCRX_CTRL:
+	case IORING_REGISTER_MEM_REGION:
+	case IORING_REGISTER_BPF_FILTER:
+		return hdn_authorize(HDN_AUTH_IO_URING_RESTRICTED_OP,
+				     HDN_TRANS_IO_URING_OP,
+				     HDN_REASON_PROFILE_DENIED, -EPERM);
+	default:
+		return 0;
+	}
+}
 
 static __cold int io_probe(struct io_ring_ctx *ctx, void __user *arg,
 			   unsigned nr_args)
@@ -759,6 +779,10 @@ static int __io_uring_register(struct io_ring_ctx *ctx, unsigned opcode,
 			return -EACCES;
 	}
 
+	ret = io_register_hardening_restricted(opcode);
+	if (ret)
+		return ret;
+
 	switch (opcode) {
 	case IORING_REGISTER_BUFFERS:
 		ret = -EFAULT;
@@ -1024,6 +1048,12 @@ static int io_uring_register_send_msg_ring(void __user *arg, unsigned int nr_arg
 static int io_uring_register_blind(unsigned int opcode, void __user *arg,
 				   unsigned int nr_args)
 {
+	int ret;
+
+	ret = io_register_hardening_restricted(opcode);
+	if (ret)
+		return ret;
+
 	switch (opcode) {
 	case IORING_REGISTER_SEND_MSG_RING:
 		return io_uring_register_send_msg_ring(arg, nr_args);

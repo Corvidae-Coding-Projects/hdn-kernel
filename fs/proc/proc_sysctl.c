@@ -10,6 +10,7 @@
 #include <linux/security.h>
 #include <linux/sched.h>
 #include <linux/cred.h>
+#include <linux/hardening.h>
 #include <linux/namei.h>
 #include <linux/mm.h>
 #include <linux/uio.h>
@@ -570,6 +571,11 @@ static ssize_t proc_sys_call_handler(struct kiocb *iocb, struct iov_iter *iter,
 	error = -EPERM;
 	if (sysctl_perm(head, table, write ? MAY_WRITE : MAY_READ))
 		goto out;
+	if (write) {
+		error = hdn_authorize_chroot_sysctl(table->procname);
+		if (error)
+			goto out;
+	}
 
 	/* if that can happen at all, it should be -EINVAL, not -EISDIR */
 	error = -EINVAL;

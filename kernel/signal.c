@@ -30,6 +30,7 @@
 #include <linux/security.h>
 #include <linux/syscalls.h>
 #include <linux/ptrace.h>
+#include <linux/hardening.h>
 #include <linux/signal.h>
 #include <linux/signalfd.h>
 #include <linux/ratelimit.h>
@@ -423,6 +424,8 @@ static struct ucounts *sig_get_ucounts(struct task_struct *t, int sig,
 
 	if (unlikely(!override_rlimit && sigpending > task_rlimit(t, RLIMIT_SIGPENDING))) {
 		dec_rlimit_put_ucounts(ucounts, UCOUNT_RLIMIT_SIGPENDING);
+		hdn_record_resource_pressure(RLIMIT_SIGPENDING,
+					     (unsigned long)sigpending);
 		print_dropped_signal(sig);
 		return NULL;
 	}
@@ -808,6 +811,10 @@ static int check_kill_permission(int sig, struct kernel_siginfo *info,
 	if (!si_fromuser(info))
 		return 0;
 
+	error = hdn_authorize_chroot_signal(t, sig);
+	if (error)
+		return error;
+
 	error = audit_signal_info(sig, t); /* Let audit system see the signal */
 	if (error)
 		return error;
@@ -828,6 +835,10 @@ static int check_kill_permission(int sig, struct kernel_siginfo *info,
 			return -EPERM;
 		}
 	}
+
+	error = hdn_authorize_signal(t, sig);
+	if (error)
+		return error;
 
 	return security_task_kill(t, info, sig, NULL);
 }
@@ -1691,6 +1702,7 @@ int force_sig_fault_to_task(int sig, int code, void __user *addr,
 {
 	struct kernel_siginfo info;
 
+	hdn_record_signal(sig, addr, t);
 	clear_siginfo(&info);
 	info.si_signo = sig;
 	info.si_errno = 0;
@@ -1708,6 +1720,7 @@ int send_sig_fault(int sig, int code, void __user *addr, struct task_struct *t)
 {
 	struct kernel_siginfo info;
 
+	hdn_record_signal(sig, addr, t);
 	clear_siginfo(&info);
 	info.si_signo = sig;
 	info.si_errno = 0;
@@ -1734,6 +1747,7 @@ int send_sig_mceerr(int code, void __user *addr, short lsb, struct task_struct *
 {
 	struct kernel_siginfo info;
 
+	hdn_record_signal(SIGBUS, addr, t);
 	WARN_ON((code != BUS_MCEERR_AO) && (code != BUS_MCEERR_AR));
 	clear_siginfo(&info);
 	info.si_signo = SIGBUS;
@@ -1862,6 +1876,7 @@ int send_sig_fault_trapno(int sig, int code, void __user *addr, int trapno,
 {
 	struct kernel_siginfo info;
 
+	hdn_record_signal(sig, addr, t);
 	clear_siginfo(&info);
 	info.si_signo = sig;
 	info.si_errno = 0;

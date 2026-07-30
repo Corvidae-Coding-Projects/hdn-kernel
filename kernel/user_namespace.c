@@ -15,6 +15,7 @@
 #include <keys/user-type.h>
 #include <linux/seq_file.h>
 #include <linux/fs.h>
+#include <linux/hardening.h>
 #include <linux/uaccess.h>
 #include <linux/ctype.h>
 #include <linux/projid.h>
@@ -92,6 +93,10 @@ int create_user_ns(struct cred *new)
 	if (parent_ns->level > 32)
 		goto fail;
 
+	ret = hdn_authorize_userns(new);
+	if (ret < 0)
+		goto fail;
+
 	ucounts = inc_user_namespaces(parent_ns, owner);
 	if (!ucounts)
 		goto fail;
@@ -135,6 +140,7 @@ int create_user_ns(struct cred *new)
 	ns->level = parent_ns->level + 1;
 	ns->owner = owner;
 	ns->group = group;
+	hdn_userns_init_profile(ns);
 	INIT_WORK(&ns->work, free_user_ns);
 	for (i = 0; i < UCOUNT_COUNTS; i++) {
 		ns->ucount_max[i] = INT_MAX;

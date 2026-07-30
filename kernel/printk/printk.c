@@ -39,6 +39,7 @@
 #include <linux/ratelimit.h>
 #include <linux/kmsg_dump.h>
 #include <linux/syslog.h>
+#include <linux/hardening.h>
 #include <linux/cpu.h>
 #include <linux/rculist.h>
 #include <linux/poll.h>
@@ -745,6 +746,13 @@ static ssize_t devkmsg_write(struct kiocb *iocb, struct iov_iter *from)
 	struct devkmsg_user *user = file->private_data;
 	size_t len = iov_iter_count(from);
 	ssize_t ret = len;
+	int auth_ret;
+
+	auth_ret = hdn_authorize(HDN_AUTH_KERNEL_LOG_WRITE,
+				 HDN_TRANS_KERNEL_LOG_WRITE,
+				 HDN_REASON_PROFILE_DENIED, -EPERM);
+	if (auth_ret)
+		return auth_ret;
 
 	if (len > PRINTKRB_RECORD_MAX)
 		return -EINVAL;
@@ -807,6 +815,12 @@ static ssize_t devkmsg_read(struct file *file, char __user *buf,
 		.pbufs = &user->pbufs,
 	};
 	ssize_t ret;
+
+	ret = hdn_authorize(HDN_AUTH_KERNEL_LOG_READ,
+			    HDN_TRANS_KERNEL_LOG_READ,
+			    HDN_REASON_PROFILE_DENIED, -EPERM);
+	if (ret)
+		return ret;
 
 	ret = mutex_lock_interruptible(&user->lock);
 	if (ret)
@@ -929,6 +943,11 @@ static int devkmsg_open(struct inode *inode, struct file *file)
 	if ((file->f_flags & O_ACCMODE) != O_WRONLY) {
 		err = check_syslog_permissions(SYSLOG_ACTION_READ_ALL,
 					       SYSLOG_FROM_READER);
+		if (err)
+			return err;
+		err = hdn_authorize(HDN_AUTH_KERNEL_LOG_READ,
+				    HDN_TRANS_KERNEL_LOG_READ,
+				    HDN_REASON_PROFILE_DENIED, -EPERM);
 		if (err)
 			return err;
 	}
@@ -1760,6 +1779,11 @@ int do_syslog(int type, char __user *buf, int len, int source)
 			return 0;
 		if (!access_ok(buf, len))
 			return -EFAULT;
+		error = hdn_authorize(HDN_AUTH_KERNEL_LOG_READ,
+				      HDN_TRANS_KERNEL_LOG_READ,
+				      HDN_REASON_PROFILE_DENIED, -EPERM);
+		if (error)
+			break;
 		error = syslog_print(buf, len);
 		break;
 	/* Read/clear last kernel messages */
@@ -1774,6 +1798,11 @@ int do_syslog(int type, char __user *buf, int len, int source)
 			return 0;
 		if (!access_ok(buf, len))
 			return -EFAULT;
+		error = hdn_authorize(HDN_AUTH_KERNEL_LOG_READ,
+				      HDN_TRANS_KERNEL_LOG_READ,
+				      HDN_REASON_PROFILE_DENIED, -EPERM);
+		if (error)
+			break;
 		error = syslog_print_all(buf, len, clear);
 		break;
 	/* Clear ring buffer */
@@ -1805,6 +1834,11 @@ int do_syslog(int type, char __user *buf, int len, int source)
 		break;
 	/* Number of chars in the log buffer */
 	case SYSLOG_ACTION_SIZE_UNREAD:
+		error = hdn_authorize(HDN_AUTH_KERNEL_LOG_READ,
+				      HDN_TRANS_KERNEL_LOG_READ,
+				      HDN_REASON_PROFILE_DENIED, -EPERM);
+		if (error)
+			break;
 		mutex_lock(&syslog_lock);
 		if (!prb_read_valid_info(prb, syslog_seq, &info, NULL)) {
 			/* No unread messages. */

@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Root-profile policy used by the QEMU smoke test to prove narrow mount
+# authorities remain separate from broad mount administration.
+
+generation 1
+base 0
+default 1
+privileged 2
+
+profile 1 default
+profile 2 mount-root
+
+allow 2 MOUNT_ADMIN POLICY_ADMIN CRED_CHANGE TTY_ACCESS

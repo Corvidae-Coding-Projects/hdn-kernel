@@ -31,6 +31,7 @@
 #include <linux/memory.h>
 #include <linux/sched/task.h>
 #include <linux/security.h>
+#include <linux/hardening.h>
 #include <asm/sections.h>
 #include "internal.h"
 
@@ -639,6 +640,12 @@ static int open_kcore(struct inode *inode, struct file *filp)
 	if (!capable(CAP_SYS_RAWIO))
 		return -EPERM;
 
+	if (ret)
+		return ret;
+	ret = hdn_authorize_profile(HDN_AUTH_PROC_DISCLOSE,
+				    HDN_TRANS_PROCFS_READ,
+				    HDN_REASON_PROFILE_DENIED, -EACCES,
+				    hdn_current_mntns_profile_id());
 	if (ret)
 		return ret;
 

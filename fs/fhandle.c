@@ -8,6 +8,7 @@
 #include <linux/exportfs.h>
 #include <linux/fs_struct.h>
 #include <linux/fsnotify.h>
+#include <linux/hardening.h>
 #include <linux/personality.h>
 #include <linux/uaccess.h>
 #include <linux/compat.h>
@@ -159,9 +160,11 @@ SYSCALL_DEFINE5(name_to_handle_at, int, dfd, const char __user *, name,
 	CLASS(filename_uflags, filename)(name, flag);
 	err = filename_lookup(dfd, filename, lookup_flags, &path, NULL);
 	if (!err) {
-		err = do_sys_name_to_handle(&path, handle, mnt_id,
-					    flag & AT_HANDLE_MNT_ID_UNIQUE,
-					    fh_flags);
+		err = hdn_authorize_object_find(&path);
+		if (!err)
+			err = do_sys_name_to_handle(&path, handle, mnt_id,
+						    flag & AT_HANDLE_MNT_ID_UNIQUE,
+						    fh_flags);
 		path_put(&path);
 	}
 	return err;
@@ -343,6 +346,10 @@ static int handle_to_path(int mountdirfd, struct file_handle __user *ufh,
 	struct file_handle *handle __free(kfree) = NULL;
 	struct handle_to_path_ctx ctx = {};
 	const struct export_operations *eops;
+
+	retval = hdn_authorize_chroot_file_handle();
+	if (retval)
+		return retval;
 
 	if (copy_from_user(&f_handle, ufh, sizeof(struct file_handle)))
 		return -EFAULT;

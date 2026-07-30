@@ -1,0 +1,702 @@
+# SPDX-License-Identifier: GPL-2.0-only
+menuconfig SECURITY_HARDENING
+	bool "Hardening contract layer"
+	depends on SECURITY
+	depends on ARCH_HAS_SET_MEMORY
+	depends on MMU
+	select SECURITYFS
+	select MODULE_SIG_FORMAT
+	select MODULE_SIG if MODULES
+	select MODULE_SIG_FORCE if MODULES
+	help
+	  Provide a small kernel hardening contract layer for distro policy.
+	  The layer centralizes authority checks and dangerous transition
+	  mediation while leaving product policy, prompts, and profile
+	  compilation to userspace.
+
+	  This is not an LSM policy language. It is a kernel-side enforcement
+	  surface for sealed profiles, authority gates, and structured audit.
+	  Policy blobs must carry an appended PKCS#7 signature trusted by the
+	  kernel keyrings before they can be loaded, and the architecture must
+	  support kernel page-permission changes so published policy tables can
+	  be sealed read-only.
+
+if SECURITY_HARDENING
+
+config SECURITY_HARDENING_AUDIT
+	bool "Emit hardening denial diagnostics"
+	default y
+	help
+	  Emit ratelimited kernel diagnostics when the hardening contract layer
+	  denies an operation. A later userspace event channel should replace
+	  this for product builds.
+	  The message includes a stable authority, transition, and reason code.
+	  It is intended for early bring-up and harness validation.
+
+config SECURITY_HARDENING_AUDIT_FLOOD
+	bool "Throttle repeated hardening audit events"
+	default y
+	help
+	  Suppress repeated identical hardening audit events after a bounded
+	  runtime-configurable burst/window. The first events remain visible
+	  through securityfs and kernel diagnostics, while repeated floods are
+	  counted in the hardening status file instead of continuously
+	  evicting useful records from the event ring.
+
+config SECURITY_HARDENING_EXEC_AUDIT
+	bool "Record successful exec events"
+	default y
+	help
+	  Record successful execve and execveat transitions into the hardening
+	  event ring after credentials and the new profile are committed. The
+	  EXEC event stores the executable inode as the event object, and the
+	  EXEC_ARGS event stores argv and environment counts as
+	  (argc << 32) | envc for audit consumers that want process image
+	  transition telemetry without copying argument contents or affecting
+	  exec admission.
+
+config SECURITY_HARDENING_CHDIR_AUDIT
+	bool "Record successful directory-change events"
+	default y
+	help
+	  Record successful chdir and fchdir operations into the hardening
+	  event ring after the current working directory is committed. The
+	  destination inode is stored as the event object for audit consumers
+	  that want filesystem movement telemetry without affecting directory
+	  change admission.
+
+config SECURITY_HARDENING_MOUNT_AUDIT
+	bool "Record successful mount administration events"
+	default y
+	help
+	  Record successful mount, remount, bind, move_mount, fsmount, and
+	  mount_setattr operations into the hardening event ring after the VFS
+	  operation succeeds. The target path inode is stored as the event
+	  object for audit consumers that want mount administration telemetry
+	  without changing mount admission policy.
+
+config SECURITY_HARDENING_USER_WX
+	bool "Deny writable executable userspace mappings"
+	default y
+	help
+	  Deny mmap() and mprotect() transitions that create writable and
+	  executable userspace mappings. Also deny adding execute permission to
+	  a mapping that is currently writable.
+	  Profiles can grant a narrow JIT exception for private anonymous
+	  write-to-execute transitions without allowing simultaneous W+X.
+	  This option provides the default no-ambient-WX baseline.
+
+config SECURITY_HARDENING_MEMFD_NOEXEC
+	bool "Force non-executable memfd defaults"
+	default y
+	depends on MEMFD_CREATE && SYSCTL
+	help
+	  Force vm.memfd_noexec to the enforced no-exec mode. Unflagged
+	  memfd_create() calls receive MFD_NOEXEC_SEAL semantics, explicit
+	  MFD_EXEC requests are rejected, and the sysctl cannot be lowered by a
+	  descendant pid namespace. This removes an ambient file-backed
+	  executable-memory source while leaving explicit HDN JIT compatibility
+	  policy in charge of legitimate executable memory transitions.
+
+config SECURITY_HARDENING_MMAP_MIN_ADDR
+	bool "Lock low-address mmap floor"
+	default y
+	depends on SYSCTL
+	help
+	  Keep vm.mmap_min_addr at or above 64 KiB so a later privileged sysctl
+	  write cannot remove the low-address mapping barrier used to make NULL
+	  pointer dereference exploitation harder. Higher product or LSM floors
+	  remain supported.
+
+config SECURITY_HARDENING_RWXMAP_AUDIT
+	bool "Record denied writable-executable mapping attempts"
+	default y
+	depends on SECURITY_HARDENING_USER_WX
+	help
+	  Emit a dedicated hardening event when the W+X memory policy denies an
+	  explicit mmap() or mprotect() request that combines write and execute
+	  permission. The ordinary USER_WX_MAPPING denial event is still
+	  emitted for policy and response handling; this option gives desktop
+	  and log consumers a stable grsec-class RWX-map audit signal.
+
+config SECURITY_HARDENING_UNPRIV_BPF
+	bool "Require privilege for BPF program load"
+	default y
+	select BPF_JIT if BPF_SYSCALL && (HAVE_CBPF_JIT || HAVE_EBPF_JIT)
+	select BPF_JIT_ALWAYS_ON if BPF_SYSCALL && HAVE_EBPF_JIT
+	help
+	  Require BPF program loads to come from a privileged kernel caller or
+	  from a task that already passed the BPF capability/token checks.
+	  This keeps BPF program loading behind a central authority gate.
+	  Existing BPF verifier and LSM checks still run after this gate.
+	  On architectures with eBPF JIT support, permanently enable the JIT,
+	  remove the interpreter, force constant blinding, and hide JIT
+	  kallsyms so privileged BPF service support does not reintroduce a
+	  downgradeable execution surface.
+
+config SECURITY_HARDENING_UNPRIV_PERF_KERNEL
+	bool "Require privilege for kernel perf visibility"
+	default y
+	help
+	  Require CAP_PERFMON for perf_event_open() requests that can observe
+	  kernel execution or namespace metadata.
+	  User-only perf use remains governed by existing kernel checks.
+	  The goal is a single hardening authority for kernel observability.
+
+config SECURITY_HARDENING_PTRACE_READEXEC
+	bool "Deny forced reads of execute-only mappings"
+	default y
+	help
+	  Require explicit profile authority before ptrace-like forced remote
+	  reads can read userspace mappings that are executable but not readable
+	  in the target VMA. This preserves ordinary ptrace admission as a
+	  separate policy decision while preventing ptrace and active
+	  /proc/pid/mem reads from bypassing execute-only userspace mappings by
+	  default.
+
+config SECURITY_HARDENING_PTRACE_AUDIT
+	bool "Audit ptrace attach attempts"
+	default y
+	help
+	  Emit structured hardening events for ptrace attach and seize attempts
+	  after the hardening profile gate has allowed the request. Successful
+	  attaches are recorded as allow-audit events; later upstream denials
+	  are recorded as deny-audit events with the kernel error preserved.
+
+config SECURITY_HARDENING_UNPRIV_USERNS
+	bool "Gate user namespace creation by hardening profile"
+	default y
+	help
+	  Require explicit profile authority for user namespace creation.
+	  This keeps unprivileged namespace creation behind the same central
+	  attack-surface policy as BPF, perf, ptrace, and debug interfaces.
+	  Existing namespace limits, capability checks, sysctls, and LSM
+	  checks still apply afterward.
+
+config SECURITY_HARDENING_NAMESPACE_PROFILES
+	bool "Enforce namespace profile inheritance"
+	default y
+	help
+	  Attach hardening profile IDs to user namespaces, inherit the current
+	  profile when creating a user namespace, and deny namespace creation or
+	  namespace joins that would widen the caller's profile unless the
+	  profile has namespace administration authority. This also covers
+	  mount namespace files created through open_tree(OPEN_TREE_NAMESPACE).
+
+config SECURITY_HARDENING_MODULE_FILE_ONLY
+	bool "Deny raw init_module images"
+	default y
+	help
+	  Deny init_module() loading from an anonymous userspace memory image.
+	  finit_module() remains the intended path so module admission can be
+	  tied to file identity, signatures, and package provenance.
+	  This establishes file-backed module admission as the default contract.
+	  When an active hardening policy is loaded, file-backed module loads
+	  must also match the policy's exact module trust table.
+
+config SECURITY_HARDENING_MODULE_AUTOLOAD
+	bool "Gate module autoload requests by hardening profile"
+	default y
+	depends on MODULES
+	help
+	  Require MODULE_AUTOLOAD profile authority before request_module()
+	  can ask the usermode helper to satisfy a kernel module alias. This
+	  keeps implicit module expansion behind policy while leaving explicit
+	  file-backed module loading under the separate MODULE_LOAD authority.
+	  Writes to the kernel.modprobe sysctl also require policy-admin context
+	  and MODULE_AUTOLOAD authority, so a restricted root profile cannot
+	  redirect future helper execution. Existing LSM, module signature, and
+	  modprobe behavior still run after this gate for authorized autoload
+	  requests. Authorized helpers receive bounded HDN_MODULE_* environment
+	  context describing the requested alias, requester ids, and HDN profile.
+
+config SECURITY_HARDENING_MODULE_AUTOLOAD_PATH
+	bool "Validate module autoload helper paths"
+	default y
+	depends on SECURITY_HARDENING_MODULE_AUTOLOAD
+	help
+	  Require writes to kernel.modprobe to either disable autoload with an
+	  empty path or select an absolute, symlink-free, root-owned helper
+	  through non-group/world-writable ancestry. This keeps an authorized
+	  policy-admin operation from accidentally turning future module
+	  autoloads into execution through a mutable path.
+
+config SECURITY_HARDENING_PATH_DEFAULTS
+	bool "Use hardened path-handling defaults"
+	default y
+	help
+	  Default and lock the existing protected symlink, hardlink, FIFO, and
+	  regular file sysctls to hardened values. These upstream checks block
+	  common sticky-directory link and replacement attacks without requiring
+	  userspace policy prompts.
+
+config SECURITY_HARDENING_SYMLINK_OWNER
+	bool "Deny symlink target-owner mismatches"
+	default y
+	help
+	  Track foreign, non-root symlink owners during pathname resolution and
+	  deny a completed lookup when any tracked symlink owner differs from the
+	  final target owner. A caller may follow its own symlinks subject to the
+	  target's normal permissions. This complements the upstream
+	  protected_symlinks sticky-directory check while preserving generated
+	  per-user links used by desktop sessions and service managers.
+
+config SECURITY_HARDENING_TRUSTED_EXEC
+	bool "Support trusted-path execution profiles"
+	default y
+	help
+	  Allow profiles to require executable files and their dentry and
+	  mountpoint ancestor directories to be root-owned and not group/world
+	  writable. Profiles can grant a bypass authority for package managers,
+	  build systems, and other trusted tooling that intentionally executes
+	  from writable locations.
+
+config SECURITY_HARDENING_CHROOT_CONTAINMENT
+	bool "Harden chroot containment"
+	default y
+	help
+	  Allow profiles to harden chroot use by denying repeated chroot,
+	  fchdir/chdir escapes outside the current root, and pivot_root from a
+	  chroot unless the profile has explicit chroot administration
+	  authority. Contained chroots also deny chmod, device-node mknod,
+	  shared-memory attach, priority increases, and bad directory renames
+	  by default, and block abstract AF_UNIX socket connections to sockets
+	  bound outside the current root. They also reduce dangerous
+	  capabilities and hide outside-root tasks from PID lookup/procfs views
+	  while denying explicit signal/file-owner targeting outside the current
+	  root. The reduced capability set covers module loading, raw I/O,
+	  broad system administration, reboot/time changes, raw networking, tty
+	  configuration, IPC ownership override, file capability writes, kernel
+	  log control, MAC administration, immutable-file changes, process
+	  accounting, and network administration. Successful chroot calls place
+	  cwd at the new root.
+
+config SECURITY_HARDENING_TIME_ADMIN
+	bool "Gate system time changes by hardening profile"
+	default y
+	help
+	  Require TIME_ADMIN profile authority after ordinary CAP_SYS_TIME and
+	  LSM checks but before userspace can set wall-clock time, change the
+	  kernel timezone, or discipline system time through adjtimex. This
+	  keeps log, certificate, and freshness-sensitive time mutation behind a
+	  narrow service authority while leaving clock reads and read-only time
+	  queries untouched.
+
+config SECURITY_HARDENING_TIME_AUDIT
+	bool "Record successful system time changes"
+	default y
+	help
+	  Record successful wall-clock, timezone, and mutable adjtimex changes
+	  into the hardening event ring after ordinary kernel and LSM checks
+	  succeed. The time-operation code is stored as the event object for
+	  audit consumers that want time mutation telemetry without changing
+	  admission policy.
+
+config SECURITY_HARDENING_RESOURCE_ADMIN
+	bool "Gate privileged resource limit raises by hardening profile"
+	default y
+	help
+	  Require RESOURCE_ADMIN profile authority after ordinary
+	  CAP_SYS_RESOURCE and LSM checks before a task can raise a hard
+	  resource limit through setrlimit or prlimit. Soft-limit changes and
+	  limit lowering remain governed by normal kernel behavior so ordinary
+	  applications can tune their own process limits without a policy
+	  prompt.
+
+config SECURITY_HARDENING_RESOURCE_AUDIT
+	bool "Record successful resource-limit changes"
+	default y
+	help
+	  Record successful setrlimit and prlimit writes into the hardening event
+	  ring after ordinary kernel and LSM checks succeed. The resource number
+	  is stored as the event object for audit consumers that want process
+	  resource telemetry without changing admission policy.
+
+config SECURITY_HARDENING_BLOCK_DEVICE_RESTRICT
+	bool "Gate raw block-device access by hardening profile"
+	default y
+	help
+	  Require BLOCK_DEVICE_ACCESS profile authority before userspace can
+	  open a block special file directly. Mounted filesystems and other
+	  in-kernel block-device users keep using the ordinary block layer
+	  helpers, while raw device reads and writes remain behind explicit
+	  service authority. Privileged block-device administration commands,
+	  including partition table updates, discard/zeroout operations, block
+	  tracing control, block crypto key control, persistent reservation
+	  writes, driver-specific fallback ioctls, and block io_uring discard
+	  additionally require BLOCK_DEVICE_ADMIN so products can allow
+	  inspection without allowing mutation.
+
+config SECURITY_HARDENING_FORK_AUDIT
+	bool "Record fork and clone events"
+	default n
+	help
+	  Record successful fork, vfork, and clone operations into the
+	  hardening event ring without changing fork admission. The child pid
+	  is stored as the event object for audit consumers that explicitly want
+	  complete process-creation telemetry. This is opt-in because a normal
+	  desktop creates enough processes to crowd out higher-value security
+	  events even when ring and journal flood control are active.
+
+config SECURITY_HARDENING_FORKFAIL_AUDIT
+	bool "Record failed fork attempts"
+	default y
+	help
+	  Record failed fork, vfork, and clone attempts into the hardening
+	  event ring when process creation is rejected because of process
+	  count or memory pressure. The errno field stores the specific
+	  rejection reason for audit consumers.
+
+config SECURITY_HARDENING_FS_PROTECTION_AUDIT
+	bool "Record protected link and sticky-file denials"
+	default y
+	help
+	  Record denials from upstream protected symlink, protected hardlink,
+	  protected FIFO, and protected regular-file sticky-directory checks
+	  into the hardening event ring. This does not change the upstream
+	  access-control decision; it gives desktop and log consumers stable
+	  HDN event names for those filesystem protections.
+
+config SECURITY_HARDENING_SIGNAL_AUDIT
+	bool "Record severe signal events"
+	default y
+	help
+	  Record severe fault-style signals into the hardening event ring
+	  without changing signal delivery. This covers SIGSEGV, SIGILL,
+	  SIGABRT, and SIGBUS so desktop crash reporters and recovery tooling
+	  can consume structured crash telemetry without scraping kernel logs.
+	  The event object packs the signal number with the low bits of the
+	  reported fault address.
+
+config SECURITY_HARDENING_SETXID
+	bool "Propagate multithreaded root credential drops"
+	default y
+	help
+	  When one thread in a multithreaded process changes its real uid from
+	  root to non-root, queue same-process credential adoption work for the
+	  sibling threads. This keeps non-glibc or partially custom runtimes from
+	  leaving older sibling threads running with root credentials after the
+	  process believes it has dropped privilege.
+
+config SECURITY_HARDENING_BRUTE
+	bool "Throttle repeated privileged exec crashes"
+	default y
+	help
+	  Record repeated crash signals from privileged exec transitions and
+	  temporarily deny new executions of the same file by the same uid and
+	  target profile after a short burst. Also mark same-binary daemon
+	  parents after a worker crash so later forks pause before launching
+	  more workers. This limits brute-force attempts against setuid,
+	  file-capability, and forking daemon targets without adding prompts or
+	  userspace policy decisions to the crash path.
+
+config SECURITY_HARDENING_KERNEL_LOCKOUT
+	bool "Lock out users after kernel-surface crash signals"
+	default y
+	help
+	  When a kernel-surface fault is reported, ban the originating uid until
+	  reboot. A banned uid's existing tasks are killed, and later fork,
+	  exec, or credential-entry attempts for that uid are denied. This gives
+	  the system a hard stop against repeated kernel exploitation attempts
+	  without exposing a user-facing prompt or requiring desktop policy
+	  decisions in the fault path.
+
+	  Root-origin and interrupt-context faults cannot be attributed to a
+	  bannable uid; whether those escalate to a full panic is controlled by
+	  SECURITY_HARDENING_KERNEL_LOCKOUT_PANIC.
+
+config SECURITY_HARDENING_KERNEL_LOCKOUT_PANIC
+	bool "Panic on unattributable kernel-surface faults"
+	depends on SECURITY_HARDENING_KERNEL_LOCKOUT
+	default n
+	help
+	  Escalate a kernel-surface fault to a full kernel panic when it
+	  originates from a root-owned task or from interrupt context, where no
+	  unprivileged uid can be banned. This is the strongest anti-exploitation
+	  posture but turns any latent in-kernel oops from a root process into a
+	  machine-wide denial of service, so it is unsuitable as an interactive
+	  daily-driver default. Product/server images that want oops=panic-style
+	  behavior can enable it (equivalently, set panic_on_oops); the
+	  interactive baseline leaves it off so a single survivable oops does not
+	  take the system down, while the uid-ban protection above still applies
+	  to unprivileged faults.
+
+config SECURITY_HARDENING_SUID_SPECTRE
+	bool "Force speculation controls for privileged exec"
+	default y
+	depends on X86
+	help
+	  Force user-controllable Spectre V2 and Speculative Store Bypass
+	  mitigations when a non-root caller executes a setuid, setgid, or
+	  file-capability helper. This gives privileged helper processes a
+	  secure default without requiring users or package maintainers to
+	  understand per-process prctl speculation controls.
+
+config SECURITY_HARDENING_SYSVIPC
+	bool "Harden overly permissive System V IPC objects"
+	default y
+	depends on SYSVIPC
+	help
+	  Deny cross-uid or cross-gid access to System V IPC objects whose
+	  mode bits grant broad world or group access beyond the creator or
+	  current owner. Profiles can grant IPC_ADMIN as a narrow bypass for
+	  compatibility services. Existing IPC permissions, capabilities, and
+	  LSM checks still run as usual.
+
+config SECURITY_HARDENING_POSIX_MQUEUE
+	bool "Harden overly permissive POSIX message queues"
+	default y
+	depends on POSIX_MQUEUE
+	help
+	  Deny cross-uid or cross-gid access to POSIX message queue files
+	  whose mode bits grant broad world or group access beyond the creator
+	  or current owner. Profiles can grant IPC_ADMIN as a narrow bypass for
+	  compatibility services. Existing VFS permissions, capabilities, and
+	  LSM checks still run as usual.
+
+config SECURITY_HARDENING_TTY_INJECTION
+	bool "Gate terminal input injection ioctls"
+	default y
+	depends on TTY
+	help
+	  Require TTY_INJECT profile authority for terminal input injection
+	  ioctls such as TIOCSTI and VT TIOCLINUX. This removes ambient
+	  same-session command injection while still allowing trusted desktop
+	  brokers or accessibility services to receive an explicit authority.
+	  The legacy TIOCSTI and line-discipline autoload sysctls are forced
+	  off and locked while this hardening is enabled.
+
+config SECURITY_HARDENING_TTY_ACCESS
+	bool "Gate non-controlling terminal descriptor access"
+	default y
+	depends on TTY
+	help
+	  Require TTY_ACCESS profile authority before a task reads, writes, or
+	  ioctls a terminal that is not its controlling terminal. PTY masters
+	  remain available for terminal emulators. PTY allocator and explicit
+	  descriptor-transfer provenance identifies the exact setup broker; a
+	  session's direct parent then retains cleanup access after the controlling
+	  session exits. Ordinary fork inheritance does not grant broker access,
+	  while controlling-terminal access remains available for shells and
+	  console applications. This blocks inherited or preopened descriptor abuse
+	  without asking normal desktop users to manage terminal policy.
+
+config SECURITY_HARDENING_VM86
+	bool "Gate x86 VM86 mode"
+	default y
+	depends on VM86
+	help
+	  Require RAW_IO profile authority before 32-bit x86 tasks can enter
+	  Virtual 8086 mode or use the VM86 IRQ helper commands. Existing
+	  mmap_min_addr, capability, lockdown, and LSM checks still run as
+	  usual; this adds the same profile contract used for port I/O and raw
+	  CPU device access.
+
+config SECURITY_HARDENING_FUSE_RESTRICT
+	bool "Gate FUSE filesystem mounts"
+	default y
+	help
+	  Require FUSE_MOUNT profile authority before userspace can create a
+	  FUSE or FUSE block-device mount. This keeps user-backed filesystem
+	  servers behind a narrow authority instead of treating them as ordinary
+	  mount administration.
+
+config SECURITY_HARDENING_ROFS
+	bool "Prevent read-only mount relaxation without authority"
+	default y
+	help
+	  Require ROFS_RELAX profile authority before a read-only mount or
+	  read-only superblock can be made writable again. This supports product
+	  policies that make system mounts read-only after boot while preserving
+	  a narrow compatibility bypass for trusted update tooling.
+
+config SECURITY_HARDENING_USB_RESTRICT
+	bool "Gate new USB device attachment and monitoring"
+	default y
+	depends on USB_SUPPORT
+	help
+	  Require USB_ATTACH profile authority before newly connected USB
+	  devices are enumerated, and USB_MONITOR profile authority before a
+	  task can open usbmon capture interfaces. Root hubs and devices
+	  already discovered before policy commit remain governed by the normal
+	  USB core state; runtime insertions are blocked early in the hub
+	  attach path unless a trusted profile, broker, or boot policy grants
+	  the authority.
+
+config SECURITY_HARDENING_SOCKET_RESTRICT
+	bool "Gate non-local socket operations by profile"
+	default y
+	depends on NET
+	help
+	  Require explicit profile authorities for non-local socket creation,
+	  outbound connection attempts, and server-side bind/listen/accept
+	  operations. AF_UNIX/AF_LOCAL sockets remain available by default so
+	  normal desktop IPC does not depend on network authorities. Existing
+	  protocol, capability, cgroup, and LSM checks still run after this
+	  hardening gate.
+
+config SECURITY_HARDENING_NET_BLACKHOLE
+	bool "Blackhole remote closed-port TCP/UDP responses"
+	default y
+	depends on NET
+	help
+	  Suppress scanner-visible TCP resets and ICMP destination-unreachable
+	  replies for remote packets that target closed TCP/UDP endpoints or
+	  unsupported IPv4 protocols. Loopback traffic remains exempt so local
+	  diagnostics, desktop IPC, and developer tools keep normal closed-port
+	  behavior. This also shortens LAST_ACK retry behavior to limit stale
+	  sockets caused by blackholed remote resets.
+
+config SECURITY_HARDENING_TCP_NO_SIMULT_CONNECT
+	bool "Disable TCP simultaneous connect"
+	default y
+	depends on NET
+	help
+	  Disable the crossed-SYN TCP simultaneous-open path. Normal client and
+	  server TCP handshakes are unaffected; the uncommon client-client
+	  simultaneous connect behavior is removed as an invisible hardening
+	  default.
+
+config SECURITY_HARDENING_PROC_HIDE
+	bool "Hide other users' procfs task directories by profile"
+	default y
+	depends on PROC_FS
+	help
+	  Hide /proc task directories for processes owned by other users unless
+	  the current profile has PROC_DISCLOSE authority. This gives the distro
+	  a secure default similar to hidepid behavior without requiring every
+	  product image to remember a special procfs mount option.
+
+config SECURITY_HARDENING_PROC_TASK_GID
+	int "Global proc task-view group id"
+	default -1
+	range -1 2147483647
+	depends on SECURITY_HARDENING_PROC_HIDE
+	help
+	  Optionally allow members of one global group to see other users'
+	  procfs task directories and mint pidfds without granting broader
+	  PROC_DISCLOSE authority or per-profile PROC_TASK_VIEW authority.
+	  Set this to -1 to disable the global group. Product images can
+	  override the configured value at boot with hdn.proc_task_gid=GID.
+
+config SECURITY_HARDENING_PROC_TASK_MODES
+	bool "Restrict proc task directory modes to the task-view group"
+	default y
+	depends on SECURITY_HARDENING_PROC_HIDE
+	help
+	  When a global proc task-view group is configured, expose procfs task
+	  directories as owner-and-task-view-group traversable instead of
+	  world-traversable. This keeps proc entry metadata consistent with the
+	  task visibility policy while leaving the feature inert until
+	  SECURITY_HARDENING_PROC_TASK_GID or hdn.proc_task_gid selects a group.
+
+config SECURITY_HARDENING_PROC_MEMMAP
+	bool "Redact procfs address maps without disclosure authority"
+	default y
+	depends on PROC_FS
+	help
+	  Redact ASLR-relevant addresses and offsets from /proc/<pid>/maps,
+	  /proc/<pid>/smaps, /proc/<pid>/smaps_rollup, /proc/<pid>/numa_maps,
+	  /proc/<pid>/stat, and /proc/<pid>/pagemap when a process reads a
+	  different address space without PROC_DISCLOSE authority, and deny
+	  address-query ioctls for that same case. System resource maps in
+	  /proc/ioports and /proc/iomem also keep their device/resource names
+	  while collapsing ranges to zero without disclosure authority. Global
+	  page-monitoring metadata in /proc/kpagecount, /proc/kpageflags, and
+	  /proc/kpagecgroup is denied without disclosure authority. Self reads
+	  are left intact for compatibility, while desktop tools keep useful
+	  mapping names and permissions without learning target addresses.
+	  Privileged execs are also limited to a 512 KiB copied argument/
+	  environment stack and an 8 MiB stack resource limit so a setuid,
+	  setgid, or file-capability helper cannot consume the stack entropy that
+	  these procfs redactions are meant to protect.
+
+config SECURITY_HARDENING_SYMBOL_LOOKUP
+	bool "Gate and isolate kernel symbol lookup"
+	default y
+	depends on KALLSYMS
+	help
+	  Require PROC_DISCLOSE authority before tracing, probe, and BPF
+	  interfaces expose or resolve kernel symbol names for userspace. Raw
+	  kallsyms declarations live in a separate internal header, while the
+	  ordinary header exposes only policy-redacting formatters. This keeps
+	  tracefs/debugfs or BPF access from implicitly granting a kallsyms
+	  oracle and makes every in-tree raw lookup dependency explicit.
+
+config SECURITY_HARDENING_PROC_IPADDR
+	bool "Expose accepted TCP peer addresses in procfs"
+	default y
+	depends on PROC_FS && INET
+	help
+	  Add an owner-readable /proc/<pid>/ipaddr file that reports the
+	  IPv4 peer address most recently accepted by the process. The address
+	  is handed to one forked child and then cleared from the acceptor so
+	  per-connection worker processes can be attributed without exposing a
+	  terminal-facing feature to normal desktop users.
+
+config SECURITY_HARDENING_RAND_THREADSTACK
+	bool "Randomize anonymous thread-stack placement gaps"
+	default y
+	help
+	  Insert a small random unmapped gap before anonymous non-fixed
+	  MAP_STACK and stack-like MAP_GROWSDOWN allocations when process
+	  address-space randomization is enabled. This gives pthread-style
+	  and legacy grow-down stacks kernel-chosen placement entropy without
+	  requiring applications, package scripts, or users to understand
+	  another runtime control.
+
+config SECURITY_HARDENING_USERFAULTFD_RESTRICT
+	bool "Lock unprivileged userfaultfd kernel-fault handling off"
+	default y
+	depends on USERFAULTFD && SYSCTL
+	help
+	  Keep vm.unprivileged_userfaultfd pinned at 0 so unprivileged
+	  userfaultfd syscall users must request UFFD_USER_MODE_ONLY and cannot
+	  register handlers for faults taken from kernel mode. Access through
+	  /dev/userfaultfd remains controlled by normal device permissions for
+	  trusted virtualization and checkpoint/restore services.
+
+config SECURITY_HARDENING_IO_URING_SYSCTL_LOCK
+	bool "Make io_uring disable sysctl monotonic"
+	default y
+	depends on IO_URING && SYSCTL
+	help
+	  Allow product policy, image sealing, or recovery flows to tighten
+	  kernel.io_uring_disabled while preventing later sysctl writes from
+	  lowering the restriction again. This keeps ordinary io_uring usable by
+	  default while making emergency or image-specific io_uring lockdown a
+	  one-way operation until reboot.
+
+config SECURITY_HARDENING_EXPLOIT_MITIGATIONS
+	bool "Enable exploit mitigation baseline"
+	default y
+	select SECURITY_YAMA
+	select VMAP_STACK if HAVE_ARCH_VMAP_STACK
+	select RANDOMIZE_KSTACK_OFFSET_DEFAULT if HAVE_ARCH_RANDOMIZE_KSTACK_OFFSET
+	select STACKPROTECTOR_STRONG if HAVE_STACKPROTECTOR
+	select STRICT_KERNEL_RWX if ARCH_HAS_STRICT_KERNEL_RWX
+	select STRICT_MODULE_RWX if ARCH_HAS_STRICT_MODULE_RWX && MODULES
+	select LIST_HARDENED
+	select PAGE_TABLE_CHECK if ARCH_SUPPORTS_PAGE_TABLE_CHECK && EXCLUSIVE_SYSTEM_RAM
+	select PAGE_TABLE_CHECK_ENFORCED if ARCH_SUPPORTS_PAGE_TABLE_CHECK && EXCLUSIVE_SYSTEM_RAM
+	help
+	  Enable the upstream exploit-mitigation baseline expected by this
+	  hardening contract layer. This makes the distro profile prefer
+	  memory initialization, hardened usercopy, fortified string/memory
+	  helpers, slab freelist hardening and randomization, non-merged slab
+	  caches, enforced page-table checking on supported architectures,
+	  vmapped kernel stacks, kernel stack offset randomization, strong
+	  stack protector, structure layout randomization, strict kernel and
+	  module W^X, locked Yama relational ptrace scope, locked dmesg
+	  restriction, locked setuid coredump suppression, kernel
+	  pointer/symbol disclosure restriction, a locked low-address mmap floor,
+	  locked unprivileged userfaultfd kernel-fault handling, monotonic
+	  io_uring disablement, and kCFI when the selected architecture and
+	  compiler support them.
+
+	  This is intentionally a build-time default layer rather than a policy
+	  prompt. Product policy can decide who may perform dangerous actions;
+	  this option makes corruption and information disclosure harder before
+	  policy is involved.
+
+endif

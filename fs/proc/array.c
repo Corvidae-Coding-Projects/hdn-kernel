@@ -88,6 +88,7 @@
 #include <linux/pid_namespace.h>
 #include <linux/prctl.h>
 #include <linux/ptrace.h>
+#include <linux/hardening.h>
 #include <linux/string_helpers.h>
 #include <linux/user_namespace.h>
 #include <linux/fs_struct.h>
@@ -482,11 +483,13 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 	unsigned long flags;
 	int exit_code = task->exit_code;
 	struct signal_struct *sig = task->signal;
+	bool memmap_disclose;
 
 	state = *get_task_state(task);
 	vsize = eip = esp = 0;
 	permitted = ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_NOAUDIT);
 	mm = get_task_mm(task);
+	memmap_disclose = hdn_proc_memmap_disclose(task, mm);
 	if (mm) {
 		vsize = task_vsize(mm);
 		/*
@@ -498,7 +501,8 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 		 * a program is not able to use ptrace(2) in that case. It is
 		 * safe because the task has stopped executing permanently.
 		 */
-		if (permitted && (task->flags & (PF_EXITING|PF_DUMPCORE|PF_POSTCOREDUMP))) {
+		if (permitted && memmap_disclose &&
+		    (task->flags & (PF_EXITING|PF_DUMPCORE|PF_POSTCOREDUMP))) {
 			if (try_get_task_stack(task)) {
 				eip = KSTK_EIP(task);
 				esp = KSTK_ESP(task);
@@ -535,7 +539,7 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 		unlock_task_sighand(task, &flags);
 	}
 
-	if (permitted && (!whole || num_threads < 2))
+	if (permitted && memmap_disclose && (!whole || num_threads < 2))
 		wchan = !task_is_running(task);
 
 	scoped_guard(rcu) {
@@ -607,9 +611,12 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 	seq_put_decimal_ull(m, " ", vsize);
 	seq_put_decimal_ull(m, " ", mm ? get_mm_rss(mm) : 0);
 	seq_put_decimal_ull(m, " ", rsslim);
-	seq_put_decimal_ull(m, " ", mm ? (permitted ? mm->start_code : 1) : 0);
-	seq_put_decimal_ull(m, " ", mm ? (permitted ? mm->end_code : 1) : 0);
-	seq_put_decimal_ull(m, " ", (permitted && mm) ? mm->start_stack : 0);
+	seq_put_decimal_ull(m, " ", mm ? (permitted && memmap_disclose ?
+			    mm->start_code : 1) : 0);
+	seq_put_decimal_ull(m, " ", mm ? (permitted && memmap_disclose ?
+			    mm->end_code : 1) : 0);
+	seq_put_decimal_ull(m, " ", (permitted && memmap_disclose && mm) ?
+			    mm->start_stack : 0);
 	seq_put_decimal_ull(m, " ", esp);
 	seq_put_decimal_ull(m, " ", eip);
 	/* The signal information here is obsolete.
@@ -640,7 +647,7 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 	seq_put_decimal_ull(m, " ", nsec_to_clock_t(gtime));
 	seq_put_decimal_ll(m, " ", nsec_to_clock_t(cgtime));
 
-	if (mm && permitted) {
+	if (mm && permitted && memmap_disclose) {
 		seq_put_decimal_ull(m, " ", mm->start_data);
 		seq_put_decimal_ull(m, " ", mm->end_data);
 		seq_put_decimal_ull(m, " ", mm->start_brk);
@@ -678,6 +685,14 @@ int proc_pid_statm(struct seq_file *m, struct pid_namespace *ns,
 			struct pid *pid, struct task_struct *task)
 {
 	struct mm_struct *mm = get_task_mm(task);
+	int err;
+
+	err = hdn_authorize_proc_sensitive_read(task, mm);
+	if (err) {
+		if (mm)
+			mmput(mm);
+		return err;
+	}
 
 	if (mm) {
 		unsigned long size;

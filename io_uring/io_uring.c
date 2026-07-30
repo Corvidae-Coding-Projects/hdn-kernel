@@ -59,6 +59,7 @@
 #include <linux/audit.h>
 #include <linux/security.h>
 #include <linux/jump_label.h>
+#include <linux/hardening.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/io_uring.h>
@@ -128,13 +129,41 @@ static int __read_mostly sysctl_io_uring_disabled;
 static int __read_mostly sysctl_io_uring_group = -1;
 
 #ifdef CONFIG_SYSCTL
+static int io_uring_disabled_handler(const struct ctl_table *table, int write,
+				     void *buffer, size_t *lenp,
+				     loff_t *ppos)
+{
+	struct ctl_table tmp;
+	int old;
+	int val;
+	int ret;
+
+	if (!write ||
+	    !IS_ENABLED(CONFIG_SECURITY_HARDENING_IO_URING_SYSCTL_LOCK))
+		return proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+
+	old = READ_ONCE(sysctl_io_uring_disabled);
+	val = old;
+	tmp = *table;
+	tmp.data = &val;
+
+	ret = proc_dointvec_minmax(&tmp, write, buffer, lenp, ppos);
+	if (ret)
+		return ret;
+	if (val < old)
+		return -EINVAL;
+
+	WRITE_ONCE(sysctl_io_uring_disabled, val);
+	return 0;
+}
+
 static const struct ctl_table kernel_io_uring_disabled_table[] = {
 	{
 		.procname	= "io_uring_disabled",
 		.data		= &sysctl_io_uring_disabled,
 		.maxlen		= sizeof(sysctl_io_uring_disabled),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
+		.proc_handler	= io_uring_disabled_handler,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_TWO,
 	},
@@ -2820,6 +2849,16 @@ static int io_uring_sanitise_params(struct io_uring_params *p)
 	return 0;
 }
 
+static int io_uring_hardening_restricted_setup(unsigned int flags)
+{
+	if (!(flags & IORING_SETUP_SQPOLL))
+		return 0;
+
+	return hdn_authorize(HDN_AUTH_IO_URING_RESTRICTED_OP,
+			     HDN_TRANS_IO_URING_OP,
+			     HDN_REASON_PROFILE_DENIED, -EPERM);
+}
+
 static int io_uring_fill_params(struct io_uring_params *p)
 {
 	unsigned entries = p->sq_entries;
@@ -2870,6 +2909,10 @@ int io_prepare_config(struct io_ctx_config *config)
 	int ret;
 
 	ret = io_uring_sanitise_params(p);
+	if (ret)
+		return ret;
+
+	ret = io_uring_hardening_restricted_setup(p->flags);
 	if (ret)
 		return ret;
 

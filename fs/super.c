@@ -37,6 +37,7 @@
 #include <linux/user_namespace.h>
 #include <linux/fs_context.h>
 #include <linux/fserror.h>
+#include <linux/hardening.h>
 #include <uapi/linux/mount.h>
 #include "internal.h"
 
@@ -1041,6 +1042,12 @@ int reconfigure_super(struct fs_context *fc)
 #endif
 		remount_rw = !(fc->sb_flags & SB_RDONLY) && sb_rdonly(sb);
 		remount_ro = (fc->sb_flags & SB_RDONLY) && !sb_rdonly(sb);
+	}
+
+	if (remount_rw) {
+		retval = hdn_authorize_super_rofs_relax(sb, true, false);
+		if (retval)
+			return retval;
 	}
 
 	if (remount_ro) {

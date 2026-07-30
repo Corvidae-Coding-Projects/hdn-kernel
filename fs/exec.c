@@ -29,6 +29,7 @@
 #include <linux/fdtable.h>
 #include <linux/mm.h>
 #include <linux/stat.h>
+#include <linux/kconfig.h>
 #include <linux/fcntl.h>
 #include <linux/swap.h>
 #include <linux/string.h>
@@ -50,6 +51,7 @@
 #include <linux/module.h>
 #include <linux/namei.h>
 #include <linux/mount.h>
+#include <linux/hardening.h>
 #include <linux/security.h>
 #include <linux/syscalls.h>
 #include <linux/tsacct_kern.h>
@@ -1098,6 +1100,10 @@ int begin_new_exec(struct linux_binprm * bprm)
 	if (retval)
 		return retval;
 
+	retval = hdn_authorize_exec(bprm);
+	if (retval)
+		return retval;
+
 	/*
 	 * This tracepoint marks the point before flushing the old exec where
 	 * the current task is still unchanged, but errors are fatal (point of
@@ -1269,6 +1275,7 @@ int begin_new_exec(struct linux_binprm * bprm)
 	 * credentials; any time after this it may be unlocked.
 	 */
 	security_bprm_committed_creds(bprm);
+	hdn_exec_committed(bprm);
 
 	/* Pass the opened binary to the interpreter. */
 	if (bprm->have_execfd) {
@@ -1409,6 +1416,7 @@ static struct linux_binprm *alloc_bprm(int fd, struct filename *filename, int fl
 	}
 
 	bprm->file = file;
+	hdn_bprm_record_original(bprm, file);
 
 	if (fd == AT_FDCWD || filename->name[0] == '/') {
 		bprm->filename = filename->name;
@@ -1702,6 +1710,7 @@ static int exec_binprm(struct linux_binprm *bprm)
 		exec = bprm->file;
 		bprm->file = bprm->interpreter;
 		bprm->interpreter = NULL;
+		hdn_bprm_note_interpreter(bprm);
 
 		exe_file_allow_write_access(exec);
 		if (unlikely(bprm->have_execfd)) {
@@ -1990,7 +1999,11 @@ static const struct ctl_table fs_exec_sysctls[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax_coredump,
 		.extra1		= SYSCTL_ZERO,
+#if IS_ENABLED(CONFIG_SECURITY_HARDENING_EXPLOIT_MITIGATIONS)
+		.extra2		= SYSCTL_ZERO,
+#else
 		.extra2		= SYSCTL_TWO,
+#endif
 	},
 };
 

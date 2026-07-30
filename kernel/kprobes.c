@@ -26,10 +26,11 @@
 #include <linux/slab.h>
 #include <linux/stddef.h>
 #include <linux/export.h>
-#include <linux/kallsyms.h>
+#include <linux/kallsyms-lookup.h>
 #include <linux/freezer.h>
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
+#include <linux/hardening.h>
 #include <linux/sysctl.h>
 #include <linux/kdebug.h>
 #include <linux/kthread.h>
@@ -2860,12 +2861,19 @@ static int show_kprobe_addr(struct seq_file *pi, void *v)
 	unsigned int i = *(loff_t *) v;
 	unsigned long offset = 0;
 	char *modname, namebuf[KSYM_NAME_LEN];
+	bool disclose_symbols = hdn_kernel_symbol_disclose_allowed();
 
 	head = &kprobe_table[i];
 	preempt_disable();
 	hlist_for_each_entry_rcu(p, head, hlist) {
-		sym = kallsyms_lookup((unsigned long)p->addr, NULL,
-					&offset, &modname, namebuf);
+		if (disclose_symbols) {
+			sym = kallsyms_lookup((unsigned long)p->addr, NULL,
+					      &offset, &modname, namebuf);
+		} else {
+			sym = "[hidden]";
+			offset = 0;
+			modname = NULL;
+		}
 		if (kprobe_aggrprobe(p)) {
 			list_for_each_entry_rcu(kp, &p->list, list)
 				report_probe(pi, kp, sym, offset, modname, p);

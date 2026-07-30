@@ -12,6 +12,7 @@
 #include <linux/filelock.h>
 #include <linux/slab.h>
 #include <linux/file.h>
+#include <linux/hardening.h>
 #include <linux/xattr.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
@@ -283,6 +284,10 @@ __vfs_setxattr_locked(struct mnt_idmap *idmap, struct dentry *dentry,
 	if (error)
 		return error;
 
+	error = hdn_authorize_object_xattr(dentry, HDN_XATTR_SET);
+	if (error)
+		return error;
+
 	error = security_inode_setxattr(idmap, dentry, name, value, size,
 					flags);
 	if (error)
@@ -439,6 +444,10 @@ vfs_getxattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	if (error)
 		return error;
 
+	error = hdn_authorize_object_xattr(dentry, HDN_XATTR_READ);
+	if (error)
+		return error;
+
 	if (!strncmp(name, XATTR_SECURITY_PREFIX,
 				XATTR_SECURITY_PREFIX_LEN)) {
 		const char *suffix = name + XATTR_SECURITY_PREFIX_LEN;
@@ -486,6 +495,10 @@ vfs_listxattr(struct dentry *dentry, char *list, size_t size)
 	ssize_t error;
 
 	error = security_inode_listxattr(dentry);
+	if (error)
+		return error;
+
+	error = hdn_authorize_object_xattr(dentry, HDN_XATTR_LIST);
 	if (error)
 		return error;
 
@@ -539,6 +552,10 @@ __vfs_removexattr_locked(struct mnt_idmap *idmap,
 	int error;
 
 	error = xattr_permission(idmap, inode, name, MAY_WRITE);
+	if (error)
+		return error;
+
+	error = hdn_authorize_object_xattr(dentry, HDN_XATTR_REMOVE);
 	if (error)
 		return error;
 
