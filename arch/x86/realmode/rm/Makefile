@@ -57,8 +57,16 @@ $(obj)/realmode.bin: $(obj)/realmode.elf $(obj)/realmode.relocs FORCE
 quiet_cmd_relocs = RELOCS  $@
       cmd_relocs = arch/x86/tools/relocs --realmode $< > $@
 
+ifeq ($(CONFIG_SECURITY_HARDENING_RAP),y)
+# This image contains 16-, 32- and 64-bit code in an ELF32 container.  It
+# cannot go through the ordinary kernel objtool pass.  Check the transition
+# program and the *actual* relocation stream before admitting the blob.
+cmd_relocs += && $(PYTHON3) $(srctree)/arch/x86/realmode/hdn-check.py $< $@
+hdn_realmode_check_dep := $(srctree)/arch/x86/realmode/hdn-check.py
+endif
+
 targets += realmode.relocs
-$(obj)/realmode.relocs: $(obj)/realmode.elf FORCE
+$(obj)/realmode.relocs: $(obj)/realmode.elf $(hdn_realmode_check_dep) FORCE
 	$(call if_changed,relocs)
 
 # ---------------------------------------------------------------------------

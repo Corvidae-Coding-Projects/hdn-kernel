@@ -113,6 +113,9 @@ void __noreturn machine_real_restart(unsigned int type)
 	CMOS_WRITE(0x00, 0x8f);
 	spin_unlock(&rtc_lock);
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	hdn_realmode_restart(type);
+#else
 	/*
 	 * Switch to the trampoline page table.
 	 */
@@ -129,6 +132,7 @@ void __noreturn machine_real_restart(unsigned int type)
 		     "D" (type));
 #endif
 	unreachable();
+#endif
 }
 #ifdef CONFIG_APM_MODULE
 EXPORT_SYMBOL(machine_real_restart);

@@ -14,6 +14,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <linux/cfi_types.h>
 #include <asm/frame.h>
 
@@ -146,6 +147,7 @@
  *                           const u8 *src, int nblocks)
  */
 SYM_FUNC_START(sm4_aesni_avx_crypt4)
+	HDN_ASM_FUNCTION sm4_aesni_avx_crypt4
 	/* input:
 	 *	%rdi: round key array, CTX
 	 *	%rsi: dst (1..4 blocks)
@@ -245,10 +247,12 @@ SYM_FUNC_START(sm4_aesni_avx_crypt4)
 .Lblk4_store_output_done:
 	vzeroall;
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END sm4_aesni_avx_crypt4
 SYM_FUNC_END(sm4_aesni_avx_crypt4)
 
 SYM_FUNC_START_LOCAL(__sm4_crypt_blk8)
+	HDN_REGS_FUNC __sm4_crypt_blk8
 	/* input:
 	 *	%rdi: round key array, CTX
 	 *	RA0, RA1, RA2, RA3, RB0, RB1, RB2, RB3: eight parallel
@@ -354,7 +358,8 @@ SYM_FUNC_START_LOCAL(__sm4_crypt_blk8)
 	vpshufb RTMP2, RB3, RB3;
 
 	FRAME_END
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __sm4_crypt_blk8
 SYM_FUNC_END(__sm4_crypt_blk8)
 
 /*
@@ -362,6 +367,7 @@ SYM_FUNC_END(__sm4_crypt_blk8)
  *                           const u8 *src, int nblocks)
  */
 SYM_FUNC_START(sm4_aesni_avx_crypt8)
+	HDN_ASM_FUNCTION sm4_aesni_avx_crypt8
 	/* input:
 	 *	%rdi: round key array, CTX
 	 *	%rsi: dst (1..8 blocks)
@@ -390,7 +396,7 @@ SYM_FUNC_START(sm4_aesni_avx_crypt8)
 	vmovdqu (7 * 16)(%rdx), RB3;
 
 .Lblk8_load_input_done:
-	call __sm4_crypt_blk8;
+	HDN_REGS_CALL __sm4_crypt_blk8;
 
 	cmpq $6, %rcx;
 	vmovdqu RA0, (0 * 16)(%rsi);
@@ -409,7 +415,8 @@ SYM_FUNC_START(sm4_aesni_avx_crypt8)
 .Lblk8_store_output_done:
 	vzeroall;
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END sm4_aesni_avx_crypt8
 SYM_FUNC_END(sm4_aesni_avx_crypt8)
 
 /*
@@ -417,6 +424,7 @@ SYM_FUNC_END(sm4_aesni_avx_crypt8)
  *                                 const u8 *src, u8 *iv)
  */
 SYM_TYPED_FUNC_START(sm4_aesni_avx_ctr_enc_blk8)
+	HDN_ASM_FUNCTION sm4_aesni_avx_ctr_enc_blk8, 1
 	/* input:
 	 *	%rdi: round key array, CTX
 	 *	%rsi: dst (8 blocks)
@@ -461,7 +469,7 @@ SYM_TYPED_FUNC_START(sm4_aesni_avx_ctr_enc_blk8)
 	/* store new IV */
 	vmovdqu RTMP1, (%rcx);
 
-	call __sm4_crypt_blk8;
+	HDN_REGS_CALL __sm4_crypt_blk8;
 
 	vpxor (0 * 16)(%rdx), RA0, RA0;
 	vpxor (1 * 16)(%rdx), RA1, RA1;
@@ -483,7 +491,8 @@ SYM_TYPED_FUNC_START(sm4_aesni_avx_ctr_enc_blk8)
 
 	vzeroall;
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END sm4_aesni_avx_ctr_enc_blk8
 SYM_FUNC_END(sm4_aesni_avx_ctr_enc_blk8)
 
 /*
@@ -491,6 +500,7 @@ SYM_FUNC_END(sm4_aesni_avx_ctr_enc_blk8)
  *                                 const u8 *src, u8 *iv)
  */
 SYM_TYPED_FUNC_START(sm4_aesni_avx_cbc_dec_blk8)
+	HDN_ASM_FUNCTION sm4_aesni_avx_cbc_dec_blk8, 1
 	/* input:
 	 *	%rdi: round key array, CTX
 	 *	%rsi: dst (8 blocks)
@@ -508,7 +518,7 @@ SYM_TYPED_FUNC_START(sm4_aesni_avx_cbc_dec_blk8)
 	vmovdqu (6 * 16)(%rdx), RB2;
 	vmovdqu (7 * 16)(%rdx), RB3;
 
-	call __sm4_crypt_blk8;
+	HDN_REGS_CALL __sm4_crypt_blk8;
 
 	vmovdqu (7 * 16)(%rdx), RNOT;
 	vpxor (%rcx), RA0, RA0;
@@ -532,5 +542,6 @@ SYM_TYPED_FUNC_START(sm4_aesni_avx_cbc_dec_blk8)
 
 	vzeroall;
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END sm4_aesni_avx_cbc_dec_blk8
 SYM_FUNC_END(sm4_aesni_avx_cbc_dec_blk8)

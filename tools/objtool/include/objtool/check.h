@@ -80,8 +80,20 @@ struct instruction {
 	    no_reloc		: 1,
 	    hole		: 1,
 	    fake		: 1,
-	    trace		: 1;
-		/* 9 bit hole */
+	    trace		: 1,
+	    rap_site		: 1,
+	    rap_static_site	: 1,
+	    rap_binding		: 1,
+	    rap_jump		: 1,
+	    rap_entry		: 1,
+	    rap_root		: 1,
+	    rap_handoff		: 1,
+	    rap_return		: 1,
+	    rap_thunk_safe	: 1,
+	    rap_thunk_alt	: 1,
+	    rap_leaf_call	: 1,
+	    rap_hw_safe		: 1,
+	    rap_hw_alt		: 1;
 
 	struct alt_group *alt_group;
 	struct instruction *jump_dest;

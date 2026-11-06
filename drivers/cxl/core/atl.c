@@ -6,6 +6,7 @@
 #include <linux/prmt.h>
 #include <linux/pci.h>
 #include <linux/acpi.h>
+#include <linux/slab.h>
 
 #include <cxlmem.h>
 #include "core.h"
@@ -35,18 +36,26 @@ struct prm_cxl_dpa_spa_data {
 static u64 prm_cxl_dpa_spa(struct pci_dev *pci_dev, u64 dpa)
 {
 	struct prm_cxl_dpa_spa_data data;
-	u64 spa;
+	u64 spa, *result;
 	int rc;
+
+	/* Firmware runs in another task; embedded output pointers cannot refer
+	 * to the submitting task's private stack. */
+	result = kzalloc_obj(*result);
+	if (!result)
+		return ULLONG_MAX;
 
 	data = (struct prm_cxl_dpa_spa_data) {
 		.dpa     = dpa,
 		.devfn   = pci_dev->devfn,
 		.bus     = pci_dev->bus->number,
 		.segment = pci_domain_nr(pci_dev->bus),
-		.spa     = &spa,
+		.spa     = result,
 	};
 
-	rc = acpi_call_prm_handler(prm_cxl_dpa_spa_guid, &data);
+	rc = acpi_call_prm_handler(prm_cxl_dpa_spa_guid, &data, sizeof(data));
+	spa = *result;
+	kfree(result);
 	if (rc) {
 		pci_dbg(pci_dev, "failed to get SPA for %#llx: %d\n", dpa, rc);
 		return ULLONG_MAX;
@@ -190,8 +199,8 @@ static int cxl_prm_setup_root(struct cxl_root *cxl_root, void *data)
 void cxl_setup_prm_address_translation(struct cxl_root *cxl_root)
 {
 	struct device *host = cxl_root->port.uport_dev;
-	u64 spa;
-	struct prm_cxl_dpa_spa_data data = { .spa = &spa };
+	u64 *result;
+	struct prm_cxl_dpa_spa_data data = {};
 	int rc;
 
 	/*
@@ -202,7 +211,12 @@ void cxl_setup_prm_address_translation(struct cxl_root *cxl_root)
 		return;
 
 	/* Check kernel (-EOPNOTSUPP) and firmware support (-ENODEV) */
-	rc = acpi_call_prm_handler(prm_cxl_dpa_spa_guid, &data);
+	result = kzalloc_obj(*result);
+	if (!result)
+		return;
+	data.spa = result;
+	rc = acpi_call_prm_handler(prm_cxl_dpa_spa_guid, &data, sizeof(data));
+	kfree(result);
 	if (rc == -EOPNOTSUPP || rc == -ENODEV)
 		return;
 

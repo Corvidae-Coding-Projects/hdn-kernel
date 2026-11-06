@@ -24,7 +24,9 @@ static const u8 tramp_ud[] = { 0x0f, 0xb9, 0xcc };
  */
 static const u8 xor5rax[] = { 0x2e, 0x2e, 0x2e, 0x31, 0xc0 };
 
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 static const u8 retinsn[] = { RET_INSN_OPCODE, 0xcc, 0xcc, 0xcc, 0xcc };
+#endif
 
 /*
  * ud1    (%edx),%rdi -- see __WARN_trap() / decode_bug()
@@ -44,6 +46,9 @@ static u8 __is_Jcc(u8 *insn) /* Jcc.d32 */
 	return ret;
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+extern void __hdn_rap_static_null(void);
+#else
 extern void __static_call_return(void);
 
 asm (".global __static_call_return\n\t"
@@ -54,6 +59,7 @@ asm (".global __static_call_return\n\t"
      ANNOTATE_RETPOLINE_SAFE "\n\t"
      "ret; int3\n\t"
      ".size __static_call_return, . - __static_call_return \n\t");
+#endif
 
 static void __ref __static_call_transform(void *insn, enum insn_type type,
 					  void *func, bool modinit)
@@ -89,17 +95,25 @@ static void __ref __static_call_transform(void *insn, enum insn_type type,
 		break;
 
 	case RET:
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		code = text_gen_insn(JMP32_INSN_OPCODE, insn, __hdn_rap_static_null);
+#else
 		if (cpu_wants_rethunk_at(insn))
 			code = text_gen_insn(JMP32_INSN_OPCODE, insn, x86_return_thunk);
 		else
 			code = &retinsn;
+#endif
 		break;
 
 	case JCC:
 		if (!func) {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+			func = __hdn_rap_static_null;
+#else
 			func = __static_call_return;
 			if (cpu_wants_rethunk())
 				func = x86_return_thunk;
+#endif
 		}
 
 		buf[0] = 0x0f;
@@ -166,6 +180,8 @@ static inline enum insn_type __sc_insn(bool null, bool tail)
 void arch_static_call_transform(void *site, void *tramp, void *func, bool tail)
 {
 	mutex_lock(&text_mutex);
+	hdn_rap_static_transform((unsigned long)site, (unsigned long)tramp,
+				 (unsigned long)func, tail);
 
 	if (tramp && !site) {
 		__static_call_validate(tramp, true, true);
@@ -185,6 +201,11 @@ noinstr void __static_call_update_early(void *tramp, void *func)
 {
 	BUG_ON(system_state != SYSTEM_BOOTING);
 	BUG_ON(static_call_initialized);
+	hdn_rap_static_transform(0, (unsigned long)tramp, (unsigned long)func, false);
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	if (!func)
+		func = __hdn_rap_static_null;
+#endif
 	__text_gen_insn(tramp, JMP32_INSN_OPCODE, tramp, func, JMP32_INSN_SIZE);
 	sync_core();
 }

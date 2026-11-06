@@ -123,7 +123,7 @@ struct sem_array {
 	int			complex_count;	/* pending complex operations */
 	unsigned int		use_global_lock;/* >0: global lock required */
 
-	struct sem		sems[];
+	struct sem		sems[] __counted_by(sem_nsems);
 } __randomize_layout;
 
 /* One queue for each sleeping process in the system. */
@@ -518,6 +518,8 @@ static struct sem_array *sem_alloc(size_t nsems)
 	if (unlikely(!sma))
 		return NULL;
 
+	/* Publish the extent before initializing or exposing any array element. */
+	sma->sem_nsems = nsems;
 	return sma;
 }
 
@@ -567,7 +569,6 @@ static int newary(struct ipc_namespace *ns, struct ipc_params *params)
 	INIT_LIST_HEAD(&sma->pending_alter);
 	INIT_LIST_HEAD(&sma->pending_const);
 	INIT_LIST_HEAD(&sma->list_id);
-	sma->sem_nsems = nsems;
 	sma->sem_ctime = ktime_get_real_seconds();
 
 	/* ipc_addid() locks sma upon success. */

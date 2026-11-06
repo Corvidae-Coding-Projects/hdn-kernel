@@ -9,6 +9,7 @@
 #include <asm/fpu/signal.h>
 #include <asm/fpu/regset.h>
 #include <asm/prctl.h>
+#include <asm/hdn_stack.h>
 
 #include "context.h"
 #include "internal.h"
@@ -347,7 +348,7 @@ static void __convert_from_fxsr(struct user_i387_ia32_struct *env,
 	 * should be actually ds/cs at fpu exception time, but
 	 * that information is not available in 64bit mode.
 	 */
-	env->fcs = task_pt_regs(tsk)->cs;
+	env->fcs = hdn_task_reg(tsk, cs);
 	if (tsk == current) {
 		savesegment(ds, env->fos);
 	} else {

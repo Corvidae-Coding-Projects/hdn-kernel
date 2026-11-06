@@ -1166,6 +1166,8 @@ void efi_check_for_embedded_firmwares(void);
 static inline void efi_check_for_embedded_firmwares(void) { }
 #endif
 
+#define arch_efi_register_prm(address) 0
+#define arch_efi_call_virt_address(id, address, args...) ((address)(args))
 #define arch_efi_call_virt(p, f, args...)	((p)->f(args))
 
 /*
@@ -1229,7 +1231,8 @@ extern unsigned long rci2_table_phys;
 
 efi_status_t
 efi_call_acpi_prm_handler(efi_status_t (__efiapi *handler_addr)(u64, void *),
-			  u64 param_buffer_addr, void *context);
+			  u64 param_buffer_addr, void *context,
+			  size_t param_size, size_t context_size);
 
 /*
  * efi_runtime_service() function identifiers.

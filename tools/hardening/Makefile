@@ -16,6 +16,8 @@ applicationsdir ?= $(PREFIX)/share/applications
 tmpfilesdir ?= $(PREFIX)/lib/tmpfiles.d
 
 HDN_PROGRAMS := \
+	hdn-compat-abi \
+	hdn-hardware-facts \
 	hdn-policy \
 	hdn-rofs-apply \
 	hdn-rofs-transaction \
@@ -75,6 +77,12 @@ HDN_CONFIGS := \
 	policy-daemon.conf
 
 all: $(HDN_PROGRAMS)
+
+hdn-compat-abi: hdn-compat-abi.c ../../include/uapi/linux/hardening.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
+
+hdn-hardware-facts: hdn-hardware-facts.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
 
 hdn-policy: hdn-policy.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
@@ -181,6 +189,7 @@ clean:
 install: all
 	install -d -m 0755 $(DESTDIR)$(libexecdir)
 	install -m 0755 $(HDN_PROGRAMS) $(DESTDIR)$(libexecdir)
+	install -m 0755 hdn-compat hdn-stack-vmcore $(DESTDIR)$(libexecdir)
 	install -d -m 0755 $(DESTDIR)$(sysconfdir)/hdn
 	install -m 0644 $(HDN_CONFIGS) $(DESTDIR)$(sysconfdir)/hdn
 	install -D -m 0644 package-manager-hooks/apt/99-hdn-package-update \

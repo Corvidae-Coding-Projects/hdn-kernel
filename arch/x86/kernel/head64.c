@@ -312,6 +312,18 @@ void __init __noreturn x86_64_start_reservations(char *real_mode_data)
 
 void early_setup_idt(void)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* The native RAP profile has no #VC firmware interface. Keep its empty
+	 * bringup IDT permanently read-only, including on hotplug, and do not
+	 * re-enter the uninstrumented physical-address startup domain. */
+	static const gate_desc bringup_idt[NUM_EXCEPTION_VECTORS] __aligned(PAGE_SIZE);
+	const struct desc_ptr desc = {
+		.address = (unsigned long)bringup_idt,
+		.size = sizeof(bringup_idt) - 1,
+	};
+
+	native_load_idt(&desc);
+#else
 	void *handler = NULL;
 
 	if (IS_ENABLED(CONFIG_AMD_MEM_ENCRYPT)) {
@@ -320,4 +332,5 @@ void early_setup_idt(void)
 	}
 
 	__pi_startup_64_load_idt(handler);
+#endif
 }

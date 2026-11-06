@@ -9,6 +9,7 @@
 #include <asm/ptrace-abi.h>
 #include <asm/msr.h>
 #include <asm/nospec-branch.h>
+#include <asm/hdn_rap.h>
 
 /*
 
@@ -228,6 +229,11 @@ For 32-bit we have the following conventions - kernel is built with
 .endm
 
 .macro SAVE_AND_SWITCH_TO_KERNEL_CR3 scratch_reg:req save_reg:req
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* PTI may be disabled at runtime. The asynchronous frame still needs
+	 * the exact root if it interrupted a private page-table update. */
+	movq	%cr3, \save_reg
+#endif
 	ALTERNATIVE "jmp .Ldone_\@", "", X86_FEATURE_PTI
 	movq	%cr3, \scratch_reg
 	movq	\scratch_reg, \save_reg
@@ -247,6 +253,12 @@ For 32-bit we have the following conventions - kernel is built with
 
 /* Restore CR3 from a kernel context. May restore a user CR3 value. */
 .macro PARANOID_RESTORE_CR3 scratch_reg:req save_reg:req
+#if defined(CONFIG_SECURITY_HARDENING_RAP) && defined(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS)
+	/* This register was reloaded from the authenticated frame. An exact
+	 * CR3 write also flushes the selected PCID, including a user root; the
+	 * PTI-only bit test cannot restore an interrupted kernel update root. */
+	movq	\save_reg, %cr3
+#else
 	ALTERNATIVE "jmp .Lend_\@", "", X86_FEATURE_PTI
 
 	/*
@@ -273,6 +285,7 @@ For 32-bit we have the following conventions - kernel is built with
 .Lwrcr3_\@:
 	movq	\save_reg, %cr3
 .Lend_\@:
+#endif
 .endm
 
 #else /* CONFIG_MITIGATION_PAGE_TABLE_ISOLATION=n: */
@@ -284,8 +297,14 @@ For 32-bit we have the following conventions - kernel is built with
 .macro SWITCH_TO_USER_CR3_STACK scratch_reg:req
 .endm
 .macro SAVE_AND_SWITCH_TO_KERNEL_CR3 scratch_reg:req save_reg:req
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	movq	%cr3, \save_reg
+#endif
 .endm
 .macro PARANOID_RESTORE_CR3 scratch_reg:req save_reg:req
+#if defined(CONFIG_SECURITY_HARDENING_RAP) && defined(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS)
+	movq	\save_reg, %cr3
+#endif
 .endm
 
 #endif
@@ -370,7 +389,11 @@ For 32-bit we have the following conventions - kernel is built with
 .macro STACKLEAK_ERASE_NOCLOBBER
 #ifdef CONFIG_KSTACK_ERASE
 	PUSH_AND_CLEAR_REGS
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	HDN_C_CALL stackleak_erase
+#else
 	call stackleak_erase
+#endif
 	POP_REGS
 #endif
 .endm
@@ -388,7 +411,11 @@ For 32-bit we have the following conventions - kernel is built with
 
 .macro STACKLEAK_ERASE
 #ifdef CONFIG_KSTACK_ERASE
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	HDN_C_CALL stackleak_erase
+#else
 	call stackleak_erase
+#endif
 #endif
 .endm
 
@@ -430,9 +457,12 @@ For 32-bit we have the following conventions - kernel is built with
 #ifdef CONFIG_X86_64
 
 /* rdi:	arg1 ... normal C conventions. rax is saved/restored. */
-.macro THUNK name, func
+.macro THUNK name, func, rap=0
 SYM_FUNC_START(\name)
 	ANNOTATE_NOENDBR
+	.if \rap
+	HDN_TYPED_FUNC_ENTER \name
+	.endif
 	pushq %rbp
 	movq %rsp, %rbp
 
@@ -446,7 +476,11 @@ SYM_FUNC_START(\name)
 	pushq %r10
 	pushq %r11
 
+	.if \rap
+	HDN_C_CALL \func
+	.else
 	call \func
+	.endif
 
 	popq %r11
 	popq %r10
@@ -458,7 +492,11 @@ SYM_FUNC_START(\name)
 	popq %rsi
 	popq %rdi
 	popq %rbp
+	.if \rap
+	HDN_ENTRY_ROOT_RETURN
+	.else
 	RET
+	.endif
 SYM_FUNC_END(\name)
 	_ASM_NOKPROBE(\name)
 .endm

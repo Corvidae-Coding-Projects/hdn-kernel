@@ -14,6 +14,7 @@
 #include <asm/i8259.h>
 #include <asm/mshyperv.h>
 #include <asm/msr.h>
+#include <asm/hdn_hyperv.h>
 #include <asm/realmode.h>
 #include <asm/reboot.h>
 #include <asm/smap.h>
@@ -257,12 +258,19 @@ int __init hv_vtl_early_init(void)
 	return 0;
 }
 
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 DEFINE_STATIC_CALL_NULL(__mshv_vtl_return_hypercall, void (*)(void));
+#endif
 
-void mshv_vtl_return_call_init(u64 vtl_return_offset)
+int mshv_vtl_return_call_init(u64 vtl_return_offset)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return hdn_hv_vtl_init(vtl_return_offset);
+#else
 	static_call_update(__mshv_vtl_return_hypercall,
 			   (void *)((u8 *)hv_hypercall_pg + vtl_return_offset));
+	return 0;
+#endif
 }
 EXPORT_SYMBOL(mshv_vtl_return_call_init);
 

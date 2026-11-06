@@ -6,6 +6,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 .section	.rodata.cst32.ROT8, "aM", @progbits, 32
 .align 32
@@ -35,6 +36,7 @@ CTR4BL:	.octa 0x00000000000000000000000000000002
 .text
 
 SYM_FUNC_START(chacha_2block_xor_avx2)
+	HDN_ASM_FUNCTION chacha_2block_xor_avx2
 	# %rdi: Input state matrix, s
 	# %rsi: up to 2 data blocks output, o
 	# %rdx: up to 2 data blocks input, i
@@ -193,7 +195,7 @@ SYM_FUNC_START(chacha_2block_xor_avx2)
 
 .Ldone2:
 	vzeroupper
-	RET
+	HDN_ASM_RETURN
 
 .Lxorpart2:
 	# xor remaining bytes from partial register into output
@@ -224,9 +226,11 @@ SYM_FUNC_START(chacha_2block_xor_avx2)
 	lea		-8(%r10),%rsp
 	jmp		.Ldone2
 
+	HDN_ASM_FUNCTION_END chacha_2block_xor_avx2
 SYM_FUNC_END(chacha_2block_xor_avx2)
 
 SYM_FUNC_START(chacha_4block_xor_avx2)
+	HDN_ASM_FUNCTION chacha_4block_xor_avx2
 	# %rdi: Input state matrix, s
 	# %rsi: up to 4 data blocks output, o
 	# %rdx: up to 4 data blocks input, i
@@ -498,7 +502,7 @@ SYM_FUNC_START(chacha_4block_xor_avx2)
 
 .Ldone4:
 	vzeroupper
-	RET
+	HDN_ASM_RETURN
 
 .Lxorpart4:
 	# xor remaining bytes from partial register into output
@@ -529,9 +533,11 @@ SYM_FUNC_START(chacha_4block_xor_avx2)
 	lea		-8(%r10),%rsp
 	jmp		.Ldone4
 
+	HDN_ASM_FUNCTION_END chacha_4block_xor_avx2
 SYM_FUNC_END(chacha_4block_xor_avx2)
 
 SYM_FUNC_START(chacha_8block_xor_avx2)
+	HDN_ASM_FUNCTION chacha_8block_xor_avx2
 	# %rdi: Input state matrix, s
 	# %rsi: up to 8 data blocks output, o
 	# %rdx: up to 8 data blocks input, i
@@ -992,7 +998,7 @@ SYM_FUNC_START(chacha_8block_xor_avx2)
 .Ldone8:
 	vzeroupper
 	lea		-8(%r10),%rsp
-	RET
+	HDN_ASM_RETURN
 
 .Lxorpart8:
 	# xor remaining bytes from partial register into output
@@ -1018,4 +1024,5 @@ SYM_FUNC_START(chacha_8block_xor_avx2)
 
 	jmp		.Ldone8
 
+	HDN_ASM_FUNCTION_END chacha_8block_xor_avx2
 SYM_FUNC_END(chacha_8block_xor_avx2)

@@ -28,6 +28,7 @@
 #include <asm/debugreg.h>
 #include <asm/msr.h>
 #include <asm/sev.h>
+#include <asm/hdn_svm.h>
 
 #include "mmu.h"
 #include "x86.h"
@@ -4762,6 +4763,7 @@ int sev_vcpu_create(struct kvm_vcpu *vcpu)
 void sev_es_prepare_switch_to_guest(struct vcpu_svm *svm, struct sev_es_save_area *hostsa)
 {
 	struct kvm *kvm = svm->vcpu.kvm;
+	struct hdn_svm_host_state state = { };
 
 	/*
 	 * All host state for SEV-ES guests is categorized into three swap types
@@ -4780,9 +4782,9 @@ void sev_es_prepare_switch_to_guest(struct vcpu_svm *svm, struct sev_es_save_are
 	 * isn't saved by VMRUN, that isn't already saved by VMSAVE (performed
 	 * by common SVM code).
 	 */
-	hostsa->xcr0 = kvm_host.xcr0;
-	hostsa->pkru = read_pkru();
-	hostsa->xss = kvm_host.xss;
+	state.xcr0 = kvm_host.xcr0;
+	state.pkru = read_pkru();
+	state.xss = kvm_host.xss;
 
 	/*
 	 * If DebugSwap is enabled, debug registers are loaded but NOT saved by
@@ -4802,10 +4804,11 @@ void sev_es_prepare_switch_to_guest(struct vcpu_svm *svm, struct sev_es_save_are
 	 */
 	if (sev_vcpu_has_debug_swap(svm) ||
 	    (sev_snp_guest(kvm) && cpu_feature_enabled(X86_FEATURE_DEBUG_SWAP))) {
-		hostsa->dr0_addr_mask = amd_get_dr_addr_mask(0);
-		hostsa->dr1_addr_mask = amd_get_dr_addr_mask(1);
-		hostsa->dr2_addr_mask = amd_get_dr_addr_mask(2);
-		hostsa->dr3_addr_mask = amd_get_dr_addr_mask(3);
+		state.debug_swap = true;
+		state.dr_mask[0] = amd_get_dr_addr_mask(0);
+		state.dr_mask[1] = amd_get_dr_addr_mask(1);
+		state.dr_mask[2] = amd_get_dr_addr_mask(2);
+		state.dr_mask[3] = amd_get_dr_addr_mask(3);
 	}
 
 	/*
@@ -4815,8 +4818,25 @@ void sev_es_prepare_switch_to_guest(struct vcpu_svm *svm, struct sev_es_save_are
 	 * user return value, so that the correct value is restored on #VMEXIT.
 	 */
 	if (cpu_feature_enabled(X86_FEATURE_V_TSC_AUX) &&
-	    !WARN_ON_ONCE(tsc_aux_uret_slot < 0))
-		hostsa->tsc_aux = kvm_get_user_return_msr(tsc_aux_uret_slot);
+	    !WARN_ON_ONCE(tsc_aux_uret_slot < 0)) {
+		state.tsc_aux_valid = true;
+		state.tsc_aux = kvm_get_user_return_msr(tsc_aux_uret_slot);
+	}
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_svm_set_state(&state);
+#else
+	hostsa->xcr0 = state.xcr0;
+	hostsa->pkru = state.pkru;
+	hostsa->xss = state.xss;
+	if (state.debug_swap) {
+		hostsa->dr0_addr_mask = state.dr_mask[0];
+		hostsa->dr1_addr_mask = state.dr_mask[1];
+		hostsa->dr2_addr_mask = state.dr_mask[2];
+		hostsa->dr3_addr_mask = state.dr_mask[3];
+	}
+	if (state.tsc_aux_valid)
+		hostsa->tsc_aux = state.tsc_aux;
+#endif
 }
 
 void sev_vcpu_deliver_sipi_vector(struct kvm_vcpu *vcpu, u8 vector)

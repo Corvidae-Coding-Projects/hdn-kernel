@@ -54,6 +54,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 #define STATE_PTR	%rdi	/* 1st arg */
 #define DATA_PTR	%rsi	/* 2nd arg */
@@ -110,6 +111,7 @@
  */
 .text
 SYM_FUNC_START(sha256_ni_transform)
+	HDN_ASM_FUNCTION sha256_ni_transform
 
 	shl		$6, NUM_BLKS		/*  convert to bytes */
 	add		DATA_PTR, NUM_BLKS	/* pointer to end of data */
@@ -162,7 +164,8 @@ SYM_FUNC_START(sha256_ni_transform)
 	movdqu		STATE1, 0*16(STATE_PTR)
 	movdqu		STATE0, 1*16(STATE_PTR)
 
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END sha256_ni_transform
 SYM_FUNC_END(sha256_ni_transform)
 
 #undef DIGEST_PTR
@@ -276,6 +279,7 @@ SYM_FUNC_END(sha256_ni_transform)
 // to taking better advantage of the CPU's SHA-256 and SIMD throughput.
 //
 SYM_FUNC_START(sha256_ni_finup2x)
+	HDN_ASM_FUNCTION sha256_ni_finup2x
 	// Allocate 128 bytes of stack space, 16-byte aligned.
 	push		%rbx
 	push		%rbp
@@ -530,7 +534,8 @@ SYM_FUNC_START(sha256_ni_finup2x)
 	mov		%rbp, %rsp
 	pop		%rbp
 	pop		%rbx
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END sha256_ni_finup2x
 SYM_FUNC_END(sha256_ni_finup2x)
 
 .section	.rodata.cst256.K256, "aM", @progbits, 256

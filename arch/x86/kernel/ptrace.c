@@ -13,6 +13,7 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/ptrace.h>
+#include <asm/hdn_stack.h>
 #include <linux/user.h>
 #include <linux/elf.h>
 #include <linux/security.h>
@@ -174,12 +175,6 @@ static inline bool invalid_selector(u16 value)
 
 #define FLAG_MASK		FLAG_MASK_32
 
-static unsigned long *pt_regs_access(struct pt_regs *regs, unsigned long regno)
-{
-	BUILD_BUG_ON(offsetof(struct pt_regs, bx) != 0);
-	return &regs->bx + (regno >> 2);
-}
-
 static u16 get_segment_reg(struct task_struct *task, unsigned long offset)
 {
 	/*
@@ -187,7 +182,7 @@ static u16 get_segment_reg(struct task_struct *task, unsigned long offset)
 	 */
 	unsigned int retval;
 	if (offset != offsetof(struct user_regs_struct, gs))
-		retval = *pt_regs_access(task_pt_regs(task), offset);
+		retval = hdn_task_reg_read(task, offset);
 	else {
 		if (task == current)
 			savesegment(gs, retval);
@@ -226,8 +221,7 @@ static int set_segment_reg(struct task_struct *task,
 		fallthrough;
 
 	default:
-		*pt_regs_access(task_pt_regs(task), offset) = value;
-		break;
+		return hdn_task_reg_update(task, offset, value, ~0UL);
 
 	case offsetof(struct user_regs_struct, gs):
 		task->thread.gs = value;
@@ -239,12 +233,6 @@ static int set_segment_reg(struct task_struct *task,
 #else  /* CONFIG_X86_64 */
 
 #define FLAG_MASK		(FLAG_MASK_32 | X86_EFLAGS_NT)
-
-static unsigned long *pt_regs_access(struct pt_regs *regs, unsigned long offset)
-{
-	BUILD_BUG_ON(offsetof(struct pt_regs, r15) != 0);
-	return &regs->r15 + (offset / sizeof(regs->r15));
-}
 
 static u16 get_segment_reg(struct task_struct *task, unsigned long offset)
 {
@@ -284,7 +272,7 @@ static u16 get_segment_reg(struct task_struct *task, unsigned long offset)
 	case offsetof(struct user_regs_struct, ss):
 		break;
 	}
-	return *pt_regs_access(task_pt_regs(task), offset);
+	return hdn_task_reg_read(task, offset);
 }
 
 static int set_segment_reg(struct task_struct *task,
@@ -325,13 +313,11 @@ static int set_segment_reg(struct task_struct *task,
 	case offsetof(struct user_regs_struct,cs):
 		if (unlikely(value == 0))
 			return -EIO;
-		task_pt_regs(task)->cs = value;
-		break;
+		return hdn_task_reg_set(task, cs, value);
 	case offsetof(struct user_regs_struct,ss):
 		if (unlikely(value == 0))
 			return -EIO;
-		task_pt_regs(task)->ss = value;
-		break;
+		return hdn_task_reg_set(task, ss, value);
 	}
 
 	return 0;
@@ -341,7 +327,7 @@ static int set_segment_reg(struct task_struct *task,
 
 static unsigned long get_flags(struct task_struct *task)
 {
-	unsigned long retval = task_pt_regs(task)->flags;
+	unsigned long retval = hdn_task_reg(task, flags);
 
 	/*
 	 * If the debugger set TF, hide it from the readout.
@@ -354,8 +340,6 @@ static unsigned long get_flags(struct task_struct *task)
 
 static int set_flags(struct task_struct *task, unsigned long value)
 {
-	struct pt_regs *regs = task_pt_regs(task);
-
 	/*
 	 * If the user value contains TF, mark that
 	 * it was not "us" (the debugger) that set it.
@@ -366,9 +350,7 @@ static int set_flags(struct task_struct *task, unsigned long value)
 	else if (test_tsk_thread_flag(task, TIF_FORCED_TF))
 		value |= X86_EFLAGS_TF;
 
-	regs->flags = (regs->flags & ~FLAG_MASK) | (value & FLAG_MASK);
-
-	return 0;
+	return hdn_task_reg_update(task, offsetof(struct pt_regs, flags), value, FLAG_MASK);
 }
 
 static int putreg(struct task_struct *child,
@@ -400,8 +382,7 @@ static int putreg(struct task_struct *child,
 #endif
 	}
 
-	*pt_regs_access(task_pt_regs(child), offset) = value;
-	return 0;
+	return hdn_task_reg_update(child, offset, value, ~0UL);
 }
 
 static unsigned long getreg(struct task_struct *task, unsigned long offset)
@@ -426,7 +407,7 @@ static unsigned long getreg(struct task_struct *task, unsigned long offset)
 #endif
 	}
 
-	return *pt_regs_access(task_pt_regs(task), offset);
+	return hdn_task_reg_read(task, offset);
 }
 
 static int genregs_get(struct task_struct *target,
@@ -861,7 +842,7 @@ long arch_ptrace(struct task_struct *child, long request,
 
 #define R32(l,q)							\
 	case offsetof(struct user32, regs.l):				\
-		regs->q = value; break
+		return hdn_task_reg_set(child, q, value)
 
 #define SEG32(rs)							\
 	case offsetof(struct user32, regs.rs):				\
@@ -872,7 +853,6 @@ long arch_ptrace(struct task_struct *child, long request,
 
 static int putreg32(struct task_struct *child, unsigned regno, u32 value)
 {
-	struct pt_regs *regs = task_pt_regs(child);
 	int ret;
 
 	switch (regno) {
@@ -929,8 +909,10 @@ static int putreg32(struct task_struct *child, unsigned regno, u32 value)
 		 * actually still sitting at the exit from a 32-bit
 		 * syscall with TS_COMPAT still set.
 		 */
-		regs->orig_ax = value;
-		if (syscall_get_nr(child, regs) != -1)
+		ret = hdn_task_reg_set(child, orig_ax, value);
+		if (ret)
+			return ret;
+		if ((int)value != -1)
 			child->thread_info.status |= TS_I386_REGS_POKED;
 		break;
 
@@ -960,7 +942,7 @@ static int putreg32(struct task_struct *child, unsigned regno, u32 value)
 
 #define R32(l,q)							\
 	case offsetof(struct user32, regs.l):				\
-		*val = regs->q; break
+		*val = hdn_task_reg(child, q); break
 
 #define SEG32(rs)							\
 	case offsetof(struct user32, regs.rs):				\
@@ -970,7 +952,6 @@ static int putreg32(struct task_struct *child, unsigned regno, u32 value)
 
 static int getreg32(struct task_struct *child, unsigned regno, u32 *val)
 {
-	struct pt_regs *regs = task_pt_regs(child);
 
 	switch (regno) {
 
@@ -1395,7 +1376,7 @@ void __init update_regset_xstate_info(unsigned int size, u64 xstate_mask)
 const struct user_regset_view *task_user_regset_view(struct task_struct *task)
 {
 #ifdef CONFIG_IA32_EMULATION
-	if (!user_64bit_mode(task_pt_regs(task)))
+	if (!hdn_task_user_64bit_mode(task))
 #endif
 #if defined CONFIG_X86_32 || defined CONFIG_IA32_EMULATION
 		return &user_x86_32_view;

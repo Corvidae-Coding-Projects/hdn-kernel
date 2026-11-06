@@ -12,6 +12,7 @@
 #define pr_fmt(fmt) "LSM: " fmt
 
 #include <linux/bpf.h>
+#include <linux/binfmts.h>
 #include <linux/capability.h>
 #include <linux/dcache.h>
 #include <linux/export.h>
@@ -20,6 +21,7 @@
 #include <linux/kernel_read_file.h>
 #include <linux/lsm_hooks.h>
 #include <linux/hardening.h>
+#include <linux/hdn_jitter.h>
 #include <linux/mman.h>
 #include <linux/mount.h>
 #include <linux/personality.h>
@@ -513,6 +515,7 @@ OUT:									\
  */
 int security_binder_set_context_mgr(const struct cred *mgr)
 {
+	hdn_jitter_check_cred(mgr);
 	return call_int_hook(binder_set_context_mgr, mgr);
 }
 
@@ -528,6 +531,8 @@ int security_binder_set_context_mgr(const struct cred *mgr)
 int security_binder_transaction(const struct cred *from,
 				const struct cred *to)
 {
+	hdn_jitter_check_cred(from);
+	hdn_jitter_check_cred(to);
 	return call_int_hook(binder_transaction, from, to);
 }
 
@@ -543,6 +548,8 @@ int security_binder_transaction(const struct cred *from,
 int security_binder_transfer_binder(const struct cred *from,
 				    const struct cred *to)
 {
+	hdn_jitter_check_cred(from);
+	hdn_jitter_check_cred(to);
 	return call_int_hook(binder_transfer_binder, from, to);
 }
 
@@ -559,6 +566,9 @@ int security_binder_transfer_binder(const struct cred *from,
 int security_binder_transfer_file(const struct cred *from,
 				  const struct cred *to, const struct file *file)
 {
+	hdn_jitter_check_cred(from);
+	hdn_jitter_check_cred(to);
+	hdn_jitter_check_file(file);
 	return call_int_hook(binder_transfer_file, from, to, file);
 }
 
@@ -636,6 +646,8 @@ int security_capset(struct cred *new, const struct cred *old,
 		    const kernel_cap_t *inheritable,
 		    const kernel_cap_t *permitted)
 {
+	hdn_jitter_check_cred(new);
+	hdn_jitter_check_cred(old);
 	return call_int_hook(capset, new, old, effective, inheritable,
 			     permitted);
 }
@@ -658,6 +670,7 @@ int security_capable(const struct cred *cred,
 		     int cap,
 		     unsigned int opts)
 {
+	hdn_jitter_check_cred(cred);
 	return call_int_hook(capable, cred, ns, cap, opts);
 }
 
@@ -777,6 +790,10 @@ int security_vm_enough_memory_mm(struct mm_struct *mm, long pages)
  */
 int security_bprm_creds_for_exec(struct linux_binprm *bprm)
 {
+	if (bprm->cred)
+		hdn_jitter_check_cred(bprm->cred);
+	if (bprm->file)
+		hdn_jitter_check_file(bprm->file);
 	return call_int_hook(bprm_creds_for_exec, bprm);
 }
 
@@ -801,6 +818,9 @@ int security_bprm_creds_for_exec(struct linux_binprm *bprm)
  */
 int security_bprm_creds_from_file(struct linux_binprm *bprm, const struct file *file)
 {
+	if (bprm->cred)
+		hdn_jitter_check_cred(bprm->cred);
+	hdn_jitter_check_file(file);
 	return call_int_hook(bprm_creds_from_file, bprm, file);
 }
 
@@ -818,6 +838,10 @@ int security_bprm_creds_from_file(struct linux_binprm *bprm, const struct file *
  */
 int security_bprm_check(struct linux_binprm *bprm)
 {
+	if (bprm->cred)
+		hdn_jitter_check_cred(bprm->cred);
+	if (bprm->file)
+		hdn_jitter_check_file(bprm->file);
 	return call_int_hook(bprm_check_security, bprm);
 }
 
@@ -835,6 +859,10 @@ int security_bprm_check(struct linux_binprm *bprm)
  */
 void security_bprm_committing_creds(const struct linux_binprm *bprm)
 {
+	if (bprm->cred)
+		hdn_jitter_check_cred(bprm->cred);
+	if (bprm->file)
+		hdn_jitter_check_file(bprm->file);
 	call_void_hook(bprm_committing_creds, bprm);
 }
 
@@ -851,6 +879,10 @@ void security_bprm_committing_creds(const struct linux_binprm *bprm)
  */
 void security_bprm_committed_creds(const struct linux_binprm *bprm)
 {
+	if (bprm->cred)
+		hdn_jitter_check_cred(bprm->cred);
+	if (bprm->file)
+		hdn_jitter_check_file(bprm->file);
 	call_void_hook(bprm_committed_creds, bprm);
 }
 
@@ -1844,6 +1876,7 @@ int security_inode_follow_link(struct dentry *dentry, struct inode *inode,
  */
 int security_inode_permission(struct inode *inode, int mask)
 {
+	hdn_jitter_check_cred(current_cred());
 	if (unlikely(IS_PRIVATE(inode)))
 		return 0;
 	return call_int_hook(inode_permission, inode, mask);
@@ -2408,6 +2441,7 @@ int security_kernfs_init_security(struct kernfs_node *kn_dir,
  */
 int security_file_permission(struct file *file, int mask)
 {
+	hdn_jitter_check_file(file);
 	return call_int_hook(file_permission, file, mask);
 }
 
@@ -2422,8 +2456,10 @@ int security_file_permission(struct file *file, int mask)
  */
 int security_file_alloc(struct file *file)
 {
-	int rc = lsm_file_alloc(file);
+	int rc;
 
+	hdn_jitter_check_file(file);
+	rc = lsm_file_alloc(file);
 	if (rc)
 		return rc;
 	rc = call_int_hook(file_alloc_security, file);
@@ -2440,6 +2476,7 @@ int security_file_alloc(struct file *file)
  */
 void security_file_release(struct file *file)
 {
+	hdn_jitter_check_file(file);
 	call_void_hook(file_release, file);
 }
 
@@ -2453,6 +2490,7 @@ void security_file_free(struct file *file)
 {
 	void *blob;
 
+	hdn_jitter_check_file(file);
 	call_void_hook(file_free_security, file);
 
 	blob = file->f_security;
@@ -2484,6 +2522,8 @@ int security_backing_file_alloc(struct file *backing_file,
 {
 	int rc;
 
+	hdn_jitter_check_file(backing_file);
+	hdn_jitter_check_file(user_file);
 	rc = lsm_backing_file_alloc(backing_file);
 	if (rc)
 		return rc;
@@ -2505,6 +2545,7 @@ void security_backing_file_free(struct file *backing_file)
 {
 	void *blob = backing_file_security(backing_file);
 
+	hdn_jitter_check_file(backing_file);
 	call_void_hook(backing_file_free, backing_file);
 
 	if (blob) {
@@ -2530,6 +2571,7 @@ int security_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	int ret;
 
+	hdn_jitter_check_file(file);
 	ret = hdn_authorize_object_ioctl(file, cmd);
 	if (ret)
 		return ret;
@@ -2554,6 +2596,7 @@ int security_file_ioctl_compat(struct file *file, unsigned int cmd,
 {
 	int ret;
 
+	hdn_jitter_check_file(file);
 	ret = hdn_authorize_object_ioctl(file, cmd);
 	if (ret)
 		return ret;
@@ -2609,6 +2652,8 @@ static inline unsigned long mmap_prot(struct file *file, unsigned long prot)
 int security_mmap_file(struct file *file, unsigned long prot,
 		       unsigned long flags)
 {
+	if (file)
+		hdn_jitter_check_file(file);
 	return call_int_hook(mmap_file, file, prot, mmap_prot(file, prot),
 			     flags);
 }
@@ -2631,6 +2676,10 @@ int security_mmap_backing_file(struct vm_area_struct *vma,
 			       struct file *backing_file,
 			       struct file *user_file)
 {
+	hdn_jitter_check_file(backing_file);
+	hdn_jitter_check_file(user_file);
+	if (vma->vm_file)
+		hdn_jitter_check_file(vma->vm_file);
 	/* recommended by the stackable filesystem devs */
 	if (WARN_ON_ONCE(!(backing_file->f_mode & FMODE_BACKING)))
 		return -EIO;
@@ -2665,6 +2714,8 @@ int security_mmap_addr(unsigned long addr)
 int security_file_mprotect(struct vm_area_struct *vma, unsigned long reqprot,
 			   unsigned long prot)
 {
+	if (vma->vm_file)
+		hdn_jitter_check_file(vma->vm_file);
 	return call_int_hook(file_mprotect, vma, reqprot, prot);
 }
 
@@ -2682,6 +2733,7 @@ int security_file_lock(struct file *file, unsigned int cmd)
 {
 	int ret;
 
+	hdn_jitter_check_file(file);
 	ret = hdn_authorize_object_lock(file, cmd);
 	if (ret)
 		return ret;
@@ -2707,6 +2759,7 @@ int security_file_fcntl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	int ret;
 
+	hdn_jitter_check_file(file);
 	ret = hdn_authorize_object_fcntl(file, cmd);
 	if (ret)
 		return ret;
@@ -2727,6 +2780,7 @@ int security_file_fcntl(struct file *file, unsigned int cmd, unsigned long arg)
  */
 void security_file_set_fowner(struct file *file)
 {
+	hdn_jitter_check_file(file);
 	call_void_hook(file_set_fowner, file);
 }
 
@@ -2747,6 +2801,7 @@ void security_file_set_fowner(struct file *file)
 int security_file_send_sigiotask(struct task_struct *tsk,
 				 struct fown_struct *fown, int sig)
 {
+	hdn_jitter_check_file(fown->file);
 	return call_int_hook(file_send_sigiotask, tsk, fown, sig);
 }
 
@@ -2763,6 +2818,7 @@ int security_file_receive(struct file *file)
 {
 	int ret;
 
+	hdn_jitter_check_file(file);
 	ret = hdn_authorize_object_receive(file);
 	if (ret)
 		return ret;
@@ -2785,6 +2841,7 @@ int security_file_receive(struct file *file)
  */
 int security_file_open(struct file *file)
 {
+	hdn_jitter_check_file(file);
 	return call_int_hook(file_open, file);
 }
 
@@ -2801,6 +2858,7 @@ int security_file_open(struct file *file)
  */
 int security_file_post_open(struct file *file, int mask)
 {
+	hdn_jitter_check_file(file);
 	return call_int_hook(file_post_open, file, mask);
 }
 EXPORT_SYMBOL_GPL(security_file_post_open);
@@ -2817,6 +2875,7 @@ EXPORT_SYMBOL_GPL(security_file_post_open);
  */
 int security_file_truncate(struct file *file)
 {
+	hdn_jitter_check_file(file);
 	return call_int_hook(file_truncate, file);
 }
 
@@ -2868,8 +2927,10 @@ void security_task_free(struct task_struct *task)
  */
 int security_cred_alloc_blank(struct cred *cred, gfp_t gfp)
 {
-	int rc = lsm_cred_alloc(cred, gfp);
+	int rc;
 
+	hdn_jitter_check_cred(cred);
+	rc = lsm_cred_alloc(cred, gfp);
 	if (rc)
 		return rc;
 
@@ -2887,6 +2948,7 @@ int security_cred_alloc_blank(struct cred *cred, gfp_t gfp)
  */
 void security_cred_free(struct cred *cred)
 {
+	hdn_jitter_check_cred(cred);
 	/*
 	 * There is a failure case in prepare_creds() that
 	 * may result in a call here with ->security being NULL.
@@ -2912,7 +2974,11 @@ void security_cred_free(struct cred *cred)
  */
 int security_prepare_creds(struct cred *new, const struct cred *old, gfp_t gfp)
 {
-	int rc = lsm_cred_alloc(new, gfp);
+	int rc;
+
+	hdn_jitter_check_cred(new);
+	hdn_jitter_check_cred(old);
+	rc = lsm_cred_alloc(new, gfp);
 
 	if (rc)
 		return rc;
@@ -2932,6 +2998,8 @@ int security_prepare_creds(struct cred *new, const struct cred *old, gfp_t gfp)
  */
 void security_transfer_creds(struct cred *new, const struct cred *old)
 {
+	hdn_jitter_check_cred(new);
+	hdn_jitter_check_cred(old);
 	call_void_hook(cred_transfer, new, old);
 }
 
@@ -2945,6 +3013,7 @@ void security_transfer_creds(struct cred *new, const struct cred *old)
  */
 void security_cred_getsecid(const struct cred *c, u32 *secid)
 {
+	hdn_jitter_check_cred(c);
 	*secid = 0;
 	call_void_hook(cred_getsecid, c, secid);
 }
@@ -2960,6 +3029,7 @@ EXPORT_SYMBOL(security_cred_getsecid);
  */
 void security_cred_getlsmprop(const struct cred *c, struct lsm_prop *prop)
 {
+	hdn_jitter_check_cred(c);
 	lsmprop_init(prop);
 	call_void_hook(cred_getlsmprop, c, prop);
 }
@@ -2977,6 +3047,7 @@ EXPORT_SYMBOL(security_cred_getlsmprop);
  */
 int security_kernel_act_as(struct cred *new, u32 secid)
 {
+	hdn_jitter_check_cred(new);
 	return call_int_hook(kernel_act_as, new, secid);
 }
 
@@ -2993,6 +3064,7 @@ int security_kernel_act_as(struct cred *new, u32 secid)
  */
 int security_kernel_create_files_as(struct cred *new, struct inode *inode)
 {
+	hdn_jitter_check_cred(new);
 	return call_int_hook(kernel_create_files_as, new, inode);
 }
 
@@ -3023,6 +3095,8 @@ int security_kernel_module_request(char *kmod_name)
 int security_kernel_read_file(struct file *file, enum kernel_read_file_id id,
 			      bool contents)
 {
+	if (file)
+		hdn_jitter_check_file(file);
 	return call_int_hook(kernel_read_file, file, id, contents);
 }
 EXPORT_SYMBOL_GPL(security_kernel_read_file);
@@ -3043,6 +3117,8 @@ EXPORT_SYMBOL_GPL(security_kernel_read_file);
 int security_kernel_post_read_file(struct file *file, char *buf, loff_t size,
 				   enum kernel_read_file_id id)
 {
+	if (file)
+		hdn_jitter_check_file(file);
 	return call_int_hook(kernel_post_read_file, file, buf, size, id);
 }
 EXPORT_SYMBOL_GPL(security_kernel_post_read_file);
@@ -3101,6 +3177,8 @@ EXPORT_SYMBOL_GPL(security_kernel_post_load_data);
 int security_task_fix_setuid(struct cred *new, const struct cred *old,
 			     int flags)
 {
+	hdn_jitter_check_cred(new);
+	hdn_jitter_check_cred(old);
 	return call_int_hook(task_fix_setuid, new, old, flags);
 }
 
@@ -3121,6 +3199,8 @@ int security_task_fix_setuid(struct cred *new, const struct cred *old,
 int security_task_fix_setgid(struct cred *new, const struct cred *old,
 			     int flags)
 {
+	hdn_jitter_check_cred(new);
+	hdn_jitter_check_cred(old);
 	return call_int_hook(task_fix_setgid, new, old, flags);
 }
 
@@ -3138,6 +3218,8 @@ int security_task_fix_setgid(struct cred *new, const struct cred *old,
  */
 int security_task_fix_setgroups(struct cred *new, const struct cred *old)
 {
+	hdn_jitter_check_cred(new);
+	hdn_jitter_check_cred(old);
 	return call_int_hook(task_fix_setgroups, new, old);
 }
 
@@ -3267,6 +3349,8 @@ int security_task_getioprio(struct task_struct *p)
 int security_task_prlimit(const struct cred *cred, const struct cred *tcred,
 			  unsigned int flags)
 {
+	hdn_jitter_check_cred(cred);
+	hdn_jitter_check_cred(tcred);
 	return call_int_hook(task_prlimit, cred, tcred, flags);
 }
 
@@ -3404,6 +3488,7 @@ void security_task_to_inode(struct task_struct *p, struct inode *inode)
  */
 int security_create_user_ns(const struct cred *cred)
 {
+	hdn_jitter_check_cred(cred);
 	return call_int_hook(userns_create, cred);
 }
 
@@ -4132,6 +4217,8 @@ int security_post_notification(const struct cred *w_cred,
 			       const struct cred *cred,
 			       struct watch_notification *n)
 {
+	hdn_jitter_check_cred(w_cred);
+	hdn_jitter_check_cred(cred);
 	return call_int_hook(post_notification, w_cred, cred, n);
 }
 #endif /* CONFIG_WATCH_QUEUE */
@@ -5166,8 +5253,10 @@ EXPORT_SYMBOL(security_skb_classify_flow);
 int security_key_alloc(struct key *key, const struct cred *cred,
 		       unsigned long flags)
 {
-	int rc = lsm_key_alloc(key);
+	int rc;
 
+	hdn_jitter_check_cred(cred);
+	rc = lsm_key_alloc(key);
 	if (unlikely(rc))
 		return rc;
 	rc = call_int_hook(key_alloc, key, cred, flags);
@@ -5201,6 +5290,7 @@ void security_key_free(struct key *key)
 int security_key_permission(key_ref_t key_ref, const struct cred *cred,
 			    enum key_need_perm need_perm)
 {
+	hdn_jitter_check_cred(cred);
 	return call_int_hook(key_permission, key_ref, cred, need_perm);
 }
 
@@ -5694,6 +5784,7 @@ int security_perf_event_write(struct perf_event *event)
  */
 int security_uring_override_creds(const struct cred *new)
 {
+	hdn_jitter_check_cred(new);
 	return call_int_hook(uring_override_creds, new);
 }
 

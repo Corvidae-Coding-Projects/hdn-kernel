@@ -2,6 +2,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/fsnotify_backend.h>
+#include <linux/hdn_sysfs.h>
 #include <linux/idr.h>
 #include <linux/init.h>
 #include <linux/inotify.h>
@@ -84,6 +85,10 @@ static void inotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark)
 	inode_mark = container_of(mark, struct inotify_inode_mark, fsn_mark);
 	inode = igrab(fsnotify_conn_inode(mark->connector));
 	if (inode) {
+		if (hdn_sysfs_inode_disclosure(inode) & hdn_sysfs_hidden_classes()) {
+			iput(inode);
+			return;
+		}
 		seq_printf(m, "inotify wd:%x ino:%lx sdev:%x mask:%x ignored_mask:0 ",
 			   inode_mark->wd, inode->i_ino, inode->i_sb->s_dev,
 			   inotify_mark_user_mask(mark));
@@ -111,6 +116,10 @@ static void fanotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark)
 		inode = igrab(fsnotify_conn_inode(mark->connector));
 		if (!inode)
 			return;
+		if (hdn_sysfs_inode_disclosure(inode) & hdn_sysfs_hidden_classes()) {
+			iput(inode);
+			return;
+		}
 		seq_printf(m, "fanotify ino:%lx sdev:%x mflags:%x mask:%x ignored_mask:%x ",
 			   inode->i_ino, inode->i_sb->s_dev,
 			   mflags, mark->mask, mark->ignore_mask);

@@ -49,6 +49,7 @@
 ########################################################################
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 ## assume buffers not aligned
 #define	VMOVDQ vmovdqu
@@ -522,6 +523,7 @@ STACK_SIZE	= _CTX      + _CTX_SIZE
 ########################################################################
 .text
 SYM_FUNC_START(sha256_transform_rorx)
+	HDN_ASM_FUNCTION sha256_transform_rorx
 	pushq	%rbx
 	pushq	%r12
 	pushq	%r13
@@ -713,7 +715,8 @@ SYM_FUNC_START(sha256_transform_rorx)
 	popq	%r12
 	popq	%rbx
 	vzeroupper
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END sha256_transform_rorx
 SYM_FUNC_END(sha256_transform_rorx)
 
 .section	.rodata.cst512.K256, "aM", @progbits, 512

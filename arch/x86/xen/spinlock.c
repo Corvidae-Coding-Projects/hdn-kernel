@@ -110,7 +110,17 @@ void xen_uninit_lock_cpu(int cpu)
 	per_cpu(lock_kicker_irq, cpu) = -1;
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+/* pv_lock_ops uses a long CPU argument; the shared Xen query takes int.
+ * Keep that conversion in a real typed body rather than erasing the ABI. */
+static bool hdn_xen_vcpu_is_preempted(long cpu)
+{
+	return xen_vcpu_stolen(cpu);
+}
+PV_CALLEE_SAVE_REGS_THUNK(hdn_xen_vcpu_is_preempted);
+#else
 PV_CALLEE_SAVE_REGS_THUNK(xen_vcpu_stolen);
+#endif
 
 /*
  * Our init of PV spinlocks is split in two init functions due to us
@@ -139,5 +149,9 @@ void __init xen_init_spinlocks(void)
 		PV_CALLEE_SAVE(__pv_queued_spin_unlock);
 	pv_ops_lock.wait = xen_qlock_wait;
 	pv_ops_lock.kick = xen_qlock_kick;
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	pv_ops_lock.vcpu_is_preempted = PV_CALLEE_SAVE(hdn_xen_vcpu_is_preempted);
+#else
 	pv_ops_lock.vcpu_is_preempted = PV_CALLEE_SAVE(xen_vcpu_stolen);
+#endif
 }

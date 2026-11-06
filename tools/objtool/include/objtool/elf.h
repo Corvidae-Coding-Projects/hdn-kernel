@@ -58,6 +58,36 @@ struct section {
 };
 
 struct symbol {
+	u8 rap_kind;
+	bool rap_terminal;
+	bool rap_image_handoff;
+	bool rap_resume_entry;
+	bool rap_kexec_protocol;
+	bool rap_hardware_event;
+	bool rap_efi_protocol;
+	bool rap_madt_protocol;
+	bool rap_hyperv_protocol;
+	bool rap_hv_crash_protocol;
+	bool rap_realmode_protocol;
+	bool rap_thunk_protocol;
+	bool rap_fred_protocol;
+	bool rap_cpu_protocol;
+	bool rap_switch_protocol;
+	bool rap_s3_protocol;
+	bool rap_idt_protocol;
+	bool rap_entry_root_protocol;
+	bool rap_interrupt_return_protocol;
+	bool rap_nmi_protocol;
+	bool rap_syscall_protocol;
+	bool rap_compat_protocol;
+	bool rap_early_idt_protocol;
+	bool rap_startup_protocol;
+	bool rap_error_return_protocol;
+	bool rap_pvh_protocol;
+	bool rap_adapter;
+	bool rap_typed_entry;
+	bool rap_static_contract;
+	unsigned long rap_returns;
 	struct list_head list;
 	struct list_head global_list;
 	struct rb_node node;

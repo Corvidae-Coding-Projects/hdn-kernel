@@ -8,6 +8,7 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/slab.h>
+#include <linux/hdn_livepatch.h>
 #include "internal.h"
 
 /*
@@ -57,18 +58,28 @@ int copy_module_elf(struct module *mod, struct load_info *info)
 	 */
 	mod->klp_info->sechdrs[symndx].sh_addr = (unsigned long)mod->core_kallsyms.symtab;
 
+	ret = hdn_klp_prepare(mod, mod->klp_info, mod->core_kallsyms.strtab,
+			      info->core_typeoffs - info->stroffs);
+	if (ret)
+		goto free_secstrings;
 	return 0;
 
+free_secstrings:
+	kfree(mod->klp_info->secstrings);
 free_sechdrs:
 	kfree(mod->klp_info->sechdrs);
 free_info:
 	kfree(mod->klp_info);
+	mod->klp_info = NULL;
 	return ret;
 }
 
 void free_module_elf(struct module *mod)
 {
+	if (!mod->klp_info)
+		return;
 	kfree(mod->klp_info->sechdrs);
 	kfree(mod->klp_info->secstrings);
 	kfree(mod->klp_info);
+	mod->klp_info = NULL;
 }

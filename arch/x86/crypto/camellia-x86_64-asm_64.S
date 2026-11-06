@@ -6,6 +6,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <linux/cfi_types.h>
 
 .file "camellia-x86_64-asm_64.S"
@@ -179,6 +180,7 @@
 	movq RAB0,			4*2(RIO);
 
 SYM_TYPED_FUNC_START(__camellia_enc_blk)
+	HDN_ASM_FUNCTION __camellia_enc_blk, 1
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
@@ -216,16 +218,18 @@ SYM_TYPED_FUNC_START(__camellia_enc_blk)
 	enc_outunpack(mov, RT1);
 
 	movq RR12, %r12;
-	RET;
+	HDN_ASM_RETURN;
 
 .L__enc_xor:
 	enc_outunpack(xor, RT1);
 
 	movq RR12, %r12;
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END __camellia_enc_blk
 SYM_FUNC_END(__camellia_enc_blk)
 
 SYM_TYPED_FUNC_START(camellia_dec_blk)
+	HDN_ASM_FUNCTION camellia_dec_blk, 1
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
@@ -260,7 +264,8 @@ SYM_TYPED_FUNC_START(camellia_dec_blk)
 	dec_outunpack();
 
 	movq RR12, %r12;
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END camellia_dec_blk
 SYM_FUNC_END(camellia_dec_blk)
 
 /**********************************************************************
@@ -413,6 +418,7 @@ SYM_FUNC_END(camellia_dec_blk)
 		movq RAB1,			12*2(RIO);
 
 SYM_TYPED_FUNC_START(__camellia_enc_blk_2way)
+	HDN_ASM_FUNCTION __camellia_enc_blk_2way, 1
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
@@ -451,17 +457,19 @@ SYM_TYPED_FUNC_START(__camellia_enc_blk_2way)
 
 	movq RR12, %r12;
 	popq %rbx;
-	RET;
+	HDN_ASM_RETURN;
 
 .L__enc2_xor:
 	enc_outunpack2(xor, RT2);
 
 	movq RR12, %r12;
 	popq %rbx;
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END __camellia_enc_blk_2way
 SYM_FUNC_END(__camellia_enc_blk_2way)
 
 SYM_TYPED_FUNC_START(camellia_dec_blk_2way)
+	HDN_ASM_FUNCTION camellia_dec_blk_2way, 1
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
@@ -498,5 +506,6 @@ SYM_TYPED_FUNC_START(camellia_dec_blk_2way)
 
 	movq RR12, %r12;
 	movq RXOR, %rbx;
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END camellia_dec_blk_2way
 SYM_FUNC_END(camellia_dec_blk_2way)

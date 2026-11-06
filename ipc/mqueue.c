@@ -36,6 +36,7 @@
 #include <linux/ipc_namespace.h>
 #include <linux/user_namespace.h>
 #include <linux/slab.h>
+#include <linux/hdn_alloc.h>
 #include <linux/sched/wake_q.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/user.h>
@@ -1677,9 +1678,10 @@ static int __init init_mqueue_fs(void)
 
 	mqueue_inode_cachep = kmem_cache_create("mqueue_inode_cache",
 				sizeof(struct mqueue_inode_info), 0,
-				SLAB_HWCACHE_ALIGN|SLAB_ACCOUNT, init_once);
+				SLAB_HWCACHE_ALIGN | SLAB_ACCOUNT | SLAB_HDN_DOMAIN, init_once);
 	if (mqueue_inode_cachep == NULL)
 		return -ENOMEM;
+	hdn_cache_domain(mqueue_inode_cachep, HDN_ALLOC_MQUEUE);
 
 	if (!setup_mq_sysctls(&init_ipc_ns)) {
 		pr_warn("sysctl registration failed\n");

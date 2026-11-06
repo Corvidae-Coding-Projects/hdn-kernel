@@ -504,6 +504,12 @@ int __weak hibernate_resume_nonboot_cpu_disable(void)
 	return suspend_disable_secondary_cpus();
 }
 
+/* Architectures may prebuild immutable restore contexts while allocation and
+ * CPA/TLB synchronization are still permitted. The low-level resume path then
+ * consumes only that finalized context after interrupts and CPUs are stopped. */
+int __weak arch_hibernate_prepare_restore(void) { return 0; }
+void __weak arch_hibernate_cleanup_restore(void) { }
+
 /**
  * resume_target_kernel - Restore system state from a hibernation image.
  * @platform_mode: Whether or not to use the platform driver.
@@ -516,6 +522,7 @@ int __weak hibernate_resume_nonboot_cpu_disable(void)
 static int resume_target_kernel(bool platform_mode)
 {
 	int error;
+	bool free_image = false;
 
 	error = dpm_suspend_end(PMSG_QUIESCE);
 	if (error) {
@@ -561,7 +568,10 @@ static int resume_target_kernel(bool platform_mode)
 	 * very tight, so we have to free it as soon as we can to avoid
 	 * subsequent failures.
 	 */
-	swsusp_free();
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNEL_WX))
+		free_image = true;
+	else
+		swsusp_free();
 	restore_processor_state();
 	touch_softlockup_watchdog();
 
@@ -570,6 +580,8 @@ static int resume_target_kernel(bool platform_mode)
  Enable_irqs:
 	system_state = SYSTEM_RUNNING;
 	local_irq_enable();
+	if (free_image)
+		swsusp_free();
 
  Enable_cpus:
 	pm_sleep_enable_secondary_cpus();
@@ -594,6 +606,9 @@ int hibernation_restore(int platform_mode)
 {
 	int error;
 
+	error = arch_hibernate_prepare_restore();
+	if (error)
+		return error;
 	pm_prepare_console();
 	console_suspend_all();
 	error = dpm_suspend_start(PMSG_QUIESCE);
@@ -606,6 +621,7 @@ int hibernation_restore(int platform_mode)
 		 */
 		BUG_ON(!error);
 	}
+	arch_hibernate_cleanup_restore();
 	dpm_resume_end(PMSG_RECOVER);
 	console_resume_all();
 	pm_restore_console();

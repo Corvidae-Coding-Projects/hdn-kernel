@@ -9,6 +9,7 @@
 #include <linux/perf_event.h>
 #include <linux/btf_ids.h>
 #include <linux/buildid.h>
+#include <linux/hdn_stack.h>
 #include "percpu_freelist.h"
 #include "mmap_unlock_work.h"
 
@@ -548,11 +549,20 @@ static long __bpf_get_task_stack(struct task_struct *task, void *buf, u32 size,
 {
 	struct pt_regs *regs;
 	long res = -EINVAL;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct pt_regs snapshot;
+#endif
 
 	if (!try_get_task_stack(task))
 		return -EFAULT;
 
 	regs = task_pt_regs(task);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (regs) {
+		hdn_stack_regs_snapshot(task, &snapshot);
+		regs = &snapshot;
+	}
+#endif
 	if (regs)
 		res = __bpf_get_stack(regs, task, NULL, buf, size, flags, may_fault);
 	put_task_stack(task);

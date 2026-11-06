@@ -38,10 +38,12 @@
  */
 
 #include <linux/delay.h>
+#include <linux/hdn_pgtable.h>
 #include <linux/kexec.h>
 #include <linux/crash_dump.h>
 #include <linux/panic.h>
 #include <asm/apic.h>
+#include <asm/hdn_hv_crash.h>
 #include <asm/desc.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
@@ -51,9 +53,13 @@
 #include <asm/reboot.h>
 #include <asm/intel_pt.h>
 
+void __noreturn hv_crash_disable(void);
+void __noreturn hv_crash_handle(void);
+
 bool hv_crash_enabled;
 EXPORT_SYMBOL_GPL(hv_crash_enabled);
 
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 struct hv_crash_ctxt {
 	ulong rsp;
 	ulong cr0;
@@ -78,15 +84,16 @@ struct hv_crash_ctxt {
 	u64 pat;
 };
 static struct hv_crash_ctxt hv_crash_ctxt;
+#endif
 
 /* Shared hypervisor page that contains crash dump area we peek into.
  * NB: windbg looks for "hv_cda" symbol so don't change it.
  */
 static struct hv_crashdump_area *hv_cda;
 
-static u32 trampoline_pa, devirt_arg;
+static u32 trampoline_pa __ro_after_init, devirt_arg __ro_after_init;
 static atomic_t crash_cpus_wait;
-static void *hv_crash_ptpgs[4];
+static void *hv_crash_ptpgs[4] __ro_after_init;
 static bool hv_has_crashed, lx_has_crashed;
 
 static void __noreturn hv_panic_timeout_reboot(void)
@@ -117,6 +124,12 @@ static void hv_crash_clear_kernpt(void)
 	pgd_t *pgd;
 	p4d_t *p4d;
 
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	if (hdn_pt_active()) {
+		hdn_pt_hyperv_switch(false);
+		return;
+	}
+#endif
 	/* Clear entry so it's not confusing to someone looking at the core */
 	pgd = pgd_offset_k(trampoline_pa);
 	p4d = p4d_offset(pgd, trampoline_pa);
@@ -124,7 +137,7 @@ static void hv_crash_clear_kernpt(void)
 }
 
 
-static void __noreturn hv_crash_handle(void)
+void __noreturn hv_crash_handle(void)
 {
 	hv_crash_restore_tss();
 	hv_crash_clear_kernpt();
@@ -135,6 +148,7 @@ static void __noreturn hv_crash_handle(void)
 	hv_panic_timeout_reboot();
 }
 
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 /*
  * __naked functions do not permit function calls, not even to __always_inline
  * functions that only contain asm() blocks themselves. So use a macro instead.
@@ -183,6 +197,7 @@ static void __naked hv_crash_c_entry(void)
 }
 /* Tell objtool we are using lretq long jump in the above function intentionally */
 STACK_FRAME_NON_STANDARD(hv_crash_c_entry);
+#endif
 
 static void hv_mark_tss_not_busy(void)
 {
@@ -195,6 +210,7 @@ static void hv_mark_tss_not_busy(void)
 }
 
 /* Save essential context */
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 static void hv_hvcrash_ctxt_save(void)
 {
 	struct hv_crash_ctxt *ctxt = &hv_crash_ctxt;
@@ -222,6 +238,8 @@ static void hv_hvcrash_ctxt_save(void)
 	ctxt->pat = __rdmsr(MSR_IA32_CR_PAT);
 }
 
+#endif
+
 /* Add trampoline page to the kernel pagetable for transition to kernel PT */
 static void hv_crash_fixup_kernpt(void)
 {
@@ -231,9 +249,15 @@ static void hv_crash_fixup_kernpt(void)
 	pgd = pgd_offset_k(trampoline_pa);
 	p4d = p4d_offset(pgd, trampoline_pa);
 
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	if (hdn_pt_active()) {
+		hdn_pt_hyperv_switch(true);
+		return;
+	}
+#endif
 	/* trampoline_pa is below 4G, so no pre-existing entry to clobber */
 	p4d_populate(&init_mm, p4d, (pud_t *)hv_crash_ptpgs[1]);
-	p4d->p4d = p4d->p4d & ~(_PAGE_NX);    /* enable execute */
+	set_p4d(p4d, __p4d((p4d_val(*p4d) & ~_PAGE_NX) | _PAGE_NOPTISHADOW));
 }
 
 /*
@@ -282,7 +306,6 @@ static void hv_notify_prepare_hyp(void)
  */
 static noinline __noclone void crash_nmi_callback(struct pt_regs *regs)
 {
-	struct hv_input_disable_hyp_ex *input;
 	int msecs = 1000, ccpu = smp_processor_id();
 
 	if (ccpu == 0) {
@@ -307,20 +330,29 @@ static noinline __noclone void crash_nmi_callback(struct pt_regs *regs)
 	if (crashing_cpu == -1)
 		crashing_cpu = ccpu;		/* crash cmd uses this */
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	hdn_hv_crash_enter();
+#else
 	hv_hvcrash_ctxt_save();
+	hv_crash_disable();
+#endif
+}
+
+
+/* Called below a protected, nonreturning checkpoint on RAP kernels. */
+void __noreturn hv_crash_disable(void)
+{
+	struct hv_input_disable_hyp_ex *input;
+
 	hv_mark_tss_not_busy();
 	hv_crash_fixup_kernpt();
-
 	input = *this_cpu_ptr(hyperv_pcpu_input_arg);
 	memset(input, 0, sizeof(*input));
 	input->rip = trampoline_pa;
 	input->arg = devirt_arg;
-
 	(void)hv_do_hypercall(HVCALL_DISABLE_HYP_EX, input, NULL);
-
 	hv_panic_timeout_reboot();
 }
-
 
 static DEFINE_SPINLOCK(hv_crash_reboot_lk);
 
@@ -462,7 +494,7 @@ static int hv_crash_setup_trampdata(u64 trampoline_va)
 
 	/* hv_crash_asm_end is beyond last byte by 1 */
 	size = &hv_crash_asm_end - &hv_crash_asm32;
-	if (size + sizeof(struct hv_crash_tramp_data) > PAGE_SIZE) {
+	if (round_up(size, 16) + sizeof(struct hv_crash_tramp_data) > PAGE_SIZE) {
 		pr_err("%s: trampoline page overflow\n", __func__);
 		return -1;
 	}
@@ -482,7 +514,7 @@ static int hv_crash_setup_trampdata(u64 trampoline_va)
 	/* Note, when restoring X86_CR4_PCIDE, cr3[11:0] must be zero */
 	tramp->kernel_cr3 = __sme_pa(init_mm.pgd);
 
-	tramp->gdtr32.limit = sizeof(struct hv_crash_tramp_gdt);
+	tramp->gdtr32.limit = sizeof(struct hv_crash_tramp_gdt) - 1;
 	tramp->gdtr32.address = trampoline_pa +
 				   (ulong)&tramp->tramp_gdt - trampoline_va;
 
@@ -493,7 +525,11 @@ static int hv_crash_setup_trampdata(u64 trampoline_va)
 	offs = (ulong)&hv_crash_asm64 - (ulong)&hv_crash_asm32;
 	tramp->cs_jmptgt.address = trampoline_pa + offs;
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	tramp->c_entry_addr = (u64)&hdn_hv_crash_return;
+#else
 	tramp->c_entry_addr = (u64)&hv_crash_c_entry;
+#endif
 
 	devirt_arg = trampoline_pa + (ulong)dest - trampoline_va;
 
@@ -514,8 +550,7 @@ static void hv_crash_build_tramp_pt(void)
 
 	p4d = hv_crash_ptpgs[0] + pgd_index(addr) * sizeof(p4d);
 	pa = virt_to_phys(hv_crash_ptpgs[1]);
-	set_p4d(p4d, __p4d(_PAGE_TABLE | pa));
-	p4d->p4d &= ~(_PAGE_NX);	/* enable execute */
+	set_p4d(p4d, __p4d(_PAGE_TABLE | pa | _PAGE_NOPTISHADOW));
 
 	pud = hv_crash_ptpgs[1] + pud_index(addr) * sizeof(pud);
 	pa = virt_to_phys(hv_crash_ptpgs[2]);
@@ -526,7 +561,8 @@ static void hv_crash_build_tramp_pt(void)
 	set_pmd(pmd, __pmd(_PAGE_TABLE | pa));
 
 	pte = hv_crash_ptpgs[3] + pte_index(addr) * sizeof(pte);
-	set_pte(pte, pfn_pte(addr >> PAGE_SHIFT, PAGE_KERNEL_EXEC));
+	set_pte(pte, pfn_pte(addr >> PAGE_SHIFT,
+		__pgprot(pgprot_val(PAGE_KERNEL_ROX) & ~_PAGE_GLOBAL)));
 }
 
 /*
@@ -540,7 +576,8 @@ static void hv_crash_build_tramp_pt(void)
  */
 static int hv_crash_trampoline_setup(void)
 {
-	int i, rc, order;
+	int i, rc;
+	int order;
 	struct page *page;
 	u64 trampoline_va;
 	gfp_t flags32 = GFP_KERNEL | GFP_DMA32 | __GFP_ZERO;
@@ -555,14 +592,15 @@ static int hv_crash_trampoline_setup(void)
 	trampoline_va = (u64)page_to_virt(page);
 	trampoline_pa = (u32)page_to_phys(page);
 
-	order = 2;	   /* alloc 2^2 pages */
-	page = alloc_pages(flags32, order);
-	if (page == NULL) {
-		pr_err("%s: failed to alloc pt pages\n", __func__);
-		free_page(trampoline_va);
-		return -1;
-	}
 
+	/* These pages belong only to the terminal root. They are frozen by
+	 * hdn_hv_crash_seal after the private page-table service starts. */
+	order = 2;
+	page = alloc_pages(flags32, order);
+	if (!page) {
+		free_page(trampoline_va);
+		return -ENOMEM;
+	}
 	for (i = 0; i < 4; i++, page++)
 		hv_crash_ptpgs[i] = page_to_virt(page);
 
@@ -577,7 +615,6 @@ static int hv_crash_trampoline_setup(void)
 errout:
 	free_page(trampoline_va);
 	free_pages((ulong)hv_crash_ptpgs[0], order);
-
 	return rc;
 }
 
@@ -645,3 +682,12 @@ err_out:
 	unregister_nmi_handler(NMI_LOCAL, "hv_crash_nmi");
 	pr_err("Hyper-V: only linux root kdump support enabled\n");
 }
+
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+void __init hdn_hv_crash_seal(void)
+{
+	if (hv_crash_enabled &&
+	    hdn_pt_hyperv_seal(hv_crash_ptpgs[0], (unsigned long)__va(trampoline_pa)))
+		panic("HDN could not freeze the Hyper-V crash root");
+}
+#endif

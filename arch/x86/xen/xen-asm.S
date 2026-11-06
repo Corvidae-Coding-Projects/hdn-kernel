@@ -15,6 +15,7 @@
 #include <asm/asm.h>
 #include <asm/frame.h>
 #include <asm/unwind_hints.h>
+#include <asm/hdn_rap.h>
 
 #include <xen/interface/xen.h>
 
@@ -36,6 +37,15 @@
  */
 SYM_FUNC_START(xen_hypercall_pv)
 	ANNOTATE_NOENDBR
+	HDN_DIRECT_FUNC_ENTER xen_hypercall_pv
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	movl %edi, %eax
+	movq %rsi, %rdi
+	movq %rdx, %rsi
+	movq %rcx, %rdx
+	movq %r8, %r10
+	movq %r9, %r8
+#endif
 	push %rcx
 	push %r11
 	UNWIND_HINT_SAVE
@@ -43,7 +53,7 @@ SYM_FUNC_START(xen_hypercall_pv)
 	UNWIND_HINT_RESTORE
 	pop %r11
 	pop %rcx
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(xen_hypercall_pv)
 
 /*
@@ -52,15 +62,17 @@ SYM_FUNC_END(xen_hypercall_pv)
  */
 SYM_FUNC_START(xen_irq_disable_direct)
 	ENDBR
+	HDN_TYPED_FUNC_ENTER xen_irq_disable_direct
 	movb $1, PER_CPU_VAR(xen_vcpu_info + XEN_vcpu_info_mask)
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(xen_irq_disable_direct)
 
 /*
  * Force an event check by making a hypercall, but preserve regs
  * before making the call.
  */
-SYM_FUNC_START(check_events)
+SYM_FUNC_START_LOCAL(check_events)
+	HDN_PRIVATE_FUNC_ENTER check_events
 	FRAME_BEGIN
 	push %rax
 	push %rcx
@@ -71,7 +83,7 @@ SYM_FUNC_START(check_events)
 	push %r9
 	push %r10
 	push %r11
-	call xen_force_evtchn_callback
+	HDN_C_CALL xen_force_evtchn_callback
 	pop %r11
 	pop %r10
 	pop %r9
@@ -82,7 +94,7 @@ SYM_FUNC_START(check_events)
 	pop %rcx
 	pop %rax
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(check_events)
 
 /*
@@ -92,6 +104,7 @@ SYM_FUNC_END(check_events)
  */
 SYM_FUNC_START(xen_irq_enable_direct)
 	ENDBR
+	HDN_TYPED_FUNC_ENTER xen_irq_enable_direct
 	FRAME_BEGIN
 	/* Unmask events */
 	movb $0, PER_CPU_VAR(xen_vcpu_info + XEN_vcpu_info_mask)
@@ -106,10 +119,10 @@ SYM_FUNC_START(xen_irq_enable_direct)
 	testb $0xff, PER_CPU_VAR(xen_vcpu_info + XEN_vcpu_info_pending)
 	jz 1f
 
-	call check_events
+	HDN_C_CALL check_events
 1:
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(xen_irq_enable_direct)
 
 /*
@@ -123,27 +136,30 @@ SYM_FUNC_END(xen_irq_enable_direct)
  */
 SYM_FUNC_START(xen_save_fl_direct)
 	ENDBR
+	HDN_TYPED_FUNC_ENTER xen_save_fl_direct
 	testb $0xff, PER_CPU_VAR(xen_vcpu_info + XEN_vcpu_info_mask)
 	setz %ah
 	addb %ah, %ah
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(xen_save_fl_direct)
 
 SYM_FUNC_START(xen_read_cr2)
 	ENDBR
+	HDN_TYPED_FUNC_ENTER xen_read_cr2
 	FRAME_BEGIN
 	_ASM_MOV PER_CPU_VAR(xen_vcpu), %_ASM_AX
 	_ASM_MOV XEN_vcpu_info_arch_cr2(%_ASM_AX), %_ASM_AX
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(xen_read_cr2);
 
 SYM_FUNC_START(xen_read_cr2_direct)
 	ENDBR
+	HDN_TYPED_FUNC_ENTER xen_read_cr2_direct
 	FRAME_BEGIN
 	_ASM_MOV PER_CPU_VAR(xen_vcpu_info + XEN_vcpu_info_arch_cr2), %_ASM_AX
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(xen_read_cr2_direct);
 .popsection
 

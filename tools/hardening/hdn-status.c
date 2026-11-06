@@ -16,8 +16,8 @@
 #endif
 
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
-#define HDN_STATUS_MAX_ENTRIES 256
-#define HDN_STATUS_MAX_OUTPUTS 384
+#define HDN_STATUS_MAX_ENTRIES 512
+#define HDN_STATUS_MAX_OUTPUTS 512
 #define HDN_STATUS_MAX_EXPECTATIONS 32
 
 struct hdn_name {
@@ -249,6 +249,12 @@ static const struct hdn_name transition_names[] = {
 	{ HDN_TRANS_OBJECT_UNIX_SEND, "OBJECT_UNIX_SEND" },
 	{ HDN_TRANS_OBJECT_UNIX_RECV, "OBJECT_UNIX_RECV" },
 	{ HDN_TRANS_POLICY_REFRESH, "POLICY_REFRESH" },
+	{ HDN_TRANS_KERNEL_MAPPING, "KERNEL_MAPPING" },
+	{ HDN_TRANS_KERNEL_TEXT, "KERNEL_TEXT" },
+	{ HDN_TRANS_KERNEL_SEAL, "KERNEL_SEAL" },
+	{ HDN_TRANS_KERNEL_DESCRIPTOR, "KERNEL_DESCRIPTOR" },
+	{ HDN_TRANS_KERNEL_UACCESS, "KERNEL_UACCESS" },
+	{ HDN_TRANS_KERNEL_ALLOC, "KERNEL_ALLOC" },
 };
 
 static const struct hdn_name action_names[] = {
@@ -324,6 +330,22 @@ static const struct hdn_name reason_names[] = {
 	{ HDN_REASON_USERNS_DEPTH, "USERNS_DEPTH" },
 	{ HDN_REASON_POLICY_IDENTITY_MISMATCH,
 	  "POLICY_IDENTITY_MISMATCH" },
+	{ HDN_REASON_KERNEL_WX_MAPPING, "KERNEL_WX_MAPPING" },
+	{ HDN_REASON_KERNEL_TEXT_PATCH, "KERNEL_TEXT_PATCH" },
+	{ HDN_REASON_KERNEL_TEXT_DEBUGGER, "KERNEL_TEXT_DEBUGGER" },
+	{ HDN_REASON_KERNEL_TEXT_CONSTRUCT, "KERNEL_TEXT_CONSTRUCT" },
+	{ HDN_REASON_KERNEL_TEXT_TRAP_FILL, "KERNEL_TEXT_TRAP_FILL" },
+	{ HDN_REASON_KERNEL_TEXT_STATE, "KERNEL_TEXT_STATE" },
+	{ HDN_REASON_KERNEL_SEAL_STATE, "KERNEL_SEAL_STATE" },
+	{ HDN_REASON_KERNEL_PAGE_CONSTRUCT, "KERNEL_PAGE_CONSTRUCT" },
+	{ HDN_REASON_KERNEL_PAGE_FINALIZE, "KERNEL_PAGE_FINALIZE" },
+	{ HDN_REASON_KERNEL_PAGE_RETIRE, "KERNEL_PAGE_RETIRE" },
+	{ HDN_REASON_KERNEL_GDT_UPDATE, "KERNEL_GDT_UPDATE" },
+	{ HDN_REASON_KERNEL_GDT_LTR, "KERNEL_GDT_LTR" },
+	{ HDN_REASON_KERNEL_SMAP_RESTORED, "KERNEL_SMAP_RESTORED" },
+	{ HDN_REASON_KERNEL_OBJECT_CORRUPTION, "KERNEL_OBJECT_CORRUPTION" },
+	{ HDN_REASON_CONTROL_FLOW_VIOLATION, "CONTROL_FLOW_VIOLATION" },
+	{ HDN_REASON_KERNEL_USER_ACCESS_DENIED, "KERNEL_USER_ACCESS_DENIED" },
 };
 
 static void usage(const char *prog)
@@ -354,13 +376,17 @@ static char *trim(char *line)
 
 static bool valid_key(const char *key)
 {
+	bool capability_key;
 	const char *p;
 
 	if (!key || !key[0])
 		return false;
+	capability_key = !strncmp(key, "capability.", 11) && key[11];
 
 	for (p = key; *p; p++) {
 		if (isalnum((unsigned char)*p) || *p == '_')
+			continue;
+		if (*p == '.' && capability_key && p == key + 10)
 			continue;
 		return false;
 	}
@@ -388,6 +414,7 @@ static int read_status_line(struct hdn_status *status, char *line,
 	char *colon;
 	char *key;
 	char *value;
+	unsigned int i;
 
 	line = trim(line);
 	if (!line[0])
@@ -413,6 +440,13 @@ static int read_status_line(struct hdn_status *status, char *line,
 	}
 
 	entry = &status->entries[status->count];
+	for (i = 0; i < status->count; i++) {
+		if (!strcmp(status->entries[i].key, key)) {
+			fprintf(stderr, "hdn-status: duplicate status key at line %u\n",
+				lineno);
+			return -EINVAL;
+		}
+	}
 	entry->key = strdup(key);
 	entry->value = strdup(value);
 	if (!entry->key || !entry->value)
@@ -488,7 +522,7 @@ static bool status_u64(const struct hdn_status *status, const char *key,
 
 	errno = 0;
 	*value = strtoull(text, &end, 0);
-	return !errno && end != text;
+	return !errno && end != text && !*end;
 }
 
 static unsigned long long status_u64_default(const struct hdn_status *status,
@@ -544,6 +578,63 @@ static void count_mitigations(const struct hdn_status *status,
 	}
 }
 
+static const char *const capability_status_names[] = {
+#define HDN_CAP_STATUS_NAME(symbol, name) [HDN_CAP_##symbol] = "capability." #name,
+	HDN_CAPABILITY_LIST(HDN_CAP_STATUS_NAME)
+#undef HDN_CAP_STATUS_NAME
+};
+
+_Static_assert(ARRAY_SIZE(capability_status_names) == HDN_CAP__MAX,
+	       "capability status inventory mismatch");
+
+static bool capability_record_satisfies(const char *record)
+{
+	const char *backing;
+	size_t state_length;
+
+	if (!record)
+		return false;
+	backing = strchr(record, ',');
+	if (!backing || strchr(backing + 1, ','))
+		return false;
+	state_length = (size_t)(backing - record);
+	backing++;
+	if (strcmp(backing, "none") && strcmp(backing, "hardware") &&
+	    strcmp(backing, "software") && strcmp(backing, "hybrid"))
+		return false;
+
+	return (state_length == strlen("enforced") &&
+		!strncmp(record, "enforced", state_length)) ||
+	       (state_length == strlen("not-applicable") &&
+		!strncmp(record, "not-applicable", state_length));
+}
+
+static bool capability_requirements_satisfied(const struct hdn_status *status)
+{
+	const char *architecture = status_value(status, "capability_architecture");
+	const char *requirements = status_value(status, "capability_requirements");
+	const char *version = status_value(status, "capability_version");
+	unsigned long long required;
+	unsigned int id;
+
+	if (!version || strcmp(version, "1") || !architecture || !architecture[0] ||
+	    !requirements || !status_u64(status, "capability_required_mask", &required) ||
+	    (required & ~(unsigned long long)HDN_CAP_KNOWN_MASK))
+		return false;
+	if (!strcmp(requirements, "unconstrained"))
+		return required == 0;
+	if (strcmp(requirements, "satisfied") || required == 0)
+		return false;
+
+	for (id = 0; id < HDN_CAP__MAX; id++) {
+		if ((required & HDN_CAP_REQUIRED(id)) &&
+		    !capability_record_satisfies(status_value(
+			status, capability_status_names[id])))
+			return false;
+	}
+	return true;
+}
+
 static const char *attention_reason(const struct hdn_status *status)
 {
 	if (!status_bool(status, "mitigations_sealed"))
@@ -552,6 +643,8 @@ static const char *attention_reason(const struct hdn_status *status)
 		return "policy_not_loaded";
 	if (!status_bool(status, "policy_sealed"))
 		return "policy_unsealed";
+	if (!capability_requirements_satisfied(status))
+		return "capability_requirements_unsatisfied";
 	return "none";
 }
 
@@ -942,6 +1035,374 @@ static int build_outputs(const struct hdn_status *status, const char *source,
 	if (ret)
 		return ret;
 	ret = output_status_value(outputs, status, "mitigations_sealed", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_cpa_state", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_cpa_wx", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_static_alias_guard", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_text_windows", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_text_started", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_text_completed", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_text_rejected", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_text_active", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_deferred_kernel_overflow", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_deferred_kernel_events", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_gdt", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "latent_entropy_mixing", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_private_allocations", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_allocations", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_owned_pages", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_finalized", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_retired", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernexec_failed_retirements", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_typed_objects", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_state", "disabled");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_allocations", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_live_objects", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_live_pages", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_live_payload_bytes", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_live_granule_bytes", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_fragmentation_bytes", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_seal_operations", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_publications", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_replacements", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_retirements", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_discards", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_rejections", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_allocation_failures", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_replacement_total_ns", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kernseal_replacement_max_ns", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "autoslab_state", "disabled");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "autoslab_metadata_version", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "autoslab_cache_budget", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "autoslab_caches", "0");
+	if (ret)
+		return ret;
+	{
+		static const char *const fields[] = {
+			"autoslab_typed", "autoslab_successful", "autoslab_failed",
+			"autoslab_mandatory", "autoslab_early", "autoslab_rejected",
+		};
+
+		for (size_t i = 0; i < ARRAY_SIZE(fields); i++) {
+			ret = output_status_value(outputs, status, fields[i], "unavailable");
+			if (ret)
+				return ret;
+		}
+	}
+	ret = output_status_value(outputs, status, "initify_image_aliases", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "initify_reclaimed_bytes", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "static_lifetime_analysis", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "constify_state", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "constify_test_interface", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "rap_state", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "rap_metadata_version", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "rap_transfer_abi", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "rap_failure_classes", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "rap_build_identity", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "rap_xor_state", "disabled");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "private_stacks_state", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "private_stacks_test_interface", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "kvm_state_test_interface", "0");
+	if (ret)
+		return ret;
+	{
+		static const char *const fields[] = {
+			"private_stacks_allocation_attempts",
+			"private_stacks_allocations",
+			"private_stacks_allocation_failures",
+			"private_stacks_live",
+			"private_stacks_publications",
+			"private_stacks_retirements",
+			"private_stacks_diagnostic_reads",
+			"private_stacks_diagnostic_read_failures",
+			"private_stacks_construction_bytes",
+			"private_stacks_task_switches",
+			"private_stacks_async_root_entries",
+		};
+
+		for (size_t i = 0; i < ARRAY_SIZE(fields); i++) {
+			ret = output_status_value(outputs, status, fields[i], "unavailable");
+			if (ret)
+				return ret;
+		}
+	}
+	ret = output_status_value(outputs, status, "rap_error_test_interface", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "rap_test_interface", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "respectre_state", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "respectre_coverage", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "respectre_report_schema", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "respectre_analyzer_version", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "respectre_compiler_abi", "none");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "respectre_store_bypass", "disabled");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "respectre_test_interface", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "capability_version", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "capability_architecture", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "capability_required_mask", "0x0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "capability_requirements", "unknown");
+	if (ret)
+		return ret;
+#define HDN_CAP_STATUS(symbol, name) \
+	ret = output_status_value(outputs, status, "capability." #name, "undeclared,none"); \
+	if (ret) \
+		return ret;
+	HDN_CAPABILITY_LIST(HDN_CAP_STATUS)
+#undef HDN_CAP_STATUS
+	ret = output_status_value(outputs, status, "sysfs_visibility_version", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "sysfs_discovery_view", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "uderef_state", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "uderef_build_id", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "uderef_site_scheme", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "uderef_smap_repairs", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_state", "disabled");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_test_interface", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_capacity_bytes", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_live_pages", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_quarantined_pages", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_failed_retirements", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_quarantine_limit_pages", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_quarantine_pressure_releases", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_allocation_attempts", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_allocation_successes", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_allocation_failures", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_requested_bytes", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_reserved_bytes", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "bpf_execmem_internal_slack_bytes", "unavailable");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "slab_layout_state", "unknown");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "slab_layout_test_interface", "0");
+	if (ret)
+		return ret;
+	{
+		static const char *const fields[] = {
+			"kernexec_idt", "kernexec_ldt", "kernexec_page_tables",
+			"kernexec_firmware_wx", "kernexec_terminal_handoff",
+			"kernexec_page_table_allocations", "kernexec_page_table_retirements",
+			"kernexec_page_table_owned_pages", "kernexec_page_table_reserve_pages",
+			"kernexec_page_table_allocation_failures",
+			"kernexec_foreign_code_ranges", "kernexec_foreign_code_pages",
+			"compatibility_intent_version", "compatibility_binding_version",
+			"application_compatibility", "application_remediation", "legacy_emulation",
+			"autoslab_state", "autoslab_metadata_version", "autoslab_cache_budget",
+			"autoslab_caches", "autoslab_typed", "autoslab_successful",
+			"autoslab_failed", "autoslab_mandatory",
+			"autoslab_early", "autoslab_rejected",
+			"critical_jitter_state", "critical_jitter_metadata_version",
+			"critical_jitter_classes", "critical_jitter_placement_slots",
+			"critical_jitter_queue_limit_per_class", "critical_jitter_allocations",
+			"critical_jitter_allocation_failures",
+			"critical_jitter_retired", "critical_jitter_released",
+			"critical_jitter_quarantined", "critical_jitter_pressure",
+			"critical_jitter_early_live", "critical_jitter_failures",
+			"critical_jitter_cred_allocations", "critical_jitter_cred_retired",
+			"critical_jitter_cred_allocation_failures",
+			"critical_jitter_cred_released", "critical_jitter_cred_quarantined",
+			"critical_jitter_cred_pressure", "critical_jitter_file_allocations",
+			"critical_jitter_file_allocation_failures",
+			"critical_jitter_file_retired", "critical_jitter_file_released",
+			"critical_jitter_file_quarantined", "critical_jitter_file_pressure",
+			"critical_jitter_backing_file_allocations",
+			"critical_jitter_backing_file_allocation_failures",
+			"critical_jitter_backing_file_retired",
+			"critical_jitter_backing_file_released",
+			"critical_jitter_backing_file_quarantined",
+			"critical_jitter_backing_file_pressure",
+		};
+		for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+			ret = output_status_value(outputs, status, fields[i], "unavailable");
+			if (ret)
+				return ret;
+		}
+	}
+	if (ret)
+		return ret;
+	{
+		static const char *const fields[] = {
+			"slab_layout_allocation_attempts",
+			"slab_layout_allocation_failures",
+			"slab_layout_slabs", "slab_layout_fallbacks",
+			"slab_layout_no_offset_room", "slab_layout_offset_slabs",
+			"slab_layout_offset_bytes", "slab_layout_original_objects",
+			"slab_layout_placed_objects", "slab_layout_displaced_objects",
+		};
+
+		for (size_t i = 0; i < ARRAY_SIZE(fields); i++) {
+			ret = output_status_value(outputs, status, fields[i], "unavailable");
+			if (ret)
+				return ret;
+		}
+	}
+	ret = output_status_value(outputs, status, "latent_entropy_credited_bits", "0");
+	if (ret)
+		return ret;
+	ret = output_status_value(outputs, status, "latent_entropy_test_interface", "0");
 	if (ret)
 		return ret;
 	ret = output_add(outputs, "mitigation_known", "%u", mitigation_known);

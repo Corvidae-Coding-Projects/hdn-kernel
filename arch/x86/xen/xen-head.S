@@ -15,6 +15,7 @@
 #include <asm/page_types.h>
 #include <asm/percpu.h>
 #include <asm/unwind_hints.h>
+#include <asm/hdn_rap.h>
 
 #include <xen/interface/elfnote.h>
 #include <xen/interface/features.h>
@@ -79,6 +80,36 @@ SYM_CODE_END(xen_cpu_bringup_again)
  */
 SYM_FUNC_START(xen_hypercall_hvm)
 	ENDBR
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	HDN_TYPED_FUNC_ENTER xen_hypercall_hvm
+	/* Preserve the six C arguments across lazy vendor discovery. */
+	pushq %rdi
+	pushq %rsi
+	pushq %rdx
+	pushq %rcx
+	pushq %r8
+	pushq %r9
+	subq $8, %rsp
+	HDN_C_CALL __xen_hypercall_setfunc
+	addq $8, %rsp
+	popq %r9
+	popq %r8
+	popq %rcx
+	popq %rdx
+	popq %rsi
+	popq %rdi
+	subq $8, %rsp
+	leaq xen_hypercall_amd(%rip), %r10
+	cmpq %r10, %rax
+	jne .Lhdn_xen_intel
+	HDN_C_CALL xen_hypercall_amd
+	jmp .Lhdn_xen_done
+.Lhdn_xen_intel:
+	HDN_C_CALL xen_hypercall_intel
+.Lhdn_xen_done:
+	addq $8, %rsp
+	HDN_ENTRY_ROOT_RETURN
+#else
 	FRAME_BEGIN
 	/* Save all relevant registers (caller save and arguments). */
 #ifdef CONFIG_X86_32
@@ -128,18 +159,37 @@ SYM_FUNC_START(xen_hypercall_hvm)
 	/* Use correct hypercall function. */
 	jz xen_hypercall_amd
 	jmp xen_hypercall_intel
+#endif
 SYM_FUNC_END(xen_hypercall_hvm)
 
 SYM_FUNC_START(xen_hypercall_amd)
 	ANNOTATE_NOENDBR
+	HDN_DIRECT_FUNC_ENTER xen_hypercall_amd
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	movl %edi, %eax
+	movq %rsi, %rdi
+	movq %rdx, %rsi
+	movq %rcx, %rdx
+	movq %r8, %r10
+	movq %r9, %r8
+#endif
 	vmmcall
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(xen_hypercall_amd)
 
 SYM_FUNC_START(xen_hypercall_intel)
 	ANNOTATE_NOENDBR
+	HDN_DIRECT_FUNC_ENTER xen_hypercall_intel
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	movl %edi, %eax
+	movq %rsi, %rdi
+	movq %rdx, %rsi
+	movq %rcx, %rdx
+	movq %r8, %r10
+	movq %r9, %r8
+#endif
 	vmcall
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(xen_hypercall_intel)
 	.popsection
 

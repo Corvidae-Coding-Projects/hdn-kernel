@@ -20,3 +20,5 @@ $(obj)/rmpiggy.o: $(obj)/rm/realmode.bin
 
 $(obj)/rm/realmode.bin: FORCE
 	$(Q)$(MAKE) $(build)=$(obj)/rm $@
+
+obj-$(CONFIG_SECURITY_HARDENING_RAP) += reboot_64.o

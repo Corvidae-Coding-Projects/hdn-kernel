@@ -60,6 +60,7 @@ struct hdn_role_include {
 };
 
 struct hdn_policy_builder {
+	uint32_t required_capabilities;
 	struct hdn_profile_builder profiles[HDN_MAX_PROFILES];
 	struct hdn_role_builder roles[HDN_MAX_ROLES];
 	struct hdn_role_use role_uses[HDN_MAX_ROLE_USES];
@@ -83,6 +84,12 @@ struct hdn_policy_builder {
 struct name_value {
 	const char *name;
 	uint64_t value;
+};
+
+static const struct name_value invariant_names[] = {
+#define HDN_CAP_NAME(symbol, name) { #name, HDN_CAP_REQUIRED(HDN_CAP_##symbol) },
+	HDN_CAPABILITY_LIST(HDN_CAP_NAME)
+#undef HDN_CAP_NAME
 };
 
 static const struct name_value authority_names[] = {
@@ -204,6 +211,10 @@ static const struct name_value profile_flag_names[] = {
 	  HDN_PROFILE_AUDIT_PROCESS_ACCOUNT },
 	{ "PROTECT_SHM", HDN_PROFILE_PROTECT_SHM },
 	{ "INHERIT_UNMATCHED_EXEC", HDN_PROFILE_INHERIT_UNMATCHED_EXEC },
+	{ "HIDE_SYSFS_KERNEL", HDN_PROFILE_HIDE_SYSFS_KERNEL },
+	{ "HIDE_SYSFS_FIRMWARE", HDN_PROFILE_HIDE_SYSFS_FIRMWARE },
+	{ "HIDE_SYSFS_DEVICES", HDN_PROFILE_HIDE_SYSFS_DEVICES },
+	{ "HIDE_SYSFS_MODULES", HDN_PROFILE_HIDE_SYSFS_MODULES },
 };
 
 static const struct name_value resource_names[] = {
@@ -1604,6 +1615,10 @@ static int parse_exec_options(struct hdn_exec_rule_record *rule,
 			if (rule->parent_profile_id)
 				return -EEXIST;
 			rule->parent_profile_id = parent;
+		} else if (!strcmp(name, "compat-lease")) {
+			if (rule->flags & HDN_EXEC_COMPAT_LEASE)
+				return -EEXIST;
+			rule->flags |= HDN_EXEC_COMPAT_LEASE;
 		} else if (!strcmp(name, "audit-inherit")) {
 			if (!(rule->flags & HDN_EXEC_INHERIT_PROFILE)) {
 				fprintf(stderr,
@@ -1754,6 +1769,13 @@ static int parse_exec_command(struct hdn_policy_builder *builder, char *save,
 	ret = parse_exec_options(rule, builder->profiles, name, &save, line);
 	if (ret)
 		return ret;
+	if ((rule->flags & HDN_EXEC_COMPAT_LEASE) &&
+	    (rule->flags != (HDN_EXEC_RESOLVE_FILE_PATH |
+			     HDN_EXEC_MATCH_VERITY_DIGEST | HDN_EXEC_COMPAT_LEASE) ||
+	     !rule->parent_profile_id)) {
+		fprintf(stderr, "%u: compat-lease requires path, verity and parent\n", line);
+		return -EINVAL;
+	}
 
 	builder->exec_rule_count++;
 	return 0;
@@ -2125,6 +2147,27 @@ static int parse_line(struct hdn_policy_builder *builder,
 	if (!command)
 		return 0;
 
+	if (!strcmp(command, "require-capability")) {
+		char *name = strtok_r(NULL, " \t\r\n", &save);
+
+		if (name && !strtok_r(NULL, " \t\r\n", &save)) {
+			for (size_t i = 0; i < ARRAY_SIZE(invariant_names); i++) {
+				if (!strcmp(name, invariant_names[i].name)) {
+					if (builder->required_capabilities &
+					    invariant_names[i].value) {
+						fprintf(stderr,
+							"%u: duplicate required capability: %s\n",
+							line_number, name);
+						return -EINVAL;
+					}
+					builder->required_capabilities |= invariant_names[i].value;
+					return 0;
+				}
+			}
+		}
+		fprintf(stderr, "%u: require-capability needs one known invariant\n", line_number);
+		return -EINVAL;
+	}
 	if (!strcmp(command, "generation"))
 		return parse_id_command(generation, save, line_number,
 					command);
@@ -2365,7 +2408,8 @@ static int write_policy(const char *path,
 			const struct hdn_resource_rule_record *resource_rules,
 			uint32_t resource_rule_count, uint64_t generation,
 			uint64_t expected_generation,
-			uint64_t default_profile, uint64_t privileged_profile)
+			uint64_t default_profile, uint64_t privileged_profile,
+			uint32_t required_capabilities)
 {
 	struct hdn_policy_header header = {
 		.magic = HDN_POLICY_MAGIC,
@@ -2373,6 +2417,7 @@ static int write_policy(const char *path,
 		.header_size = sizeof(header),
 		.profile_size = sizeof(records[0]),
 		.profile_count = count,
+		.flags = required_capabilities,
 		.subject_rule_size = sizeof(subject_rules[0]),
 		.subject_rule_count = subject_rule_count,
 		.object_rule_size = sizeof(object_rules[0]),
@@ -2561,7 +2606,8 @@ int main(int argc, char **argv)
 			   builder.firmware_rule_count, builder.resource_rules,
 			   builder.resource_rule_count, generation,
 			   expected_generation,
-			   default_profile, privileged_profile);
+			   default_profile, privileged_profile,
+			   builder.required_capabilities);
 	if (ret)
 		return 1;
 

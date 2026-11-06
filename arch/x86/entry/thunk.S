@@ -9,7 +9,12 @@
 #include "calling.h"
 #include <asm/asm.h>
 
+#ifdef CONFIG_X86_64
+THUNK preempt_schedule_thunk, preempt_schedule, rap=1
+THUNK preempt_schedule_notrace_thunk, preempt_schedule_notrace, rap=1
+#else
 THUNK preempt_schedule_thunk, preempt_schedule
 THUNK preempt_schedule_notrace_thunk, preempt_schedule_notrace
+#endif
 EXPORT_SYMBOL(preempt_schedule_thunk)
 EXPORT_SYMBOL(preempt_schedule_notrace_thunk)

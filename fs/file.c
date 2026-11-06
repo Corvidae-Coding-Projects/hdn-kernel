@@ -962,8 +962,10 @@ static struct file *__get_file_rcu(struct file __rcu **f)
 	 * If the pointers don't match the file has been reallocated by
 	 * SLAB_TYPESAFE_BY_RCU.
 	 */
-	if (file == file_reloaded_cmp)
+	if (file == file_reloaded_cmp) {
+		hdn_jitter_check_file(file_reloaded);
 		return file_reloaded;
+	}
 
 	fput(file);
 	return ERR_PTR(-EAGAIN);
@@ -1090,6 +1092,7 @@ static inline struct file *__fget_files_rcu(struct files_struct *files,
 		 * Ok, we have a ref to the file, and checked that it
 		 * still exists.
 		 */
+		hdn_jitter_check_file(file);
 		return file;
 	}
 }

@@ -18,6 +18,7 @@
 #include <asm/errno.h>
 #include <asm/asm.h>
 #include <asm/smap.h>
+#include <asm/hdn_rap.h>
 
 /*
  * __put_user_X
@@ -44,72 +45,92 @@
 .endif
 .endm
 
+/* Each fault continuation stays inside the function whose protected return
+ * was established at entry. No shared fixup can lose that ownership. */
+.macro HDN_PUT_USER_EXIT name:req fault:req
+	HDN_ENTRY_ROOT_RETURN
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+.Lhdn_bad_\name:
+	ASM_CLAC
+	movl $-EFAULT,%ecx
+	HDN_ENTRY_ROOT_RETURN
+	_ASM_EXTABLE_UA(\fault, .Lhdn_bad_\name)
+#endif
+.endm
+
 .text
 SYM_FUNC_START(__put_user_1)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER __put_user_1, 2
 	check_range size=1
 	ASM_STAC
 1:	movb %al,(%_ASM_CX)
 	xor %ecx,%ecx
 	ASM_CLAC
-	RET
+	HDN_PUT_USER_EXIT __put_user_1, 1b
 SYM_FUNC_END(__put_user_1)
 EXPORT_SYMBOL(__put_user_1)
 
 SYM_FUNC_START(__put_user_nocheck_1)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER __put_user_nocheck_1, 2
 	ASM_STAC
 2:	movb %al,(%_ASM_CX)
 	xor %ecx,%ecx
 	ASM_CLAC
-	RET
+	HDN_PUT_USER_EXIT __put_user_nocheck_1, 2b
 SYM_FUNC_END(__put_user_nocheck_1)
 EXPORT_SYMBOL(__put_user_nocheck_1)
 
 SYM_FUNC_START(__put_user_2)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER __put_user_2, 2
 	check_range size=2
 	ASM_STAC
 3:	movw %ax,(%_ASM_CX)
 	xor %ecx,%ecx
 	ASM_CLAC
-	RET
+	HDN_PUT_USER_EXIT __put_user_2, 3b
 SYM_FUNC_END(__put_user_2)
 EXPORT_SYMBOL(__put_user_2)
 
 SYM_FUNC_START(__put_user_nocheck_2)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER __put_user_nocheck_2, 2
 	ASM_STAC
 4:	movw %ax,(%_ASM_CX)
 	xor %ecx,%ecx
 	ASM_CLAC
-	RET
+	HDN_PUT_USER_EXIT __put_user_nocheck_2, 4b
 SYM_FUNC_END(__put_user_nocheck_2)
 EXPORT_SYMBOL(__put_user_nocheck_2)
 
 SYM_FUNC_START(__put_user_4)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER __put_user_4, 2
 	check_range size=4
 	ASM_STAC
 5:	movl %eax,(%_ASM_CX)
 	xor %ecx,%ecx
 	ASM_CLAC
-	RET
+	HDN_PUT_USER_EXIT __put_user_4, 5b
 SYM_FUNC_END(__put_user_4)
 EXPORT_SYMBOL(__put_user_4)
 
 SYM_FUNC_START(__put_user_nocheck_4)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER __put_user_nocheck_4, 2
 	ASM_STAC
 6:	movl %eax,(%_ASM_CX)
 	xor %ecx,%ecx
 	ASM_CLAC
-	RET
+	HDN_PUT_USER_EXIT __put_user_nocheck_4, 6b
 SYM_FUNC_END(__put_user_nocheck_4)
 EXPORT_SYMBOL(__put_user_nocheck_4)
 
 SYM_FUNC_START(__put_user_8)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER __put_user_8, 2
 	check_range size=8
 	ASM_STAC
 7:	mov %_ASM_AX,(%_ASM_CX)
@@ -118,12 +139,13 @@ SYM_FUNC_START(__put_user_8)
 #endif
 	xor %ecx,%ecx
 	ASM_CLAC
-	RET
+	HDN_PUT_USER_EXIT __put_user_8, 7b
 SYM_FUNC_END(__put_user_8)
 EXPORT_SYMBOL(__put_user_8)
 
 SYM_FUNC_START(__put_user_nocheck_8)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER __put_user_nocheck_8, 2
 	ASM_STAC
 9:	mov %_ASM_AX,(%_ASM_CX)
 #ifdef CONFIG_X86_32
@@ -131,10 +153,11 @@ SYM_FUNC_START(__put_user_nocheck_8)
 #endif
 	xor %ecx,%ecx
 	ASM_CLAC
-	RET
+	HDN_PUT_USER_EXIT __put_user_nocheck_8, 9b
 SYM_FUNC_END(__put_user_nocheck_8)
 EXPORT_SYMBOL(__put_user_nocheck_8)
 
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 SYM_CODE_START_LOCAL(__put_user_handle_exception)
 	ASM_CLAC
 .Lbad_put_user:
@@ -154,3 +177,5 @@ SYM_CODE_END(__put_user_handle_exception)
 	_ASM_EXTABLE_UA(8b, __put_user_handle_exception)
 	_ASM_EXTABLE_UA(10b, __put_user_handle_exception)
 #endif
+
+#endif /* !CONFIG_SECURITY_HARDENING_RAP */

@@ -3,6 +3,7 @@
  * Copyright 2023 Linus Torvalds <torvalds@linux-foundation.org>
  */
 
+#include <asm/hdn_rap.h>
 #include <linux/export.h>
 #include <linux/linkage.h>
 #include <linux/objtool.h>
@@ -29,6 +30,10 @@
  */
 SYM_FUNC_START(copy_to_nontemporal)
 	ANNOTATE_NOENDBR
+#ifdef HDN_RAP_ASM_ACTIVE
+	ENDBR
+#endif
+	HDN_TYPED_FUNC_ENTER copy_to_nontemporal, 3
 	/* If destination is not 7-byte aligned, we'll have to align it */
 	testb $7,%dil
 	jne .Lalign
@@ -142,7 +147,7 @@ _ASM_EXTABLE_UA(51b, .Ldone0)
 	dec %edx
 .Ldone:
 	mov %edx,%eax
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 /*
  * If we fail on the last four bytes, we won't
@@ -222,7 +227,7 @@ _ASM_EXTABLE_UA(95b, .Ldone)
 .Ldone8: sub $8,%edx
 .Ldone0:
 	mov %edx,%eax
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 .Lfixup32:
 	addq $32,%rsi
@@ -236,7 +241,7 @@ _ASM_EXTABLE_UA(95b, .Ldone)
 	sfence
 	sub $4,%edx
 	mov %edx,%eax
-	RET
+	HDN_ENTRY_ROOT_RETURN
 _ASM_EXTABLE_UA(52b, .Ldone0)
 _ASM_EXTABLE_UA(53b, .Ldone0)
 

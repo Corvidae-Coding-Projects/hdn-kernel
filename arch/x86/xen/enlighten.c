@@ -100,7 +100,7 @@ void xen_hypercall_setfunc(void)
  */
 noinstr void *__xen_hypercall_setfunc(void)
 {
-	void (*func)(void);
+	typeof(&xen_hypercall_func) func;
 
 	/*
 	 * Note that __xen_hypercall_setfunc() is noinstr only due to a nasty

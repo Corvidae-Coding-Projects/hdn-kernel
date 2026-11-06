@@ -3,6 +3,7 @@
 #define _ASM_X86_HWEIGHT_H
 
 #include <asm/cpufeatures.h>
+#include <asm/hdn_rap_call.h>
 
 #ifdef CONFIG_64BIT
 #define REG_IN "D"
@@ -16,10 +17,22 @@ static __always_inline unsigned int __arch_hweight32(unsigned int w)
 {
 	unsigned int res;
 
-	asm_inline (ALTERNATIVE("call __sw_hweight32",
+	asm_inline (
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+			ALTERNATIVE("jmp 990f", "", X86_FEATURE_POPCNT)
+			"popcntl %[val], %[cnt]\n\tjmp 992f\n\t"
+			"990:\n\t" HDN_ASM_C_CALL("__sw_hweight32")
+			"992:\n\t"
+#else
+			ALTERNATIVE("call __sw_hweight32",
 				"popcntl %[val], %[cnt]", X86_FEATURE_POPCNT)
+#endif
 			 : [cnt] "=" REG_OUT (res), ASM_CALL_CONSTRAINT
-			 : [val] REG_IN (w));
+			 : [val] REG_IN (w)
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+			 : "r10", "r11", "cc"
+#endif
+			 );
 
 	return res;
 }
@@ -45,10 +58,22 @@ static __always_inline unsigned long __arch_hweight64(__u64 w)
 {
 	unsigned long res;
 
-	asm_inline (ALTERNATIVE("call __sw_hweight64",
+	asm_inline (
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+			ALTERNATIVE("jmp 990f", "", X86_FEATURE_POPCNT)
+			"popcntq %[val], %[cnt]\n\tjmp 992f\n\t"
+			"990:\n\t" HDN_ASM_C_CALL("__sw_hweight64")
+			"992:\n\t"
+#else
+			ALTERNATIVE("call __sw_hweight64",
 				"popcntq %[val], %[cnt]", X86_FEATURE_POPCNT)
+#endif
 			 : [cnt] "=" REG_OUT (res), ASM_CALL_CONSTRAINT
-			 : [val] REG_IN (w));
+			 : [val] REG_IN (w)
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+			 : "r10", "r11", "cc"
+#endif
+			 );
 
 	return res;
 }

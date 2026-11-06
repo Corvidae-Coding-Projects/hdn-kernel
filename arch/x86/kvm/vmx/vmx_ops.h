@@ -5,6 +5,7 @@
 #include <linux/nospec.h>
 
 #include <asm/vmx.h>
+#include <asm/hdn_vmcs.h>
 
 #include "vmx_onhyperv.h"
 #include "vmcs.h"
@@ -286,16 +287,25 @@ static __always_inline void vmcs_set_bits(unsigned long field, u32 mask)
 	__vmcs_writel(field, __vmcs_readl(field) | mask);
 }
 
+static inline unsigned long vmcs_physical_address(struct vmcs *vmcs)
+{
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	return hdn_vmcs_pa(vmcs);
+#else
+	return __pa(vmcs);
+#endif
+}
+
 static inline void vmcs_clear(struct vmcs *vmcs)
 {
-	u64 phys_addr = __pa(vmcs);
+	u64 phys_addr = vmcs_physical_address(vmcs);
 
 	vmx_asm1(vmclear, "m"(phys_addr), vmcs, phys_addr);
 }
 
 static inline void vmcs_load(struct vmcs *vmcs)
 {
-	u64 phys_addr = __pa(vmcs);
+	u64 phys_addr = vmcs_physical_address(vmcs);
 
 	if (kvm_is_using_evmcs())
 		return evmcs_load(phys_addr);

@@ -29,6 +29,9 @@
 #include <linux/task_work.h>
 #include <linux/irq_work.h>
 #include <linux/buildid.h>
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+#include <asm/hdn_rap_bpf.h>
+#endif
 
 #include "../../lib/kstrtox.h"
 
@@ -3125,6 +3128,7 @@ __bpf_kfunc void bpf_rcu_read_unlock(void)
 	rcu_read_unlock();
 }
 
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 struct bpf_throw_ctx {
 	struct bpf_prog_aux *aux;
 	u64 sp;
@@ -3155,9 +3159,18 @@ static bool bpf_stack_walker(void *cookie, u64 ip, u64 sp, u64 bp)
 	ctx->bp = bp;
 	return false;
 }
+#endif
 
 __bpf_kfunc void bpf_throw(u64 cookie)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	unsigned long sp, bp;
+	bpf_callback_t callback;
+
+	callback = (bpf_callback_t)hdn_rap_bpf_throw_info(&sp, &bp);
+	kasan_unpoison_task_stack_below((void *)sp);
+	callback(cookie, sp, bp, 0, 0);
+#else
 	struct bpf_throw_ctx ctx = {};
 
 	arch_bpf_stack_walk(bpf_stack_walker, &ctx);
@@ -3172,6 +3185,7 @@ __bpf_kfunc void bpf_throw(u64 cookie)
 	 */
 	kasan_unpoison_task_stack_below((void *)(long)ctx.sp);
 	ctx.aux->bpf_exception_cb(cookie, ctx.sp, ctx.bp, 0, 0);
+#endif
 	WARN(1, "A call to BPF exception callback should never return\n");
 }
 

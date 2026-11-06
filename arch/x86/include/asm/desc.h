@@ -8,6 +8,7 @@
 #include <asm/fixmap.h>
 #include <asm/irq_vectors.h>
 #include <asm/cpu_entry_area.h>
+#include <asm/hdn_gdt.h>
 
 #include <linux/debug_locks.h>
 #include <linux/smp.h>
@@ -47,13 +48,13 @@ struct gdt_page {
 
 DECLARE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page);
 
-/* Provide the original GDT */
+/* Canonical backing address; runtime writes must use descriptor helpers. */
 static inline struct desc_struct *get_cpu_gdt_rw(unsigned int cpu)
 {
 	return per_cpu(gdt_page, cpu).gdt;
 }
 
-/* Provide the current original GDT */
+/* Canonical backing can be read-only; the legacy name is not write authority. */
 static inline struct desc_struct *get_current_gdt_rw(void)
 {
 	return this_cpu_ptr(&gdt_page)->gdt;
@@ -155,7 +156,7 @@ native_write_gdt_entry(struct desc_struct *gdt, int entry, const void *desc, int
 	default:	size = sizeof(*gdt);		break;
 	}
 
-	memcpy(&gdt[entry], desc, size);
+	hdn_gdt_write(gdt, entry, desc, size);
 }
 
 static inline void set_tssldt_descriptor(void *d, unsigned long addr,
@@ -258,6 +259,8 @@ static inline void native_load_tr_desc(void)
 	bool restore = 0;
 	struct desc_struct *fixmap_gdt;
 
+	if (hdn_gdt_load_tr())
+		return;
 	native_store_gdt(&gdt);
 	fixmap_gdt = get_cpu_gdt_ro(cpu);
 
@@ -292,10 +295,9 @@ static inline unsigned long native_store_tr(void)
 static inline void native_load_tls(struct thread_struct *t, unsigned int cpu)
 {
 	struct desc_struct *gdt = get_cpu_gdt_rw(cpu);
-	unsigned int i;
 
-	for (i = 0; i < GDT_ENTRY_TLS_ENTRIES; i++)
-		gdt[GDT_ENTRY_TLS_MIN + i] = t->tls_array[i];
+	hdn_gdt_write(gdt, GDT_ENTRY_TLS_MIN, t->tls_array,
+		      GDT_ENTRY_TLS_ENTRIES * sizeof(*gdt));
 }
 
 DECLARE_PER_CPU(bool, __tss_limit_invalid);

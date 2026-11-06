@@ -10,6 +10,8 @@
 #include <linux/export.h>
 #include <linux/cred.h>
 #include <linux/slab.h>
+#include <linux/hdn_alloc.h>
+#include <linux/hdn_jitter.h>
 #include <linux/sched.h>
 #include <linux/sched/coredump.h>
 #include <linux/sched/signal.h>
@@ -62,7 +64,7 @@ static void put_cred_rcu(struct rcu_head *rcu)
 	if (cred->ucounts)
 		put_ucounts(cred->ucounts);
 	put_user_ns(cred->user_ns);
-	kmem_cache_free(cred_jar, cred);
+	hdn_jitter_free(cred_jar, cred);
 }
 
 /**
@@ -73,6 +75,7 @@ static void put_cred_rcu(struct rcu_head *rcu)
  */
 void __put_cred(struct cred *cred)
 {
+	hdn_jitter_check_cred(cred);
 	kdebug("__put_cred(%p{%ld})", cred,
 	       atomic_long_read(&cred->usage));
 
@@ -137,6 +140,7 @@ const struct cred *get_task_cred(struct task_struct *task)
 		BUG_ON(!cred);
 	} while (!get_cred_rcu(cred));
 
+	hdn_jitter_check_cred(cred);
 	rcu_read_unlock();
 	return cred;
 }
@@ -150,7 +154,7 @@ struct cred *cred_alloc_blank(void)
 {
 	struct cred *new;
 
-	new = kmem_cache_zalloc(cred_jar, GFP_KERNEL);
+	new = hdn_jitter_alloc(cred_jar, GFP_KERNEL | __GFP_ZERO);
 	if (!new)
 		return NULL;
 
@@ -185,13 +189,14 @@ struct cred *prepare_creds(void)
 	const struct cred *old;
 	struct cred *new;
 
-	new = kmem_cache_alloc(cred_jar, GFP_KERNEL);
+	new = hdn_jitter_alloc(cred_jar, GFP_KERNEL);
 	if (!new)
 		return NULL;
 
 	kdebug("prepare_creds() alloc %p", new);
 
 	old = task->cred;
+	hdn_jitter_check_cred(old);
 	memcpy(new, old, sizeof(struct cred));
 
 	new->non_rcu = 0;
@@ -474,9 +479,12 @@ int commit_creds(struct cred *new)
 	struct task_struct *task = current;
 	const struct cred *old = task->real_cred;
 	bool propagate_setxid;
-	unsigned int setxid_securebits = old->securebits;
+	unsigned int setxid_securebits;
 	int ret;
 
+	hdn_jitter_check_cred(old);
+	hdn_jitter_check_cred(new);
+	setxid_securebits = old->securebits;
 	kdebug("commit_creds(%p{%ld})", new,
 	       atomic_long_read(&new->usage));
 
@@ -653,9 +661,15 @@ int set_cred_ucounts(struct cred *new)
  */
 void __init cred_init(void)
 {
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_JITTER
+	cred_jar = hdn_jitter_create(HDN_JITTER_CRED, "cred_jar",
+				   sizeof(struct cred), __alignof__(struct cred), HDN_ALLOC_CRED);
+#else
 	/* allocate a slab in which we can store credentials */
 	cred_jar = KMEM_CACHE(cred,
-			      SLAB_HWCACHE_ALIGN | SLAB_PANIC | SLAB_ACCOUNT);
+			      SLAB_HWCACHE_ALIGN | SLAB_PANIC | SLAB_ACCOUNT | SLAB_HDN_DOMAIN);
+	hdn_cache_domain(cred_jar, HDN_ALLOC_CRED);
+#endif
 }
 
 /**
@@ -682,7 +696,7 @@ struct cred *prepare_kernel_cred(struct task_struct *daemon)
 	if (WARN_ON_ONCE(!daemon))
 		return NULL;
 
-	new = kmem_cache_alloc(cred_jar, GFP_KERNEL);
+	new = hdn_jitter_alloc(cred_jar, GFP_KERNEL);
 	if (!new)
 		return NULL;
 

@@ -3,6 +3,8 @@
  * Interrupt descriptor table related code
  */
 #include <linux/interrupt.h>
+#include <linux/hdn_rap.h>
+#include <linux/export.h>
 
 #include <asm/cpu_entry_area.h>
 #include <asm/set_memory.h>
@@ -12,6 +14,7 @@
 #include <asm/hw_irq.h>
 #include <asm/ia32.h>
 #include <asm/idtentry.h>
+#include <asm/hdn_gdt.h>
 
 #define DPL0		0x0
 #define DPL3		0x3
@@ -175,10 +178,48 @@ static const __initconst struct idt_data apic_idts[] = {
 /* Must be page-aligned because the real IDT is used in the cpu entry area */
 static gate_desc idt_table[IDT_ENTRIES] __page_aligned_bss;
 
+#ifdef CONFIG_SECURITY_HARDENING_GDT
+static bool hdn_idt_ready __ro_after_init;
+
+bool hdn_idt_sealed(void)
+{
+	return smp_load_acquire(&hdn_idt_ready);
+}
+
+bool hdn_idt_protected_pfn(unsigned long first, unsigned long last)
+{
+	unsigned long pfn = PFN_DOWN(__pa_symbol(idt_table));
+
+	return hdn_idt_sealed() && pfn >= first && pfn <= last;
+}
+#endif
+
 static struct desc_ptr idt_descr __ro_after_init = {
 	.size		= IDT_TABLE_SIZE - 1,
 	.address	= (unsigned long) idt_table,
 };
+
+#if defined(CONFIG_SECURITY_HARDENING_RAP) && IS_ENABLED(CONFIG_KVM_INTEL)
+/* VMX supplies a vector, never a caller-selected entry address. The sealed
+ * table used by hardware is the sole authority for this synthetic IRQ. */
+unsigned long notrace hdn_rap_vmx_vector(unsigned int vector)
+{
+	const gate_desc *gate;
+	struct desc_ptr live;
+
+	store_idt(&live);
+	if (!irqs_disabled() || !hdn_idt_sealed() ||
+	    live.address != idt_descr.address || live.size != idt_descr.size ||
+	    vector < FIRST_EXTERNAL_VECTOR || vector >= IDT_ENTRIES)
+		__hdn_rap_fail(HDN_RAP_FAIL_TARGET);
+	gate = &idt_table[vector];
+	if (!gate->bits.p || gate->bits.type != GATE_INTERRUPT || gate->bits.dpl ||
+	    gate->bits.ist || gate->segment != __KERNEL_CS)
+		__hdn_rap_fail(HDN_RAP_FAIL_TARGET);
+	return gate_offset(gate);
+}
+EXPORT_SYMBOL_FOR_KVM(hdn_rap_vmx_vector);
+#endif
 
 void load_current_idt(void)
 {
@@ -312,7 +353,12 @@ void __init idt_setup_apic_and_irq_gates(void)
 	load_idt(&idt_descr);
 
 	/* Make the IDT table read only */
-	set_memory_ro((unsigned long)&idt_table, 1);
+	if (set_memory_ro((unsigned long)&idt_table, 1) &&
+	    IS_ENABLED(CONFIG_SECURITY_HARDENING_GDT))
+		panic("HDN could not seal interrupt descriptors");
+#ifdef CONFIG_SECURITY_HARDENING_GDT
+	smp_store_release(&hdn_idt_ready, true);
+#endif
 
 	idt_setup_done = true;
 }

@@ -4,12 +4,14 @@
 #include <linux/export.h>
 #include <linux/linkage.h>
 #include <asm/nospec-branch.h>
+#include <asm/hdn_rap.h>
 
 	.code64
 	.section .text, "ax"
 
 SYM_FUNC_START(arch_bpf_timed_may_goto)
 	ANNOTATE_NOENDBR
+	HDN_REGS_FUNC arch_bpf_timed_may_goto
 
 	/*
 	 * r10 passes us stack depth, load the pointer to count and timestamp
@@ -37,7 +39,7 @@ SYM_FUNC_START(arch_bpf_timed_may_goto)
 
 	/* Emit call depth accounting for call below. */
 	CALL_DEPTH_ACCOUNT
-	call bpf_check_timed_may_goto
+	HDN_C_CALL bpf_check_timed_may_goto
 
 	/* BPF_REG_AX=r10 will be stored into count, so move return value to it. */
 	movq %rax, %r10
@@ -51,5 +53,6 @@ SYM_FUNC_START(arch_bpf_timed_may_goto)
 	popq %rax
 
 	leave
-	RET
+	HDN_REGS_RETURN
 SYM_FUNC_END(arch_bpf_timed_may_goto)
+HDN_ASM_FUNCTION_END arch_bpf_timed_may_goto

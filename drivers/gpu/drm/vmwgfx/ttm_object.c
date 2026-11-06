@@ -471,7 +471,10 @@ void ttm_object_device_release(struct ttm_object_device **p_tdev)
  */
 static bool __must_check get_dma_buf_unless_doomed(struct dma_buf *dmabuf)
 {
-	return file_ref_get(&dmabuf->file->f_ref);
+	if (!file_ref_get(&dmabuf->file->f_ref))
+		return false;
+	hdn_jitter_check_file(dmabuf->file);
+	return true;
 }
 
 /**

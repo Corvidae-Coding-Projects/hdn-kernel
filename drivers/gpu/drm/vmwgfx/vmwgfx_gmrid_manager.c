@@ -86,7 +86,7 @@ static int vmw_gmrid_man_get_node(struct ttm_resource_manager *man,
 			uint32_t new_max_pages = 0;
 
 			DRM_WARN("vmwgfx: mob memory overflow. Consider increasing guest RAM and graphicsMemory.\n");
-			vmw_host_printf("vmwgfx, warning: mob memory overflow. Consider increasing guest RAM and graphicsMemory.\n");
+			vmw_host_log("vmwgfx, warning: mob memory overflow. Consider increasing guest RAM and graphicsMemory.\n");
 
 			if (gman->max_gmr_pages > (max_graphics_pages / 2)) {
 				DRM_WARN("vmwgfx: guest requires more than half of RAM for graphics.\n");
@@ -103,7 +103,7 @@ static int vmw_gmrid_man_get_node(struct ttm_resource_manager *man,
 				snprintf(buf, sizeof(buf),
 					 "vmwgfx, error: guest graphics is out of memory (mob limit at: %u KiB).\n",
 					 ((gman->max_gmr_pages) << (PAGE_SHIFT - 10)));
-				vmw_host_printf(buf);
+				vmw_host_log(buf);
 				DRM_WARN("%s", buf);
 				goto nospace;
 			}

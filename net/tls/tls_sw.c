@@ -65,7 +65,8 @@ struct tls_decrypt_ctx {
 	u8 aad[TLS_MAX_AAD_SIZE];
 	u8 tail;
 	bool free_sgout;
-	struct scatterlist sg[];
+	size_t sg_count;
+	struct scatterlist sg[] __counted_by(sg_count);
 };
 
 noinline void tls_err_abort(struct sock *sk, int err)
@@ -1540,7 +1541,8 @@ static int tls_decrypt_sg(struct sock *sk, struct iov_iter *out_iov,
 	struct tls_context *tls_ctx = tls_get_ctx(sk);
 	struct tls_sw_context_rx *ctx = tls_sw_ctx_rx(tls_ctx);
 	struct tls_prot_info *prot = &tls_ctx->prot_info;
-	int n_sgin, n_sgout, aead_size, err, pages = 0;
+	int n_sgin, n_sgout, err, pages = 0;
+	size_t aead_size, alloc_size, sg_count;
 	struct sk_buff *skb = tls_strp_msg(ctx);
 	const struct strp_msg *rxm = strp_msg(skb);
 	const struct tls_msg *tlm = tls_msg(skb);
@@ -1562,11 +1564,13 @@ static int tls_decrypt_sg(struct sock *sk, struct iov_iter *out_iov,
 	if (darg->zc && (out_iov || out_sg)) {
 		clear_skb = NULL;
 
-		if (out_iov)
-			n_sgout = 1 + tail_pages +
-				iov_iter_npages_cap(out_iov, INT_MAX, data_len);
-		else
+		if (out_iov) {
+			n_sgout = iov_iter_npages_cap(out_iov, INT_MAX, data_len);
+			if (check_add_overflow(n_sgout, 1 + tail_pages, &n_sgout))
+				return -EOVERFLOW;
+		} else {
 			n_sgout = sg_nents(out_sg);
+		}
 	} else {
 		darg->zc = false;
 
@@ -1578,16 +1582,25 @@ static int tls_decrypt_sg(struct sock *sk, struct iov_iter *out_iov,
 	}
 
 	/* Increment to accommodate AAD */
-	n_sgin = n_sgin + 1;
+	err = -EOVERFLOW;
+	if (check_add_overflow(n_sgin, 1, &n_sgin) || n_sgout < 1 ||
+	    check_add_overflow((size_t)n_sgin, (size_t)n_sgout, &sg_count))
+		goto exit_free_skb;
 
 	/* Allocate a single block of memory which contains
 	 *   aead_req || tls_decrypt_ctx.
 	 * Both structs are variable length.
 	 */
-	aead_size = sizeof(*aead_req) + crypto_aead_reqsize(ctx->aead_recv);
-	aead_size = ALIGN(aead_size, __alignof__(*dctx));
-	mem = kmalloc(aead_size + struct_size(dctx, sg, size_add(n_sgin, n_sgout)),
-		      sk->sk_allocation);
+	aead_size = size_add(sizeof(*aead_req),
+			     crypto_aead_reqsize(ctx->aead_recv));
+	if (check_add_overflow(aead_size, (size_t)__alignof__(*dctx) - 1,
+			       &aead_size))
+		goto exit_free_skb;
+	aead_size = round_down(aead_size, __alignof__(*dctx));
+	alloc_size = size_add(aead_size, struct_size(dctx, sg, sg_count));
+	if (alloc_size == SIZE_MAX)
+		goto exit_free_skb;
+	mem = kmalloc(alloc_size, sk->sk_allocation);
 	if (!mem) {
 		err = -ENOMEM;
 		goto exit_free_skb;
@@ -1596,6 +1609,7 @@ static int tls_decrypt_sg(struct sock *sk, struct iov_iter *out_iov,
 	/* Segment the allocated memory */
 	aead_req = (struct aead_request *)mem;
 	dctx = (struct tls_decrypt_ctx *)(mem + aead_size);
+	dctx->sg_count = sg_count;
 	dctx->sk = sk;
 	sgin = &dctx->sg[0];
 	sgout = &dctx->sg[n_sgin];

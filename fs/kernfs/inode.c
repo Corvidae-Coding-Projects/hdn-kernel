@@ -118,6 +118,8 @@ int kernfs_iop_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 
 	if (!kn)
 		return -EINVAL;
+	if (hdn_kernfs_hidden(kn))
+		return -ENOENT;
 
 	root = kernfs_root(kn);
 	down_write(&root->kernfs_iattr_rwsem);
@@ -142,6 +144,8 @@ ssize_t kernfs_iop_listxattr(struct dentry *dentry, char *buf, size_t size)
 	struct kernfs_node *kn = kernfs_dentry_node(dentry);
 	struct kernfs_iattrs *attrs;
 
+	if (hdn_kernfs_hidden(kn))
+		return -ENOENT;
 	attrs = kernfs_iattrs(kn);
 	if (!attrs)
 		return -ENOMEM;
@@ -190,6 +194,8 @@ int kernfs_iop_getattr(struct mnt_idmap *idmap,
 	struct kernfs_node *kn = inode->i_private;
 	struct kernfs_root *root = kernfs_root(kn);
 
+	if (hdn_kernfs_hidden(kn))
+		return -ENOENT;
 	down_read(&root->kernfs_iattr_rwsem);
 	kernfs_refresh_inode(kn, inode);
 	generic_fillattr(&nop_mnt_idmap, request_mask, inode, stat);
@@ -286,6 +292,8 @@ int kernfs_iop_permission(struct mnt_idmap *idmap,
 	kn = inode->i_private;
 	root = kernfs_root(kn);
 
+	if (hdn_kernfs_hidden(kn))
+		return -ENOENT;
 	down_read(&root->kernfs_iattr_rwsem);
 	kernfs_refresh_inode(kn, inode);
 	ret = generic_permission(&nop_mnt_idmap, inode, mask);
@@ -329,6 +337,8 @@ static int kernfs_vfs_xattr_get(const struct xattr_handler *handler,
 	const char *name = xattr_full_name(handler, suffix);
 	struct kernfs_node *kn = inode->i_private;
 
+	if (hdn_kernfs_hidden(kn))
+		return -ENOENT;
 	return kernfs_xattr_get(kn, name, value, size);
 }
 
@@ -341,6 +351,8 @@ static int kernfs_vfs_xattr_set(const struct xattr_handler *handler,
 	const char *name = xattr_full_name(handler, suffix);
 	struct kernfs_node *kn = inode->i_private;
 
+	if (hdn_kernfs_hidden(kn))
+		return -ENOENT;
 	return kernfs_xattr_set(kn, name, value, size, flags);
 }
 
@@ -417,6 +429,8 @@ static int kernfs_vfs_user_xattr_set(const struct xattr_handler *handler,
 	struct kernfs_node *kn = inode->i_private;
 	struct kernfs_iattrs *attrs;
 
+	if (hdn_kernfs_hidden(kn))
+		return -ENOENT;
 	if (!(kernfs_root(kn)->flags & KERNFS_ROOT_SUPPORT_USER_XATTR))
 		return -EOPNOTSUPP;
 

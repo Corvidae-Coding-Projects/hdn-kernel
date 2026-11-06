@@ -55,6 +55,7 @@
 #include <asm/insn.h>
 #include <asm/debugreg.h>
 #include <asm/ibt.h>
+#include <asm/hdn_rap_probe.h>
 
 #include "common.h"
 
@@ -368,6 +369,46 @@ out:
 	return true;
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+/* Match the compiler's complete, fixed entry protocol. No instruction inside
+ * this pair may be replaced or single-stepped independently: the protected
+ * return record must exist before a probe can install a return hook. */
+static unsigned long rap_prologue_end(unsigned long address)
+{
+	extern void __hdn_rap_enter(void);
+	u8 bytes[12];
+	s32 continuation, callee;
+
+	if (is_endbr((u32 *)address))
+		address += 4;
+	if (copy_from_kernel_nofault(bytes, (void *)address, sizeof(bytes)))
+		return 0;
+	if (bytes[0] != 0x4c || bytes[1] != 0x8d || bytes[2] != 0x1d || bytes[7] != 0xe8)
+		return 0;
+	memcpy(&continuation, bytes + 3, sizeof(continuation));
+	memcpy(&callee, bytes + 8, sizeof(callee));
+	if (continuation != 5 || address + 12 + callee != (unsigned long)__hdn_rap_enter)
+		return 0;
+	return address + 12;
+}
+NOKPROBE_SYMBOL(rap_prologue_end);
+
+bool arch_within_kprobe_blacklist(unsigned long address)
+{
+	unsigned long offset, start, end;
+
+	if (address >= (unsigned long)__kprobes_text_start &&
+	    address < (unsigned long)__kprobes_text_end)
+		return true;
+	if (!kallsyms_lookup_size_offset(address, NULL, &offset))
+		return false;
+	start = address - offset;
+	end = rap_prologue_end(start);
+	return end && address < end;
+}
+NOKPROBE_SYMBOL(arch_within_kprobe_blacklist);
+#endif
+
 /* If x86 supports IBT (ENDBR) it must be skipped. */
 kprobe_opcode_t *arch_adjust_kprobe_addr(unsigned long addr, unsigned long offset,
 					 bool *on_func_entry)
@@ -380,6 +421,27 @@ kprobe_opcode_t *arch_adjust_kprobe_addr(unsigned long addr, unsigned long offse
 	} else {
 		*on_func_entry = !offset;
 	}
+
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	{
+		unsigned long end = rap_prologue_end(addr);
+
+		if (end) {
+			unsigned long trace = ftrace_location(addr);
+
+			if (*on_func_entry || addr + offset == end ||
+			    (trace == end + 7 && addr + offset == trace)) {
+				*on_func_entry = true;
+				/* Use an actual breakpoint snapshot for entry probes,
+				 * including fault injection. The first body instruction
+				 * precedes fentry's call and has not allocated locals. */
+				offset = end - addr;
+			} else if (addr + offset < end) {
+				return NULL;
+			}
+		}
+	}
+#endif
 
 	return (kprobe_opcode_t *)(addr + offset);
 }
@@ -457,7 +519,7 @@ static int prepare_singlestep(kprobe_opcode_t *buf, struct kprobe *p,
 {
 	int len = insn->length;
 
-	if (!IS_ENABLED(CONFIG_PREEMPTION) &&
+	if (!IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP) && !IS_ENABLED(CONFIG_PREEMPTION) &&
 	    !p->post_handler && can_boost(insn, p->addr) &&
 	    MAX_INSN_SIZE - len >= JMP32_INSN_SIZE) {
 		/*
@@ -758,6 +820,33 @@ static int arch_copy_kprobe(struct kprobe *p)
 	return 0;
 }
 
+static int rap_prepare_kprobe(struct kprobe *p)
+{
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	enum hdn_rap_probe_op op;
+
+	if (!p->ainsn.emulate_op)
+		op = HDN_PROBE_STEP;
+	else if (p->ainsn.emulate_op == kprobe_emulate_ifmodifiers)
+		op = HDN_PROBE_FLAGS;
+	else if (p->ainsn.emulate_op == kprobe_emulate_call)
+		op = HDN_PROBE_CALL;
+	else if (p->ainsn.emulate_op == kprobe_emulate_jmp)
+		op = HDN_PROBE_JUMP;
+	else if (p->ainsn.emulate_op == kprobe_emulate_jcc)
+		op = HDN_PROBE_COND;
+	else if (p->ainsn.emulate_op == kprobe_emulate_loop)
+		op = HDN_PROBE_LOOP;
+	else
+		/* Raw returns and indirect transfers exist only inside the
+		 * blacklisted, exact-sequence RAP adapters in this configuration. */
+		return -EOPNOTSUPP;
+	return hdn_rap_probe_prepare(p, op);
+#else
+	return 0;
+#endif
+}
+
 int arch_prepare_kprobe(struct kprobe *p)
 {
 	int ret;
@@ -776,6 +865,8 @@ int arch_prepare_kprobe(struct kprobe *p)
 		return -ENOMEM;
 
 	ret = arch_copy_kprobe(p);
+	if (!ret)
+		ret = rap_prepare_kprobe(p);
 	if (ret) {
 		free_insn_slot(p->ainsn.insn, 0);
 		p->ainsn.insn = NULL;
@@ -804,6 +895,7 @@ void arch_disarm_kprobe(struct kprobe *p)
 
 void arch_remove_kprobe(struct kprobe *p)
 {
+	hdn_rap_probe_release(p);
 	if (p->ainsn.insn) {
 		/* Record the perf event before freeing the slot */
 		perf_event_text_poke(p->ainsn.insn, p->ainsn.insn,
@@ -863,6 +955,7 @@ NOKPROBE_SYMBOL(kprobe_post_process);
 static void setup_singlestep(struct kprobe *p, struct pt_regs *regs,
 			     struct kprobe_ctlblk *kcb, int reenter)
 {
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 	if (setup_detour_execution(p, regs, reenter))
 		return;
 
@@ -880,6 +973,7 @@ static void setup_singlestep(struct kprobe *p, struct pt_regs *regs,
 		return;
 	}
 #endif
+#endif /* !CONFIG_SECURITY_HARDENING_RAP */
 	if (reenter) {
 		save_previous_kprobe(kcb);
 		set_current_kprobe(p, regs, kcb);
@@ -887,6 +981,12 @@ static void setup_singlestep(struct kprobe *p, struct pt_regs *regs,
 	} else
 		kcb->kprobe_status = KPROBE_HIT_SS;
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* The protected descriptor decides whether to emulate or single-step;
+	 * mutable ainsn fields and handler edits cannot choose the resume IP. */
+	if (hdn_rap_probe_start(regs, p))
+		kprobe_post_process(p, regs, kcb);
+#else
 	if (p->ainsn.emulate_op) {
 		p->ainsn.emulate_op(p, regs);
 		kprobe_post_process(p, regs, kcb);
@@ -896,6 +996,7 @@ static void setup_singlestep(struct kprobe *p, struct pt_regs *regs,
 	/* Disable interrupt, and set ip register on trampoline */
 	regs->flags &= ~X86_EFLAGS_IF;
 	regs->ip = (unsigned long)p->ainsn.insn;
+#endif
 }
 NOKPROBE_SYMBOL(setup_singlestep);
 
@@ -1017,6 +1118,12 @@ int kprobe_int3_handler(struct pt_regs *regs)
 		}
 	} else if (kprobe_is_ss(kcb)) {
 		p = kprobe_running();
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		if (hdn_rap_probe_complete(regs, p, false, X86_TRAP_BP)) {
+			kprobe_post_process(p, regs, kcb);
+			return 1;
+		}
+#else
 		if ((unsigned long)p->ainsn.insn < regs->ip &&
 		    (unsigned long)p->ainsn.insn + MAX_INSN_SIZE > regs->ip) {
 			/* Most provably this is the second int3 for singlestep */
@@ -1024,6 +1131,7 @@ int kprobe_int3_handler(struct pt_regs *regs)
 			kprobe_post_process(p, regs, kcb);
 			return 1;
 		}
+#endif
 	} /* else: not a kprobe fault; let the kernel handle it */
 
 	return 0;
@@ -1035,7 +1143,11 @@ int kprobe_fault_handler(struct pt_regs *regs, int trapnr)
 	struct kprobe *cur = kprobe_running();
 	struct kprobe_ctlblk *kcb = get_kprobe_ctlblk();
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	if (hdn_rap_probe_complete(regs, cur, true, trapnr)) {
+#else
 	if (unlikely(regs->ip == (unsigned long)cur->ainsn.insn)) {
+#endif
 		/* This must happen on single-stepping */
 		WARN_ON(kcb->kprobe_status != KPROBE_HIT_SS &&
 			kcb->kprobe_status != KPROBE_REENTER);
@@ -1046,6 +1158,7 @@ int kprobe_fault_handler(struct pt_regs *regs, int trapnr)
 		 * and allow the page fault handler to continue as a
 		 * normal page fault.
 		 */
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 		regs->ip = (unsigned long)cur->addr;
 
 		/*
@@ -1053,6 +1166,7 @@ int kprobe_fault_handler(struct pt_regs *regs, int trapnr)
 		 * don't touch it:
 		 */
 		regs->flags |= kcb->kprobe_old_flags;
+#endif
 
 		if (kcb->kprobe_status == KPROBE_REENTER)
 			restore_previous_kprobe(kcb);

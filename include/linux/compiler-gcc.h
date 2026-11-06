@@ -39,6 +39,22 @@
 #define __latent_entropy __attribute__((latent_entropy))
 #endif
 
+#if defined(HDN_NULL_ANALYSIS_PLUGIN) && !defined(__CHECKER__)
+#define __hdn_null_attacker_entry __attribute__((hdn_null_attacker_entry))
+#define __hdn_null_probe(owner, invalidation) \
+	__attribute__((hdn_null_probe(owner, invalidation)))
+#endif
+
+#if defined(HDN_SIZE_ANALYSIS_PLUGIN) && !defined(__CHECKER__)
+#define __hdn_size_wrap(owner, reason, invalidation) \
+	__attribute__((hdn_size_wrap(owner, reason, invalidation)))
+#endif
+
+#if defined(HDN_RESPECTRE_PLUGIN) && !defined(__CHECKER__)
+#define __hdn_spec_review(category, owner, reason, invalidation) \
+	__attribute__((hdn_spec_review(category, owner, reason, invalidation)))
+#endif
+
 /*
  * calling noreturn functions, __builtin_unreachable() and __builtin_trap()
  * confuse the stack allocation in gcc, leading to overly large stack

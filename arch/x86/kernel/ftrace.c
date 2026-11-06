@@ -16,6 +16,7 @@
 #include <linux/hardirq.h>
 #include <linux/uaccess.h>
 #include <linux/ftrace.h>
+#include <linux/hdn_rap.h>
 #include <linux/percpu.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -33,6 +34,18 @@
 #include <asm/ftrace.h>
 #include <asm/nops.h>
 #include <asm/text-patching.h>
+
+#if defined(CONFIG_SECURITY_HARDENING_RAP) && !defined(CONFIG_DYNAMIC_FTRACE)
+/* Keep the indirect edge in C so the RAP compiler derives ftrace_func_t's
+ * canonical call-site identity. Static x86 tracing uses the list dispatcher:
+ * ARCH_SUPPORTS_FTRACE_OPS is absent and no register context is promised. */
+void notrace hdn_ftrace_dispatch(unsigned long ip, unsigned long parent_ip)
+{
+	ftrace_func_t func = READ_ONCE(ftrace_trace_function);
+
+	func(ip, parent_ip, NULL, NULL);
+}
+#endif
 
 #ifdef CONFIG_DYNAMIC_FTRACE
 
@@ -70,6 +83,12 @@ static const char *ftrace_nop_replace(void)
 
 static const char *ftrace_call_replace(unsigned long ip, unsigned long addr)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* This also covers early/module changes and copied callback templates.
+	 * The patch site and the kind of target must both have sealed owners. */
+	if (!hdn_rap_ftrace_patch(ip, addr))
+		__hdn_rap_fail(HDN_RAP_FAIL_TARGET);
+#endif
 	/*
 	 * No need to translate into a callthunk. The trampoline does
 	 * the depth accounting itself.
@@ -189,6 +208,8 @@ int ftrace_update_ftrace_func(ftrace_func_t func)
 	unsigned long ip;
 	const char *new;
 
+	if (!hdn_rap_target_matches((unsigned long)func, (unsigned long)ftrace_stub))
+		return -EINVAL;
 	ip = (unsigned long)(&ftrace_call);
 	new = ftrace_call_replace(ip, (unsigned long)func);
 	smp_text_poke_single((void *)ip, new, MCOUNT_INSN_SIZE, NULL);
@@ -272,6 +293,7 @@ static inline void *alloc_tramp(unsigned long size)
 }
 static inline void tramp_free(void *tramp)
 {
+	hdn_rap_ftrace_release(tramp);
 	execmem_free(tramp);
 }
 
@@ -302,8 +324,13 @@ union ftrace_op_code_union {
 	} __attribute__((packed));
 };
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+extern void __hdn_rap_return(void);
+#define RET_SIZE JMP32_INSN_SIZE
+#else
 #define RET_SIZE \
 	(IS_ENABLED(CONFIG_MITIGATION_RETPOLINE) ? 5 : 1 + IS_ENABLED(CONFIG_MITIGATION_SLS))
+#endif
 
 static unsigned long
 create_trampoline(struct ftrace_ops *ops, unsigned int *tramp_size)
@@ -321,7 +348,9 @@ create_trampoline(struct ftrace_ops *ops, unsigned int *tramp_size)
 	void *ip, *dest;
 	/* 48 8b 15 <offset> is movq <offset>(%rip), %rdx */
 	unsigned const char op_ref[] = { 0x48, 0x8b, 0x15 };
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 	unsigned const char retq[] = { RET_INSN_OPCODE, INT3_INSN_OPCODE };
+#endif
 	union ftrace_op_code_union op_ptr;
 	int ret;
 
@@ -359,10 +388,14 @@ create_trampoline(struct ftrace_ops *ops, unsigned int *tramp_size)
 		goto fail;
 
 	ip = trampoline + size;
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	__text_gen_insn(ip, JMP32_INSN_OPCODE, ip, __hdn_rap_return, JMP32_INSN_SIZE);
+#else
 	if (cpu_wants_rethunk_at(ip))
 		__text_gen_insn(ip, JMP32_INSN_OPCODE, ip, x86_return_thunk, JMP32_INSN_SIZE);
 	else
 		memcpy(ip, retq, sizeof(retq));
+#endif
 
 	/* No need to test direct calls on created trampolines */
 	if (ops->flags & FTRACE_OPS_FL_SAVE_REGS) {
@@ -417,15 +450,24 @@ create_trampoline(struct ftrace_ops *ops, unsigned int *tramp_size)
 	 * the depth accounting before the call already.
 	 */
 	dest = ftrace_ops_get_func(ops);
+	if (!hdn_rap_target_matches((unsigned long)dest, (unsigned long)ftrace_stub)) {
+		mutex_unlock(&text_mutex);
+		goto fail;
+	}
 	memcpy(trampoline + call_offset,
 	       text_gen_insn(CALL_INSN_OPCODE, trampoline + call_offset, dest),
 	       CALL_INSN_SIZE);
 	mutex_unlock(&text_mutex);
 
-	/* ALLOC_TRAMP flags lets us know we created it */
+	ret = set_memory_rox((unsigned long)trampoline, npages);
+	if (ret)
+		goto fail;
+	ret = hdn_rap_ftrace_prepare(trampoline, *tramp_size,
+		ops->flags & FTRACE_OPS_FL_SAVE_REGS, ops, (unsigned long)dest);
+	if (ret)
+		goto fail;
+	/* Publish ownership only after finalizing executable permissions. */
 	ops->flags |= FTRACE_OPS_FL_ALLOC_TRAMP;
-
-	set_memory_rox((unsigned long)trampoline, npages);
 	return (unsigned long)trampoline;
 fail:
 	tramp_free(trampoline);
@@ -454,7 +496,8 @@ void set_ftrace_ops_ro(void)
 		size = end_offset - start_offset;
 		size = size + RET_SIZE + sizeof(void *);
 		npages = DIV_ROUND_UP(size, PAGE_SIZE);
-		set_memory_ro((unsigned long)ops->trampoline, npages);
+		if (set_memory_ro((unsigned long)ops->trampoline, npages))
+			panic("Unable to protect an active ftrace trampoline");
 	} while_for_each_ftrace_op(ops);
 }
 
@@ -501,6 +544,12 @@ void arch_ftrace_update_trampoline(struct ftrace_ops *ops)
 	ip = ops->trampoline + offset;
 	func = ftrace_ops_get_func(ops);
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* This void update API cannot leave the old callback installed after its
+	 * owner changes lifetime. A corrupt replacement therefore terminates. */
+	if (!hdn_rap_target_matches((unsigned long)func, (unsigned long)ftrace_stub))
+		__hdn_rap_fail(HDN_RAP_FAIL_TARGET);
+#endif
 	mutex_lock(&text_mutex);
 	/* Do a safe modify in case the trampoline is executing */
 	new = ftrace_call_replace(ip, (unsigned long)func);
@@ -646,13 +695,20 @@ static inline bool skip_ftrace_return(void)
 void prepare_ftrace_return(unsigned long ip, unsigned long *parent,
 			   unsigned long frame_pointer)
 {
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 	unsigned long return_hooker = (unsigned long)&return_to_handler;
+#endif
 
 	if (unlikely(skip_ftrace_return()))
 		return;
 
-	if (!function_graph_enter(*parent, ip, frame_pointer, parent))
+	if (!function_graph_enter(*parent, ip, frame_pointer, parent)) {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		hdn_rap_hook_arm((unsigned long)parent, HDN_RAP_HOOK_GRAPH);
+#else
 		*parent = return_hooker;
+#endif
+	}
 }
 
 #ifdef CONFIG_HAVE_DYNAMIC_FTRACE_WITH_ARGS
@@ -661,15 +717,22 @@ void ftrace_graph_func(unsigned long ip, unsigned long parent_ip,
 {
 	struct pt_regs *regs = &arch_ftrace_regs(fregs)->regs;
 	unsigned long *stack = (unsigned long *)kernel_stack_pointer(regs);
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 	unsigned long return_hooker = (unsigned long)&return_to_handler;
+#endif
 	unsigned long *parent = (unsigned long *)stack;
 
 	if (unlikely(skip_ftrace_return()))
 		return;
 
 
-	if (!function_graph_enter_regs(*parent, ip, 0, parent, fregs))
+	if (!function_graph_enter_regs(*parent, ip, 0, parent, fregs)) {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		hdn_rap_hook_arm((unsigned long)parent, HDN_RAP_HOOK_GRAPH);
+#else
 		*parent = return_hooker;
+#endif
+	}
 }
 #endif
 

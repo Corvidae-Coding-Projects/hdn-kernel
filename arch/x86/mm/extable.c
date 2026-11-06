@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/extable.h>
+#include <linux/hdn_rap.h>
 #include <linux/uaccess.h>
 #include <linux/sched/debug.h>
 #include <linux/bitfield.h>
@@ -296,7 +297,7 @@ int ex_get_fixup_type(unsigned long ip)
 	return e ? FIELD_GET(EX_DATA_TYPE_MASK, e->data) : EX_TYPE_NONE;
 }
 
-int fixup_exception(struct pt_regs *regs, int trapnr, unsigned long error_code,
+static int do_fixup_exception(struct pt_regs *regs, int trapnr, unsigned long error_code,
 		    unsigned long fault_addr)
 {
 	const struct exception_table_entry *e;
@@ -370,6 +371,16 @@ int fixup_exception(struct pt_regs *regs, int trapnr, unsigned long error_code,
 #endif
 	}
 	BUG();
+}
+
+int fixup_exception(struct pt_regs *regs, int trapnr, unsigned long error_code,
+		    unsigned long fault_addr)
+{
+	u64 sequence = hdn_rap_fixup_begin(regs, trapnr);
+	int fixed = do_fixup_exception(regs, trapnr, error_code, fault_addr);
+
+	hdn_rap_fixup_end(regs, sequence, trapnr, fixed);
+	return fixed;
 }
 
 extern unsigned int early_recursion_flag;

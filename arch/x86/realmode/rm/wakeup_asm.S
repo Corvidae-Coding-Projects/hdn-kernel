@@ -16,7 +16,11 @@
 /* This should match the structure in wakeup.h */
 	.section ".data", "aw"
 
-	.balign	16
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	.balign PAGE_SIZE
+#else
+	.balign 16
+#endif
 SYM_DATA_START(wakeup_header)
 	video_mode:	.short	0	/* Video mode number */
 	pmode_entry:	.long	0
@@ -32,6 +36,9 @@ SYM_DATA_START(wakeup_header)
 	real_magic:	.long	0
 	signature:	.long	WAKEUP_HEADER_SIGNATURE
 SYM_DATA_END(wakeup_header)
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	.balign PAGE_SIZE
+#endif
 
 	.text
 	.code16

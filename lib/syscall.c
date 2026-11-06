@@ -9,6 +9,9 @@ static int collect_syscall(struct task_struct *target, struct syscall_info *info
 {
 	unsigned long args[6] = { };
 	struct pt_regs *regs;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct pt_regs snapshot;
+#endif
 
 	if (!try_get_task_stack(target)) {
 		/* Task has no stack, so the task isn't in a syscall. */
@@ -22,6 +25,10 @@ static int collect_syscall(struct task_struct *target, struct syscall_info *info
 		put_task_stack(target);
 		return -EAGAIN;
 	}
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_stack_regs_snapshot(target, &snapshot);
+	regs = &snapshot;
+#endif
 
 	info->sp = user_stack_pointer(regs);
 	info->data.instruction_pointer = instruction_pointer(regs);

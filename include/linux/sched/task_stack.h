@@ -10,6 +10,7 @@
 #include <linux/magic.h>
 #include <linux/refcount.h>
 #include <linux/kasan.h>
+#include <linux/hdn_stack.h>
 
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 
@@ -83,8 +84,18 @@ static inline void put_task_stack(struct task_struct *tsk) {}
 
 void exit_task_stack_account(struct task_struct *tsk);
 
-#define task_stack_end_corrupted(task) \
-		(*(end_of_stack(task)) != STACK_END_MAGIC)
+static inline bool task_stack_end_corrupted(const struct task_struct *task)
+{
+	unsigned long *end = end_of_stack(task);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	unsigned long magic;
+
+	if (hdn_stack_address((unsigned long)end))
+		return hdn_stack_read(task, (unsigned long)end, &magic, sizeof(magic)) ||
+			magic != STACK_END_MAGIC;
+#endif
+	return *end != STACK_END_MAGIC;
+}
 
 static inline int object_is_on_stack(const void *obj)
 {

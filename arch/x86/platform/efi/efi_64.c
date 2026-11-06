@@ -32,6 +32,12 @@
 #include <linux/io.h>
 #include <linux/reboot.h>
 #include <linux/slab.h>
+#include <linux/hdn_execmem.h>
+#include <linux/hdn_pgtable.h>
+#include <linux/kmemleak.h>
+#include <linux/overflow.h>
+#include <linux/vmalloc.h>
+#include <linux/xarray.h>
 #include <linux/ucs2_string.h>
 #include <linux/cc_platform.h>
 #include <linux/sched/task.h>
@@ -73,7 +79,7 @@ int __init efi_alloc_page_tables(void)
 	gfp_t gfp_mask;
 
 	gfp_mask = GFP_KERNEL | __GFP_ZERO;
-	efi_pgd = (pgd_t *)__get_free_pages(gfp_mask, pgd_allocation_order());
+	efi_pgd = (pgd_t *)hdn_pt_alloc_address(gfp_mask, pgd_allocation_order(), false);
 	if (!efi_pgd)
 		goto fail;
 
@@ -95,9 +101,9 @@ int __init efi_alloc_page_tables(void)
 
 free_p4d:
 	if (pgtable_l5_enabled())
-		free_page((unsigned long)pgd_page_vaddr(*pgd));
+		hdn_pt_free_address((unsigned long)pgd_page_vaddr(*pgd), 0);
 free_pgd:
-	free_pages((unsigned long)efi_pgd, pgd_allocation_order());
+	hdn_pt_free_address((unsigned long)efi_pgd, pgd_allocation_order());
 fail:
 	return -ENOMEM;
 }
@@ -117,7 +123,7 @@ void efi_sync_low_kernel_mappings(void)
 	pgd_k = pgd_offset_k(PAGE_OFFSET);
 
 	num_entries = pgd_index(EFI_VA_END) - pgd_index(PAGE_OFFSET);
-	memcpy(pgd_efi, pgd_k, sizeof(pgd_t) * num_entries);
+	hdn_pt_copy(pgd_efi, pgd_k, sizeof(pgd_t) * num_entries, pgtable_l5_enabled() ? 5 : 4);
 
 	pgd_efi = efi_pgd + pgd_index(EFI_VA_END);
 	pgd_k = pgd_offset_k(EFI_VA_END);
@@ -125,7 +131,7 @@ void efi_sync_low_kernel_mappings(void)
 	p4d_k = p4d_offset(pgd_k, 0);
 
 	num_entries = p4d_index(EFI_VA_END);
-	memcpy(p4d_efi, p4d_k, sizeof(p4d_t) * num_entries);
+	hdn_pt_copy(p4d_efi, p4d_k, sizeof(p4d_t) * num_entries, 4);
 
 	/*
 	 * We share all the PUD entries apart from those that map the
@@ -140,46 +146,86 @@ void efi_sync_low_kernel_mappings(void)
 	pud_k = pud_offset(p4d_k, 0);
 
 	num_entries = pud_index(EFI_VA_END);
-	memcpy(pud_efi, pud_k, sizeof(pud_t) * num_entries);
+	hdn_pt_copy(pud_efi, pud_k, sizeof(pud_t) * num_entries, 3);
 
 	pud_efi = pud_offset(p4d_efi, EFI_VA_START);
 	pud_k = pud_offset(p4d_k, EFI_VA_START);
 
 	num_entries = PTRS_PER_PUD - pud_index(EFI_VA_START);
-	memcpy(pud_efi, pud_k, sizeof(pud_t) * num_entries);
+	hdn_pt_copy(pud_efi, pud_k, sizeof(pud_t) * num_entries, 3);
 }
 
-/*
- * Wrapper for slow_virt_to_phys() that handles NULL addresses.
- */
-static inline phys_addr_t
-virt_to_phys_or_null_size(void *va, unsigned long size)
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+/* Physically contiguous DMA32 backing preserves the firmware's identity
+ * addressing assumption. vmap owns the split pages until permanent teardown.
+ * Only the middle THREAD_SIZE is mapped in efi_mm; both ends have guards. */
+static void *efi_mixed_backing __ro_after_init;
+static unsigned long efi_mixed_backing_pa __ro_after_init;
+#define EFI_MIXED_ORDER get_order(2 * THREAD_SIZE)
+
+static int __init efi_mixed_stack_allocate(pgd_t *pgd)
 {
-	phys_addr_t pa;
+	struct page *page, **pages;
+	struct vm_struct *vm;
+	unsigned int count = 1U << EFI_MIXED_ORDER, i;
+	unsigned long physical;
+	void *mapping;
 
-	if (!va)
-		return 0;
-
-	if (virt_addr_valid(va))
-		return virt_to_phys(va);
-
-	pa = slow_virt_to_phys(va);
-
-	/* check if the object crosses a page boundary */
-	if (WARN_ON((pa ^ (pa + size - 1)) & PAGE_MASK))
-		return 0;
-
-	return pa;
+	pages = kmalloc_array(count, sizeof(*pages), GFP_KERNEL);
+	if (!pages)
+		return -ENOMEM;
+	page = alloc_pages(GFP_KERNEL | __GFP_DMA32 | __GFP_ZERO, EFI_MIXED_ORDER);
+	if (!page) {
+		kfree(pages);
+		return -ENOMEM;
+	}
+	split_page(page, EFI_MIXED_ORDER);
+	for (i = 0; i < count; i++)
+		pages[i] = page + i;
+	physical = page_to_phys(page);
+	mapping = vmap(pages, count, VM_MAP | VM_MAP_PUT_PAGES, PAGE_KERNEL);
+	if (!mapping) {
+		for (i = 0; i < count; i++)
+			__free_page(pages[i]);
+		kfree(pages);
+		return -ENOMEM;
+	}
+	vm = find_vm_area(mapping);
+	vm->flags |= VM_FLUSH_RESET_PERMS;
+	if (kernel_unmap_pages_in_pgd(pgd, physical, count) ||
+	    kernel_map_pages_in_pgd(pgd, (physical >> PAGE_SHIFT) + 1,
+		physical + PAGE_SIZE, THREAD_SIZE >> PAGE_SHIFT, _PAGE_NX | _PAGE_RW | _PAGE_ENC)) {
+		/* Do not recycle physical backing while any temporary alias survives. */
+		if (kernel_unmap_pages_in_pgd(pgd, physical, count))
+			panic("HDN cannot withdraw failed EFI stack mapping");
+		vfree(mapping);
+		return -ENOMEM;
+	}
+	efi_mixed_backing = mapping;
+	efi_mixed_backing_pa = physical;
+	efi_mixed_mode_stack_pa = physical + PAGE_SIZE + THREAD_SIZE;
+	kmemleak_no_scan(mapping);
+	return 0;
 }
 
-#define virt_to_phys_or_null(addr)				\
-	virt_to_phys_or_null_size((addr), sizeof(*(addr)))
+void __init hdn_efi_mixed_seal(void)
+{
+	if (!efi_mixed_backing)
+		return;
+	/* No EFI call is active before rest_init. The sole retained alias is
+	 * the guarded, non-global EFI-only identity mapping created above. */
+	if (hdn_execmem_claim_stack(efi_mixed_backing) || hdn_execmem_hide_stack(efi_mixed_backing))
+		panic("HDN cannot isolate the EFI firmware stack");
+}
+#endif
 
 int __init efi_setup_page_tables(unsigned long pa_memmap, unsigned num_pages)
 {
 	extern const u8 __efi64_thunk_ret_tramp[];
 	unsigned long pfn, text, pf, rodata, tramp;
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 	struct page *page;
+#endif
 	unsigned npages;
 	pgd_t *pgd = efi_mm.pgd;
 
@@ -230,6 +276,10 @@ int __init efi_setup_page_tables(unsigned long pa_memmap, unsigned num_pages)
 	if (!efi_is_mixed())
 		return 0;
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	if (efi_mixed_stack_allocate(pgd))
+		return 1;
+#else
 	page = alloc_page(GFP_KERNEL|__GFP_DMA32);
 	if (!page) {
 		pr_err("Unable to allocate EFI runtime stack < 4GB\n");
@@ -237,13 +287,14 @@ int __init efi_setup_page_tables(unsigned long pa_memmap, unsigned num_pages)
 	}
 
 	efi_mixed_mode_stack_pa = page_to_phys(page + 1); /* stack grows down */
+#endif
 
 	npages = (_etext - _text) >> PAGE_SHIFT;
 	text = __pa(_text);
 
 	if (kernel_unmap_pages_in_pgd(pgd, text, npages)) {
 		pr_err("Failed to unmap kernel text 1:1 mapping\n");
-		return 1;
+		goto free_stack;
 	}
 
 	npages = (__end_rodata - __start_rodata) >> PAGE_SHIFT;
@@ -253,7 +304,7 @@ int __init efi_setup_page_tables(unsigned long pa_memmap, unsigned num_pages)
 	pf = _PAGE_NX | _PAGE_ENC;
 	if (kernel_map_pages_in_pgd(pgd, pfn, rodata, npages, pf)) {
 		pr_err("Failed to map kernel rodata 1:1\n");
-		return 1;
+		goto free_stack;
 	}
 
 	tramp = __pa(__efi64_thunk_ret_tramp);
@@ -262,10 +313,25 @@ int __init efi_setup_page_tables(unsigned long pa_memmap, unsigned num_pages)
 	pf = _PAGE_ENC;
 	if (kernel_map_pages_in_pgd(pgd, pfn, tramp, 1, pf)) {
 		pr_err("Failed to map mixed mode return trampoline\n");
-		return 1;
+		goto free_stack;
 	}
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	hdn_rap_efi_context_init(efi_mixed_mode_stack_pa - THREAD_SIZE, THREAD_SIZE);
+#endif
 	return 0;
+
+free_stack:
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	if (kernel_unmap_pages_in_pgd(pgd, efi_mixed_backing_pa, 1U << EFI_MIXED_ORDER))
+		panic("HDN cannot withdraw EFI stack after mapping failure");
+	vfree(efi_mixed_backing);
+	efi_mixed_backing = NULL;
+#else
+	__free_page(page);
+#endif
+	efi_mixed_mode_stack_pa = 0;
+	return 1;
 }
 
 static void __init __map_region(efi_memory_desc_t *md, u64 va)
@@ -392,31 +458,184 @@ static int __init efi_update_mappings(efi_memory_desc_t *md, unsigned long pf)
 
 bool efi_disable_ibt_for_runtime __ro_after_init = true;
 
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+/* Value 1 is an uncovered runtime-code page, 2 is NX and 3 is sealed RX. */
+static DEFINE_XARRAY(efi_wx_pages);
+
+static int __init hdn_efi_wx_begin(void)
+{
+	efi_memory_desc_t *md;
+	int error;
+
+	for_each_efi_memory_desc(md) {
+		unsigned long pfn;
+
+		if (!(md->attribute & EFI_MEMORY_RUNTIME) ||
+		    md->type != EFI_RUNTIME_SERVICES_CODE)
+			continue;
+		pfn = md->phys_addr >> PAGE_SHIFT;
+		if (!md->num_pages || md->num_pages > ULONG_MAX ||
+		    md->num_pages - 1 > ULONG_MAX - pfn)
+			return -EOVERFLOW;
+		for (u64 page = 0; page < md->num_pages; page++) {
+			error = xa_insert(&efi_wx_pages, pfn + page, xa_mk_value(1), GFP_KERNEL);
+			if (error)
+				return error;
+		}
+	}
+	return xa_empty(&efi_wx_pages) ? -ENOENT : 0;
+}
+
+static int __init hdn_efi_wx_mark(efi_memory_desc_t *md, bool executable)
+{
+	unsigned long pfn = md->phys_addr >> PAGE_SHIFT;
+	size_t size;
+
+	if (md->type != EFI_RUNTIME_SERVICES_CODE)
+		return 0;
+	if (!md->num_pages || md->num_pages > ULONG_MAX ||
+	    md->num_pages - 1 > ULONG_MAX - pfn ||
+	    check_mul_overflow((size_t)md->num_pages, (size_t)PAGE_SIZE, &size))
+		return -EOVERFLOW;
+	for (u64 page = 0; page < md->num_pages; page++) {
+		void *entry = xa_load(&efi_wx_pages, pfn + page);
+
+		if (!xa_is_value(entry) || xa_to_value(entry) != 1)
+			return -EINVAL;
+	}
+	if (executable && hdn_pt_foreign_code_seal(md->phys_addr, size, &efi_mm))
+		return -EPERM;
+	for (u64 page = 0; page < md->num_pages; page++)
+		xa_store(&efi_wx_pages, pfn + page, xa_mk_value(executable ? 3 : 2),
+			 GFP_KERNEL);
+	return 0;
+}
+
+static bool __init hdn_efi_wx_complete(void)
+{
+	void *entry;
+	unsigned long index;
+
+	xa_for_each(&efi_wx_pages, index, entry)
+		if (!xa_is_value(entry) || xa_to_value(entry) == 1)
+			return false;
+	return !xa_empty(&efi_wx_pages);
+}
+
+static int __init hdn_efi_disable_runtime_mappings(void)
+{
+	efi_memory_desc_t *md;
+	int error = 0;
+
+	for_each_efi_memory_desc(md) {
+		unsigned long flags = _PAGE_NX;
+
+		if (!(md->attribute & EFI_MEMORY_RUNTIME))
+			continue;
+		if (!(md->attribute & EFI_MEMORY_RO))
+			flags |= _PAGE_RW;
+		if (cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT))
+			flags |= _PAGE_ENC;
+		error |= efi_update_mappings(md, flags);
+	}
+	clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
+	return error ? -EIO : 0;
+}
+#endif
+
 static int __init efi_update_mem_attr(struct mm_struct *mm, efi_memory_desc_t *md,
 				      bool has_ibt)
 {
 	unsigned long pf = 0;
+	bool executable;
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	int error;
+#endif
 
 	efi_disable_ibt_for_runtime |= !has_ibt;
 
-	if (md->attribute & EFI_MEMORY_XP)
+	executable = !(md->attribute & EFI_MEMORY_XP);
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	if (hdn_pt_platform_supported())
+		executable = md->type == EFI_RUNTIME_SERVICES_CODE && executable;
+#endif
+	if (!executable)
 		pf |= _PAGE_NX;
 
 	if (!(md->attribute & EFI_MEMORY_RO))
 		pf |= _PAGE_RW;
 
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	if (hdn_pt_platform_supported() && executable &&
+	    !(md->attribute & EFI_MEMORY_RO))
+		return -EPERM;
+#endif
+
 	if (cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT))
 		pf |= _PAGE_ENC;
 
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	/* Revoke the writable kernel alias before publishing an executable EFI
+	 * mapping. If publication then fails, runtime teardown keeps the already
+	 * sealed firmware page RO/NX rather than reopening it. */
+	if (hdn_pt_platform_supported()) {
+		error = hdn_efi_wx_mark(md, executable);
+		if (error)
+			return error;
+	}
+#endif
 	return efi_update_mappings(md, pf);
 }
 
+static void efi_enter_mm(void);
+static void efi_leave_mm(void);
+
 void __init efi_runtime_update_mappings(void)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	if (hdn_pt_platform_supported()) {
+		int error = hdn_efi_wx_begin();
+
+		if (!error && efi_enabled(EFI_MEM_ATTR)) {
+			efi_disable_ibt_for_runtime = false;
+			error = efi_memattr_apply_permissions(NULL, efi_update_mem_attr);
+			if (!error && !hdn_efi_wx_complete())
+				error = -ENODATA;
+		} else if (!error) {
+			error = -EOPNOTSUPP;
+		}
+		if (error) {
+			if (hdn_efi_disable_runtime_mappings())
+				panic("HDN could not remove executable EFI runtime mappings");
+			pr_err("incomplete W^X attributes; runtime services disabled\n");
+		}
+		hdn_pt_efi_wx_result(true, !error);
+		xa_destroy(&efi_wx_pages);
+	} else if (efi_enabled(EFI_MEM_ATTR)) {
+		efi_disable_ibt_for_runtime = false;
+		efi_memattr_apply_permissions(NULL, efi_update_mem_attr);
+		hdn_pt_efi_wx_result(true, false);
+	} else {
+		hdn_pt_efi_wx_result(true, false);
+	}
+#else
 	if (efi_enabled(EFI_MEM_ATTR)) {
 		efi_disable_ibt_for_runtime = false;
 		efi_memattr_apply_permissions(NULL, efi_update_mem_attr);
 	}
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	if (efi_enabled(EFI_RUNTIME_SERVICES)) {
+		preempt_disable();
+		efi_enter_mm();
+		if (hdn_efi_register_runtime(false)) {
+			clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
+			pr_err("EFI runtime entry admission failed; services disabled\n");
+		}
+		efi_leave_mm();
+		preempt_enable();
+	}
+#endif
 }
 
 void __init efi_dump_pagetable(void)
@@ -465,6 +684,17 @@ static DEFINE_SPINLOCK(efi_runtime_lock);
  * The 32-bit EFI code needs a valid DS, ES, and SS.  There's no
  * need to save the old SS: __KERNEL_DS is always acceptable.
  */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+#define efi_runtime_thunk(func, ...) ({ \
+	__efi_nargs_check(efi_runtime_thunk, 8, __VA_ARGS__); \
+	__hdn_efi64_thunk(offsetof(efi_runtime_services_t, func), \
+		READ_ONCE(efi.runtime->mixed_mode.func), __VA_ARGS__, \
+		0UL, 0UL, 0UL, 0UL, 0UL, 0UL, 0UL, 0UL); \
+})
+#else
+#define efi_runtime_thunk(func, ...) efi64_thunk(efi.runtime->mixed_mode.func, __VA_ARGS__)
+#endif
+
 #define __efi_thunk(func, ...)						\
 ({									\
 	unsigned short __ds, __es;					\
@@ -477,7 +707,7 @@ static DEFINE_SPINLOCK(efi_runtime_lock);
 	loadsegment(ds, __KERNEL_DS);					\
 	loadsegment(es, __KERNEL_DS);					\
 									\
-	____s = efi64_thunk(efi.runtime->mixed_mode.func, __VA_ARGS__);	\
+	____s = efi_runtime_thunk(func, __VA_ARGS__);	\
 									\
 	loadsegment(ds, __ds);						\
 	loadsegment(es, __es);						\
@@ -521,6 +751,12 @@ efi_thunk_set_virtual_address_map(unsigned long memory_map_size,
 
 	efi_enter_mm();
 
+	if (hdn_efi_register_runtime(true)) {
+		efi_leave_mm();
+		local_irq_restore(flags);
+		return EFI_SECURITY_VIOLATION;
+	}
+
 	status = __efi_thunk(set_virtual_address_map, memory_map_size,
 			     descriptor_size, descriptor_version, virtual_map);
 
@@ -553,40 +789,158 @@ efi_thunk_set_wakeup_time(efi_bool_t enabled, efi_time_t *tm)
 	return EFI_UNSUPPORTED;
 }
 
-static unsigned long efi_name_size(efi_char16_t *name)
+/* Firmware cannot translate a private stack or a discontiguous vmalloc
+ * buffer. All mixed-mode arguments, including UINTN results, therefore live
+ * in a per-call DMA32 allocation. No caller's backing-page alias is exposed.
+ * Allocation is outside efi_runtime_lock; nonblocking callers use GFP_ATOMIC.
+ */
+struct efi_mixed_args {
+	efi_guid_t vendor __aligned(16);
+	u32 size, attr;
+	u64 storage, remaining, maximum;
+	u8 payload[];
+};
+
+struct efi_mixed_buffer {
+	struct efi_mixed_args *args;
+	void *name, *data;
+	unsigned int order;
+};
+
+static unsigned long efi_name_size(const efi_char16_t *name,
+				   unsigned long capacity)
 {
-	return ucs2_strsize(name, EFI_VAR_NAME_LEN) + 1;
+	unsigned long i;
+
+	if (!name)
+		return 0;
+	for (i = 0; i < capacity / sizeof(*name); i++)
+		if (!name[i])
+			return (i + 1) * sizeof(*name);
+	return 0;
+}
+
+static void efi_mixed_free(struct efi_mixed_buffer *buffer)
+{
+	if (!buffer->args)
+		return;
+	memzero_explicit(buffer->args, PAGE_SIZE << buffer->order);
+	free_pages((unsigned long)buffer->args, buffer->order);
+	buffer->args = NULL;
+}
+
+static efi_status_t efi_mixed_alloc(struct efi_mixed_buffer *buffer,
+		unsigned long namesz, unsigned long datasz, gfp_t gfp)
+{
+	unsigned long bytes, name_aligned;
+	phys_addr_t pa;
+
+	*buffer = (struct efi_mixed_buffer) {};
+	/* Each firmware UINTN is 32 bits. Check before alignment/addition. */
+	if (namesz > U32_MAX || datasz > U32_MAX)
+		return EFI_INVALID_PARAMETER;
+	name_aligned = ALIGN(namesz, 8);
+	bytes = sizeof(*buffer->args) + name_aligned + datasz;
+	if (bytes > (PAGE_SIZE << MAX_PAGE_ORDER))
+		return EFI_OUT_OF_RESOURCES;
+	buffer->order = get_order(bytes);
+	buffer->args = (void *)__get_free_pages(gfp | __GFP_ZERO | __GFP_DMA32,
+					       buffer->order);
+	if (!buffer->args)
+		return EFI_OUT_OF_RESOURCES;
+	pa = virt_to_phys(buffer->args);
+	if (!pa || pa > U32_MAX || bytes - 1 > U32_MAX - pa) {
+		efi_mixed_free(buffer);
+		return EFI_OUT_OF_RESOURCES;
+	}
+	buffer->name = namesz ? buffer->args->payload : NULL;
+	buffer->data = datasz ? buffer->args->payload + name_aligned : NULL;
+	return EFI_SUCCESS;
+}
+
+static u32 efi_mixed_phys(const void *p)
+{
+	return p ? (u32)virt_to_phys((void *)p) : 0;
 }
 
 static efi_status_t
 efi_thunk_get_variable(efi_char16_t *name, efi_guid_t *vendor,
 		       u32 *attr, unsigned long *data_size, void *data)
 {
-	u8 buf[24] __aligned(8);
-	efi_guid_t *vnd = PTR_ALIGN((efi_guid_t *)buf, sizeof(*vnd));
+	struct efi_mixed_buffer buffer;
+	struct efi_mixed_args *args;
+	unsigned long namesz, capacity, flags;
 	efi_status_t status;
-	u32 phys_name, phys_vendor, phys_attr;
-	u32 phys_data_size, phys_data;
-	unsigned long flags;
+
+	if (!vendor || !data_size || (!data && *data_size))
+		return EFI_INVALID_PARAMETER;
+	namesz = efi_name_size(name, EFI_VAR_NAME_LEN);
+	if (!namesz)
+		return EFI_INVALID_PARAMETER;
+	capacity = *data_size;
+	status = efi_mixed_alloc(&buffer, namesz, capacity, GFP_KERNEL);
+	if (status != EFI_SUCCESS)
+		return status;
+	args = buffer.args;
+	args->vendor = *vendor;
+	args->size = capacity;
+	memcpy(buffer.name, name, namesz);
 
 	spin_lock_irqsave(&efi_runtime_lock, flags);
-
-	*vnd = *vendor;
-
-	phys_data_size = virt_to_phys_or_null(data_size);
-	phys_vendor = virt_to_phys_or_null(vnd);
-	phys_name = virt_to_phys_or_null_size(name, efi_name_size(name));
-	phys_attr = virt_to_phys_or_null(attr);
-	phys_data = virt_to_phys_or_null_size(data, *data_size);
-
-	if (!phys_name || (data && !phys_data))
-		status = EFI_INVALID_PARAMETER;
-	else
-		status = efi_thunk(get_variable, phys_name, phys_vendor,
-				   phys_attr, phys_data_size, phys_data);
-
+	status = efi_thunk(get_variable, efi_mixed_phys(buffer.name),
+			efi_mixed_phys(&args->vendor),
+			attr ? efi_mixed_phys(&args->attr) : 0,
+			efi_mixed_phys(&args->size), efi_mixed_phys(buffer.data));
 	spin_unlock_irqrestore(&efi_runtime_lock, flags);
+	if (status == EFI_SUCCESS && args->size > capacity)
+		status = EFI_DEVICE_ERROR;
+	if (status == EFI_SUCCESS || status == EFI_BUFFER_TOO_SMALL)
+		*data_size = args->size;
+	if (status == EFI_SUCCESS) {
+		if (args->size)
+			memcpy(data, buffer.data, args->size);
+		if (attr)
+			*attr = args->attr;
+	}
+	efi_mixed_free(&buffer);
+	return status;
+}
 
+static efi_status_t
+efi_mixed_set_variable(efi_char16_t *name, efi_guid_t *vendor, u32 attr,
+		       unsigned long data_size, void *data, bool nonblocking)
+{
+	struct efi_mixed_buffer buffer;
+	unsigned long namesz, flags;
+	efi_status_t status;
+
+	if (!vendor || (!data && data_size))
+		return EFI_INVALID_PARAMETER;
+	namesz = efi_name_size(name, EFI_VAR_NAME_LEN);
+	if (!namesz)
+		return EFI_INVALID_PARAMETER;
+	status = efi_mixed_alloc(&buffer, namesz, data_size,
+				nonblocking ? GFP_ATOMIC : GFP_KERNEL);
+	if (status != EFI_SUCCESS)
+		return status;
+	buffer.args->vendor = *vendor;
+	memcpy(buffer.name, name, namesz);
+	if (data_size)
+		memcpy(buffer.data, data, data_size);
+	if (nonblocking) {
+		if (!spin_trylock_irqsave(&efi_runtime_lock, flags)) {
+			status = EFI_NOT_READY;
+			goto out;
+		}
+	} else {
+		spin_lock_irqsave(&efi_runtime_lock, flags);
+	}
+	status = efi_thunk(set_variable, efi_mixed_phys(buffer.name),
+			efi_mixed_phys(&buffer.args->vendor), attr, data_size,
+			efi_mixed_phys(buffer.data));
+	spin_unlock_irqrestore(&efi_runtime_lock, flags);
+out:
+	efi_mixed_free(&buffer);
 	return status;
 }
 
@@ -594,95 +948,56 @@ static efi_status_t
 efi_thunk_set_variable(efi_char16_t *name, efi_guid_t *vendor,
 		       u32 attr, unsigned long data_size, void *data)
 {
-	u8 buf[24] __aligned(8);
-	efi_guid_t *vnd = PTR_ALIGN((efi_guid_t *)buf, sizeof(*vnd));
-	u32 phys_name, phys_vendor, phys_data;
-	efi_status_t status;
-	unsigned long flags;
-
-	spin_lock_irqsave(&efi_runtime_lock, flags);
-
-	*vnd = *vendor;
-
-	phys_name = virt_to_phys_or_null_size(name, efi_name_size(name));
-	phys_vendor = virt_to_phys_or_null(vnd);
-	phys_data = virt_to_phys_or_null_size(data, data_size);
-
-	if (!phys_name || (data && !phys_data))
-		status = EFI_INVALID_PARAMETER;
-	else
-		status = efi_thunk(set_variable, phys_name, phys_vendor,
-				   attr, data_size, phys_data);
-
-	spin_unlock_irqrestore(&efi_runtime_lock, flags);
-
-	return status;
+	return efi_mixed_set_variable(name, vendor, attr, data_size, data, false);
 }
 
 static efi_status_t
 efi_thunk_set_variable_nonblocking(efi_char16_t *name, efi_guid_t *vendor,
-				   u32 attr, unsigned long data_size,
-				   void *data)
+				   u32 attr, unsigned long data_size, void *data)
 {
-	u8 buf[24] __aligned(8);
-	efi_guid_t *vnd = PTR_ALIGN((efi_guid_t *)buf, sizeof(*vnd));
-	u32 phys_name, phys_vendor, phys_data;
-	efi_status_t status;
-	unsigned long flags;
-
-	if (!spin_trylock_irqsave(&efi_runtime_lock, flags))
-		return EFI_NOT_READY;
-
-	*vnd = *vendor;
-
-	phys_name = virt_to_phys_or_null_size(name, efi_name_size(name));
-	phys_vendor = virt_to_phys_or_null(vnd);
-	phys_data = virt_to_phys_or_null_size(data, data_size);
-
-	if (!phys_name || (data && !phys_data))
-		status = EFI_INVALID_PARAMETER;
-	else
-		status = efi_thunk(set_variable, phys_name, phys_vendor,
-				   attr, data_size, phys_data);
-
-	spin_unlock_irqrestore(&efi_runtime_lock, flags);
-
-	return status;
+	return efi_mixed_set_variable(name, vendor, attr, data_size, data, true);
 }
 
 static efi_status_t
-efi_thunk_get_next_variable(unsigned long *name_size,
-			    efi_char16_t *name,
+efi_thunk_get_next_variable(unsigned long *name_size, efi_char16_t *name,
 			    efi_guid_t *vendor)
 {
-	u8 buf[24] __aligned(8);
-	efi_guid_t *vnd = PTR_ALIGN((efi_guid_t *)buf, sizeof(*vnd));
+	struct efi_mixed_buffer buffer;
+	struct efi_mixed_args *args;
+	unsigned long namesz, capacity, flags;
 	efi_status_t status;
-	u32 phys_name_size, phys_name, phys_vendor;
-	unsigned long flags;
 
+	if (!name_size || !vendor)
+		return EFI_INVALID_PARAMETER;
+	capacity = *name_size;
+	namesz = efi_name_size(name, min_t(unsigned long, capacity, EFI_VAR_NAME_LEN));
+	if (!namesz)
+		return EFI_INVALID_PARAMETER;
+	status = efi_mixed_alloc(&buffer, capacity, 0, GFP_KERNEL);
+	if (status != EFI_SUCCESS)
+		return status;
+	args = buffer.args;
+	args->vendor = *vendor;
+	args->size = capacity;
+	memcpy(buffer.name, name, namesz);
 	spin_lock_irqsave(&efi_runtime_lock, flags);
-
-	*vnd = *vendor;
-
-	phys_name_size = virt_to_phys_or_null(name_size);
-	phys_vendor = virt_to_phys_or_null(vnd);
-	phys_name = virt_to_phys_or_null_size(name, *name_size);
-
-	if (!phys_name)
-		status = EFI_INVALID_PARAMETER;
-	else
-		status = efi_thunk(get_next_variable, phys_name_size,
-				   phys_name, phys_vendor);
-
+	status = efi_thunk(get_next_variable, efi_mixed_phys(&args->size),
+			efi_mixed_phys(buffer.name), efi_mixed_phys(&args->vendor));
 	spin_unlock_irqrestore(&efi_runtime_lock, flags);
-
-	*vendor = *vnd;
+	if (status == EFI_SUCCESS &&
+	    (args->size > capacity || !efi_name_size(buffer.name, args->size)))
+		status = EFI_DEVICE_ERROR;
+	if (status == EFI_SUCCESS || status == EFI_BUFFER_TOO_SMALL)
+		*name_size = args->size;
+	if (status == EFI_SUCCESS) {
+		memcpy(name, buffer.name, args->size);
+		*vendor = args->vendor;
+	}
+	efi_mixed_free(&buffer);
 	return status;
 }
 
-static efi_status_t
-efi_thunk_get_next_high_mono_count(u32 *count)
+static efi_status_t efi_thunk_get_next_high_mono_count(u32 *count)
 {
 	return EFI_UNSUPPORTED;
 }
@@ -691,93 +1006,92 @@ static void
 efi_thunk_reset_system(int reset_type, efi_status_t status,
 		       unsigned long data_size, efi_char16_t *data)
 {
-	u32 phys_data;
+	struct efi_mixed_buffer buffer;
 	unsigned long flags;
+	efi_status_t error;
 
+	/* Reset may be requested with interrupts disabled. */
+	error = efi_mixed_alloc(&buffer, 0, data && data_size <= U32_MAX ? data_size : 0,
+				GFP_ATOMIC);
+	if (error == EFI_SUCCESS && buffer.data)
+		memcpy(buffer.data, data, data_size);
+	/* Optional reset text must never prevent the reset itself. */
 	spin_lock_irqsave(&efi_runtime_lock, flags);
-
-	phys_data = virt_to_phys_or_null_size(data, data_size);
-
-	efi_thunk(reset_system, reset_type, status, data_size, phys_data);
-
+	efi_thunk(reset_system, reset_type, status,
+		  error == EFI_SUCCESS && buffer.data ? data_size : 0,
+		  error == EFI_SUCCESS ? efi_mixed_phys(buffer.data) : 0);
 	spin_unlock_irqrestore(&efi_runtime_lock, flags);
+	efi_mixed_free(&buffer);
 }
 
 static efi_status_t
 efi_thunk_update_capsule(efi_capsule_header_t **capsules,
 			 unsigned long count, unsigned long sg_list)
 {
-	/*
-	 * To properly support this function we would need to repackage
-	 * 'capsules' because the firmware doesn't understand 64-bit
-	 * pointers.
-	 */
+	/* The upstream mixed-mode ABI does not marshal capsule pointer lists. */
 	return EFI_UNSUPPORTED;
 }
 
 static efi_status_t
-efi_thunk_query_variable_info(u32 attr, u64 *storage_space,
-			      u64 *remaining_space,
-			      u64 *max_variable_size)
+efi_mixed_query_variable_info(u32 attr, u64 *storage_space,
+			      u64 *remaining_space, u64 *max_variable_size,
+			      bool nonblocking)
 {
-	efi_status_t status;
-	u32 phys_storage, phys_remaining, phys_max;
+	struct efi_mixed_buffer buffer;
+	struct efi_mixed_args *args;
 	unsigned long flags;
+	efi_status_t status;
 
 	if (efi.runtime_version < EFI_2_00_SYSTEM_TABLE_REVISION)
 		return EFI_UNSUPPORTED;
-
-	spin_lock_irqsave(&efi_runtime_lock, flags);
-
-	phys_storage = virt_to_phys_or_null(storage_space);
-	phys_remaining = virt_to_phys_or_null(remaining_space);
-	phys_max = virt_to_phys_or_null(max_variable_size);
-
-	status = efi_thunk(query_variable_info, attr, phys_storage,
-			   phys_remaining, phys_max);
-
+	if (!storage_space || !remaining_space || !max_variable_size)
+		return EFI_INVALID_PARAMETER;
+	status = efi_mixed_alloc(&buffer, 0, 0, nonblocking ? GFP_ATOMIC : GFP_KERNEL);
+	if (status != EFI_SUCCESS)
+		return status;
+	args = buffer.args;
+	if (nonblocking) {
+		if (!spin_trylock_irqsave(&efi_runtime_lock, flags)) {
+			status = EFI_NOT_READY;
+			goto out;
+		}
+	} else {
+		spin_lock_irqsave(&efi_runtime_lock, flags);
+	}
+	status = efi_thunk(query_variable_info, attr,
+			efi_mixed_phys(&args->storage), efi_mixed_phys(&args->remaining),
+			efi_mixed_phys(&args->maximum));
 	spin_unlock_irqrestore(&efi_runtime_lock, flags);
-
+	if (status == EFI_SUCCESS) {
+		*storage_space = args->storage;
+		*remaining_space = args->remaining;
+		*max_variable_size = args->maximum;
+	}
+out:
+	efi_mixed_free(&buffer);
 	return status;
+}
+
+static efi_status_t
+efi_thunk_query_variable_info(u32 attr, u64 *storage_space,
+			      u64 *remaining_space, u64 *max_variable_size)
+{
+	return efi_mixed_query_variable_info(attr, storage_space, remaining_space,
+					   max_variable_size, false);
 }
 
 static efi_status_t
 efi_thunk_query_variable_info_nonblocking(u32 attr, u64 *storage_space,
-					  u64 *remaining_space,
-					  u64 *max_variable_size)
+					  u64 *remaining_space, u64 *max_variable_size)
 {
-	efi_status_t status;
-	u32 phys_storage, phys_remaining, phys_max;
-	unsigned long flags;
-
-	if (efi.runtime_version < EFI_2_00_SYSTEM_TABLE_REVISION)
-		return EFI_UNSUPPORTED;
-
-	if (!spin_trylock_irqsave(&efi_runtime_lock, flags))
-		return EFI_NOT_READY;
-
-	phys_storage = virt_to_phys_or_null(storage_space);
-	phys_remaining = virt_to_phys_or_null(remaining_space);
-	phys_max = virt_to_phys_or_null(max_variable_size);
-
-	status = efi_thunk(query_variable_info, attr, phys_storage,
-			   phys_remaining, phys_max);
-
-	spin_unlock_irqrestore(&efi_runtime_lock, flags);
-
-	return status;
+	return efi_mixed_query_variable_info(attr, storage_space, remaining_space,
+					   max_variable_size, true);
 }
 
 static efi_status_t
 efi_thunk_query_capsule_caps(efi_capsule_header_t **capsules,
-			     unsigned long count, u64 *max_size,
-			     int *reset_type)
+			     unsigned long count, u64 *max_size, int *reset_type)
 {
-	/*
-	 * To properly support this function we would need to repackage
-	 * 'capsules' because the firmware doesn't understand 64-bit
-	 * pointers.
-	 */
 	return EFI_UNSUPPORTED;
 }
 
@@ -824,6 +1138,12 @@ efi_set_virtual_address_map(unsigned long memory_map_size,
 
 	/* Disable interrupts around EFI calls: */
 	local_irq_save(flags);
+	if (hdn_efi_register_runtime(true)) {
+		local_irq_restore(flags);
+		efi_fpu_end();
+		efi_leave_mm();
+		return EFI_SECURITY_VIOLATION;
+	}
 	status = arch_efi_call_virt(efi.runtime, set_virtual_address_map,
 				    memory_map_size, descriptor_size,
 				    descriptor_version, virtual_map);

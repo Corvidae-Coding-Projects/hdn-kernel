@@ -35,6 +35,7 @@
 #include <linux/hw_breakpoint.h>
 #include <linux/uaccess.h>
 #include <linux/memory.h>
+#include <linux/hdn_stack.h>
 
 #include <asm/text-patching.h>
 #include <asm/debugreg.h>
@@ -42,6 +43,7 @@
 #include <asm/apic.h>
 #include <asm/nmi.h>
 #include <asm/switch_to.h>
+#include <asm/hdn_rap_debug.h>
 
 struct dbg_reg_def_t dbg_reg_def[DBG_MAX_REG_NUM] =
 {
@@ -90,6 +92,17 @@ struct dbg_reg_def_t dbg_reg_def[DBG_MAX_REG_NUM] =
 
 int dbg_set_reg(int regno, void *mem, struct pt_regs *regs)
 {
+	if (regno < 0 || regno >= DBG_MAX_REG_NUM)
+		return -EINVAL;
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* Preserve the authenticated exception snapshot. Continue and hardware
+	 * stepping have a separate narrow adapter below. Report denied writes
+	 * to GDB instead of accepting them and failing later on exception exit. */
+	if (dbg_reg_def[regno].offset != -1 &&
+	    memcmp((void *)regs + dbg_reg_def[regno].offset, mem,
+		   dbg_reg_def[regno].size))
+		return -EPERM;
+#endif
 	if (
 #ifdef CONFIG_X86_32
 	    regno == GDB_SS || regno == GDB_FS || regno == GDB_GS ||
@@ -150,7 +163,16 @@ void sleeping_thread_to_gdb_regs(unsigned long *gdb_regs, struct task_struct *p)
 	gdb_regs[GDB_DX]	= 0;
 	gdb_regs[GDB_SI]	= 0;
 	gdb_regs[GDB_DI]	= 0;
-	gdb_regs[GDB_BP]	= ((struct inactive_task_frame *)p->thread.sp)->bp;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (hdn_stack_address(p->thread.sp)) {
+		unsigned long bp = 0;
+
+		(void)hdn_stack_read(p, p->thread.sp + offsetof(struct inactive_task_frame, bp),
+				     &bp, sizeof(bp));
+		gdb_regs[GDB_BP] = bp;
+	} else
+#endif
+		gdb_regs[GDB_BP] = ((struct inactive_task_frame *)p->thread.sp)->bp;
 #ifdef CONFIG_X86_32
 	gdb_regs[GDB_DS]	= __KERNEL_DS;
 	gdb_regs[GDB_ES]	= __KERNEL_DS;
@@ -448,18 +470,21 @@ int kgdb_arch_handle_exception(int e_vector, int signo, int err_code,
 	case 's':
 		/* try to read optional parameter, pc unchanged if no parm */
 		ptr = &remcomInBuffer[1];
-		if (kgdb_hex2long(&ptr, &addr))
-			linux_regs->ip = addr;
+		if (kgdb_hex2long(&ptr, &addr) &&
+		    hdn_rap_debug_update(linux_regs, addr, 0, 0))
+			return -1;
 		fallthrough;
 	case 'D':
 	case 'k':
 		/* clear the trace bit */
-		linux_regs->flags &= ~X86_EFLAGS_TF;
+		if (hdn_rap_debug_update(linux_regs, linux_regs->ip, 0, X86_EFLAGS_TF))
+			return -1;
 		atomic_set(&kgdb_cpu_doing_single_step, -1);
 
 		/* set the trace bit if we're stepping */
 		if (remcomInBuffer[0] == 's') {
-			linux_regs->flags |= X86_EFLAGS_TF;
+			if (hdn_rap_debug_update(linux_regs, linux_regs->ip, X86_EFLAGS_TF, 0))
+				return -1;
 			atomic_set(&kgdb_cpu_doing_single_step,
 				   raw_smp_processor_id());
 		}
@@ -709,8 +734,7 @@ void kgdb_arch_exit(void)
 int kgdb_skipexception(int exception, struct pt_regs *regs)
 {
 	if (exception == 3 && kgdb_isremovedbreak(regs->ip - 1)) {
-		regs->ip -= 1;
-		return 1;
+		return !hdn_rap_debug_update(regs, regs->ip - 1, 0, 0);
 	}
 	return 0;
 }
@@ -724,7 +748,7 @@ unsigned long kgdb_arch_pc(int exception, struct pt_regs *regs)
 
 void kgdb_arch_set_pc(struct pt_regs *regs, unsigned long ip)
 {
-	regs->ip = ip;
+	(void)hdn_rap_debug_update(regs, ip, 0, 0);
 }
 
 int kgdb_arch_set_breakpoint(struct kgdb_bkpt *bpt)

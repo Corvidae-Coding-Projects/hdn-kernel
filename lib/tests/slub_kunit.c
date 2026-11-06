@@ -7,6 +7,8 @@
 #include <linux/kernel.h>
 #include <linux/rcupdate.h>
 #include <linux/delay.h>
+#include <linux/hdn_slab.h>
+#include <linux/lcm.h>
 #include "../mm/slab.h"
 
 static struct kunit_resource resource;
@@ -291,6 +293,141 @@ static void test_krealloc_redzone_zeroing(struct kunit *test)
 	kmem_cache_destroy(s);
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+static void test_hdn_layout_bulk(struct kunit *test)
+{
+	struct kmem_cache *cache;
+	struct slab *last = NULL;
+	void **objects;
+	unsigned int i, j, allocated, count = 8192;
+	unsigned int observed_slabs = 0;
+	unsigned long orders = 0, offsets = 0, expected, allowed;
+	u64 sequence = 1469598103934665603ULL;
+
+	objects = kunit_kcalloc(test, count, sizeof(*objects), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, objects);
+	cache = kmem_cache_create("hdn_layout_bulk", 64, 16,
+		SLAB_NO_MERGE | SLAB_NO_USER_FLAGS | SLAB_RED_ZONE | SLAB_POISON | SLAB_ACCOUNT,
+		NULL);
+	KUNIT_ASSERT_NOT_NULL(test, cache);
+	cache->flags |= SLAB_SKIP_KFENCE;
+	allocated = kmem_cache_alloc_bulk(cache, GFP_KERNEL, count, objects);
+	if (allocated != count) {
+		KUNIT_FAIL(test, "bulk allocation failed");
+		if (allocated)
+			kmem_cache_free_bulk(cache, allocated, objects);
+		kmem_cache_destroy(cache);
+		return;
+	}
+	for (i = 0; i < count; i++) {
+		struct slab *slab = virt_to_slab(objects[i]);
+		unsigned long base = (unsigned long)slab_address(slab);
+		unsigned long pointer = (unsigned long)kasan_reset_tag(objects[i]);
+		unsigned int offset = slab_object_offset(slab);
+		unsigned long first = base + offset + cache->red_left_pad;
+
+		KUNIT_EXPECT_TRUE(test, IS_ALIGNED(pointer, cache->align));
+		KUNIT_EXPECT_GE(test, pointer, first);
+		KUNIT_EXPECT_LE(test, pointer + 64, base + slab_size(slab));
+		KUNIT_EXPECT_EQ(test, (pointer - first) % cache->size, 0UL);
+		KUNIT_EXPECT_LE(test, offset + slab->objects * cache->size, slab_size(slab));
+		KUNIT_EXPECT_LE(test, offset, 15U * HDN_SLAB_OFFSET_UNIT);
+		KUNIT_EXPECT_EQ(test, offset % cache->align, 0U);
+		KUNIT_EXPECT_EQ(test, offset % HDN_SLAB_OFFSET_UNIT, 0U);
+		KUNIT_EXPECT_PTR_EQ(test, nearest_obj(cache, slab, objects[i]), objects[i]);
+		orders |= BIT(slab_order(slab));
+		offsets |= BIT(offset / HDN_SLAB_OFFSET_UNIT);
+		if (slab != last) {
+			sequence ^= ((u64)slab_order(slab) << 32) | offset;
+			sequence *= 1099511628211ULL;
+			observed_slabs++;
+			last = slab;
+		}
+		memset(objects[i], (u8)i, 64);
+	}
+	/* Distinct live payloads must survive neighboring allocations and writes. */
+	for (i = 0; i < count; i++)
+		for (j = 0; j < 64; j++)
+			KUNIT_EXPECT_EQ(test, ((u8 *)objects[i])[j], (u8)i);
+	expected = GENMASK(oo_order(cache->oo), cache->hdn_min_order);
+	allowed = GENMASK(oo_order(cache->oo), oo_order(cache->min));
+	KUNIT_EXPECT_EQ(test, orders & expected, expected);
+	KUNIT_EXPECT_EQ(test, orders & ~allowed, 0UL);
+	KUNIT_EXPECT_GT(test, hweight_long(offsets), 1U);
+	KUNIT_EXPECT_GE(test, observed_slabs, 32U);
+	validate_slab_cache(cache);
+	KUNIT_EXPECT_EQ(test, slab_errors, 0);
+	kmem_cache_free_bulk(cache, count, objects);
+	kmem_cache_shrink(cache);
+	validate_slab_cache(cache);
+	KUNIT_EXPECT_EQ(test, slab_errors, 0);
+	kunit_info(test, "HDN_SLAB_LAYOUT_OBSERVATION slabs=%u orders=%lx offset_slots=%lx sequence=%016llx",
+		   observed_slabs, orders, offsets, sequence);
+	kmem_cache_destroy(cache);
+}
+#endif
+
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT_TEST
+static void test_hdn_layout_fallback(struct kunit *test)
+{
+	struct hdn_slab_layout_stats before, after;
+	struct kmem_cache *cache;
+	struct slab *slab;
+	unsigned int minimum, maximum, expected_offset;
+	unsigned long fail_orders;
+	u64 test_attempts, test_failures;
+	void *object;
+	int error;
+
+	cache = kmem_cache_create("hdn_layout_fallback", 64, 16,
+		SLAB_NO_MERGE | SLAB_NO_USER_FLAGS, NULL);
+	KUNIT_ASSERT_NOT_NULL(test, cache);
+	cache->flags |= SLAB_SKIP_KFENCE;
+	minimum = oo_order(cache->min);
+	maximum = oo_order(cache->oo);
+	if (maximum <= minimum) {
+		KUNIT_FAIL(test, "test cache has no higher order");
+		kmem_cache_destroy(cache);
+		return;
+	}
+	fail_orders = GENMASK(maximum, minimum + 1);
+	hdn_slab_layout_stats(&before);
+	error = hdn_slab_layout_test_configure(cache, 1, 1, fail_orders);
+	if (error) {
+		KUNIT_FAIL(test, "test control unavailable: %d", error);
+		kmem_cache_destroy(cache);
+		return;
+	}
+	object = kmem_cache_alloc(cache, GFP_KERNEL);
+	hdn_slab_layout_test_clear(cache, &test_attempts, &test_failures);
+	if (!object) {
+		KUNIT_FAIL(test, "minimum-order fallback allocation failed");
+		kmem_cache_destroy(cache);
+		return;
+	}
+	slab = virt_to_slab(object);
+	expected_offset = lcm(cache->align, HDN_SLAB_OFFSET_UNIT);
+	KUNIT_EXPECT_EQ(test, slab_order(slab), minimum);
+	KUNIT_EXPECT_EQ(test, slab_object_offset(slab), expected_offset);
+	KUNIT_EXPECT_LE(test, slab_object_offset(slab) + slab->objects * cache->size,
+			slab_size(slab));
+	hdn_slab_layout_stats(&after);
+	KUNIT_EXPECT_EQ(test, test_attempts, (u64)(maximum - minimum + 1));
+	KUNIT_EXPECT_EQ(test, test_failures, (u64)(maximum - minimum));
+	KUNIT_EXPECT_GE(test, after.allocation_attempts - before.allocation_attempts,
+			(u64)(maximum - minimum + 1));
+	KUNIT_EXPECT_GE(test, after.allocation_failures - before.allocation_failures,
+			(u64)(maximum - minimum));
+	KUNIT_EXPECT_GE(test, after.fallback - before.fallback, 1ULL);
+	KUNIT_EXPECT_GE(test, after.slabs - before.slabs, 1ULL);
+	kunit_info(test, "HDN_SLAB_LAYOUT_FALLBACK attempts=%llu failures=%llu order=%u offset=%u",
+		   test_attempts, test_failures, slab_order(slab), slab_object_offset(slab));
+	kmem_cache_free(cache, object);
+	kmem_cache_shrink(cache);
+	kmem_cache_destroy(cache);
+}
+#endif
+
 static int test_init(struct kunit *test)
 {
 	slab_errors = 0;
@@ -301,6 +438,12 @@ static int test_init(struct kunit *test)
 }
 
 static struct kunit_case test_cases[] = {
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+	KUNIT_CASE(test_hdn_layout_bulk),
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT_TEST
+	KUNIT_CASE(test_hdn_layout_fallback),
+#endif
 	KUNIT_CASE(test_clobber_zone),
 
 #ifndef CONFIG_KASAN

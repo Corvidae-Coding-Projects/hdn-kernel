@@ -11,6 +11,14 @@
 #include <linux/memcontrol.h>
 #include <linux/kfence.h>
 #include <linux/kasan.h>
+#include <linux/hdn_alloc.h>
+
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+#define HDN_ALLOC_PLANES 4
+extern kmem_buckets hdn_alloc_caches[HDN_ALLOC_MODULE + 1][HDN_ALLOC_PLANES];
+extern bool hdn_alloc_ready;
+extern unsigned int hdn_alloc_cache_count;
+#endif
 
 /*
  * Internal slab definitions
@@ -157,6 +165,28 @@ static inline void *slab_address(const struct slab *slab)
 	return folio_address(slab_folio(slab));
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+/* The upper four bits of the 64-bit slab counter's stride word are immutable
+ * layout metadata. Atomic freelist operations preserve the complete word.
+ */
+#define HDN_SLAB_STRIDE_MASK ((1U << 28) - 1)
+#define HDN_SLAB_OFFSET_SHIFT 28
+#define HDN_SLAB_OFFSET_UNIT 16
+static inline unsigned int slab_object_offset(const struct slab *slab)
+{
+	if (is_kfence_address(slab_address(slab)))
+		return 0;
+	return (slab->stride >> HDN_SLAB_OFFSET_SHIFT) * HDN_SLAB_OFFSET_UNIT;
+}
+#else
+static inline unsigned int slab_object_offset(const struct slab *slab) { return 0; }
+#endif
+
+static inline void *slab_object_address(const struct slab *slab)
+{
+	return slab_address(slab) + slab_object_offset(slab);
+}
+
 static inline int slab_nid(const struct slab *slab)
 {
 	return memdesc_nid(slab->flags);
@@ -195,6 +225,9 @@ struct kmem_cache_order_objects {
  * Slab cache management.
  */
 struct kmem_cache {
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_JITTER
+	unsigned int hdn_jitter_class;
+#endif
 	struct slub_percpu_sheaves __percpu *cpu_sheaves;
 	/* Used for retrieving partial slabs, etc. */
 	slab_flags_t flags;
@@ -208,6 +241,12 @@ struct kmem_cache {
 
 	/* Allocation and freeing of slabs */
 	struct kmem_cache_order_objects min;
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+	unsigned int hdn_min_order;
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	unsigned int hdn_alloc_domain;
+#endif
 	gfp_t allocflags;		/* gfp flags to use on each alloc */
 	int refcount;			/* Refcount for slab cache destroy */
 	void (*ctor)(void *object);	/* Object constructor */
@@ -279,8 +318,9 @@ void *fixup_red_left(struct kmem_cache *s, void *p);
 static inline void *nearest_obj(struct kmem_cache *cache,
 				const struct slab *slab, void *x)
 {
-	void *object = x - (x - slab_address(slab)) % cache->size;
-	void *last_object = slab_address(slab) +
+	void *base = slab_object_address(slab);
+	void *object = x < base ? base : x - (x - base) % cache->size;
+	void *last_object = base +
 		(slab->objects - 1) * cache->size;
 	void *result = (unlikely(object > last_object)) ? last_object : object;
 
@@ -301,7 +341,7 @@ static inline unsigned int obj_to_index(const struct kmem_cache *cache,
 {
 	if (is_kfence_address(obj))
 		return 0;
-	return __obj_to_index(cache, slab_address(slab), obj);
+	return __obj_to_index(cache, slab_object_address(slab), obj);
 }
 
 static inline int objs_per_slab(const struct kmem_cache *cache,
@@ -561,11 +601,20 @@ static inline void put_slab_obj_exts(unsigned long obj_exts)
 #ifdef CONFIG_64BIT
 static inline void slab_set_stride(struct slab *slab, unsigned int stride)
 {
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+	VM_BUG_ON(stride > HDN_SLAB_STRIDE_MASK);
+	slab->stride = (slab->stride & ~HDN_SLAB_STRIDE_MASK) | stride;
+#else
 	slab->stride = stride;
+#endif
 }
 static inline unsigned int slab_get_stride(struct slab *slab)
 {
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+	return slab->stride & HDN_SLAB_STRIDE_MASK;
+#else
 	return slab->stride;
+#endif
 }
 #else
 static inline void slab_set_stride(struct slab *slab, unsigned int stride)

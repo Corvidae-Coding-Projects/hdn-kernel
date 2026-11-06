@@ -463,6 +463,10 @@ extern struct paravirt_patch_template pv_ops;
 	__PVOP_VCALL(array, op, PVOP_CALL_ARG1(arg1), PVOP_CALL_ARG2(arg2), \
 		     PVOP_CALL_ARG3(arg3), PVOP_CALL_ARG4(arg4))
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+#include <asm/hdn_rap_paravirt.h>
+#endif
+
 #endif	/* __ASSEMBLER__ */
 
 #define ALT_NOT_XEN	ALT_NOT(X86_FEATURE_XENPV)
@@ -506,6 +510,14 @@ extern struct paravirt_patch_template pv_ops;
  * functions.
  */
 #define PV_THUNK_NAME(func) "__raw_callee_save_" #func
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+/* RAP callers use typed C calls, so the additional register-preserving ABI
+ * is unnecessary. Preserve the public alias used by native/PV comparisons. */
+#define __PV_CALLEE_SAVE_REGS_THUNK(func, section) \
+	extern typeof(func) __raw_callee_save_##func; \
+	__ADDRESSABLE(func); \
+	asm(".globl " PV_THUNK_NAME(func) "\n\t.set " PV_THUNK_NAME(func) "," #func)
+#else
 #define __PV_CALLEE_SAVE_REGS_THUNK(func, section)			\
 	extern typeof(func) __raw_callee_save_##func;			\
 									\
@@ -523,6 +535,7 @@ extern struct paravirt_patch_template pv_ops;
 	    ASM_RET							\
 	    ".size " PV_THUNK_NAME(func) ", .-" PV_THUNK_NAME(func) ";"	\
 	    ".popsection")
+#endif
 
 #define PV_CALLEE_SAVE_REGS_THUNK(func)			\
 	__PV_CALLEE_SAVE_REGS_THUNK(func, ".text")

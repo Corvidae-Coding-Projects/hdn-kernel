@@ -11,6 +11,7 @@
 #include <linux/cfi_types.h>
 #include <asm/cpufeatures.h>
 #include <asm/alternative.h>
+#include <asm/hdn_rap.h>
 
 #undef memmove
 
@@ -28,6 +29,7 @@
  * rax: dest
  */
 SYM_TYPED_FUNC_START(__memmove)
+	HDN_TYPED_FUNC_ENTER __memmove
 
 	mov %rdi, %rax
 
@@ -40,7 +42,11 @@ SYM_TYPED_FUNC_START(__memmove)
 	jg 2f
 
 #define CHECK_LEN	cmp $0x20, %rdx; jb 1f
+#ifdef HDN_RAP_ASM_ACTIVE
+#define MEMMOVE_BYTES jmp .Lmemmove_rep
+#else
 #define MEMMOVE_BYTES	movq %rdx, %rcx; rep movsb; RET
+#endif
 .Lmemmove_begin_forward:
 	ALTERNATIVE_2 __stringify(CHECK_LEN), \
 		      __stringify(CHECK_LEN; MEMMOVE_BYTES), X86_FEATURE_ERMS, \
@@ -209,7 +215,13 @@ SYM_TYPED_FUNC_START(__memmove)
 	movb (%rsi), %r11b
 	movb %r11b, (%rdi)
 13:
-	RET
+	HDN_ENTRY_ROOT_RETURN
+#ifdef HDN_RAP_ASM_ACTIVE
+.Lmemmove_rep:
+	movq %rdx, %rcx
+	rep movsb
+	jmp 13b
+#endif
 SYM_FUNC_END(__memmove)
 EXPORT_SYMBOL(__memmove)
 

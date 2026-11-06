@@ -4009,6 +4009,10 @@ static int status_helper_decodes_audit_flood_fixture(void)
 		"current_mntns_profile: 2\n"
 		"current_exec_memory_flags: 0x0\n"
 		"mitigations_sealed: 1\n"
+		"capability_version: 1\n"
+		"capability_architecture: x86-64\n"
+		"capability_required_mask: 0x0\n"
+		"capability_requirements: unconstrained\n"
 		"mitigation_kernel_lockout: 1\n"
 		"mitigation_proc_hide: 0\n"
 		"mitigation_audit_flood_control: 1\n"
@@ -4224,6 +4228,10 @@ static int control_center_status_fixture_passes(void)
 		"policy_loaded: 1\n"
 		"policy_sealed: 1\n"
 		"mitigations_sealed: 1\n"
+		"capability_version: 1\n"
+		"capability_architecture: x86-64\n"
+		"capability_required_mask: 0x0\n"
+		"capability_requirements: unconstrained\n"
 		"mitigation_kernel_lockout: 1\n";
 	pid_t child;
 	int ret;

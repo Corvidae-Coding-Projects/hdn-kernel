@@ -29,6 +29,8 @@
 #include <trace/events/power.h>
 #include <linux/hw_breakpoint.h>
 #include <linux/entry-common.h>
+#include <linux/hdn_rap.h>
+#include <linux/hdn_stack.h>
 #include <asm/cpu.h>
 #include <asm/cpuid/api.h>
 #include <asm/apic.h>
@@ -106,6 +108,9 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 {
 	/* fpu_clone() will initialize the "dst_fpu" memory */
 	memcpy_and_pad(dst, arch_task_struct_size, src, sizeof(*dst), 0);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	memset(&dst->thread.hdn_bpf_regs, 0, sizeof(dst->thread.hdn_bpf_regs));
+#endif
 
 #ifdef CONFIG_VM86
 	dst->thread.vm86 = NULL;
@@ -167,6 +172,23 @@ __visible void ret_from_fork(struct task_struct *prev, struct pt_regs *regs,
 	syscall_exit_to_user_mode(regs);
 }
 
+static int finish_fork_frame(struct task_struct *task, const struct fork_frame *frame)
+{
+	int error;
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	error = hdn_stack_construct(task, task->thread.sp, frame, sizeof(*frame));
+	if (error)
+		return error;
+#endif
+	error = hdn_rap_task_seed(task);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (!error)
+		hdn_stack_publish(task);
+#endif
+	return error;
+}
+
 int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 {
 	u64 clone_flags = args->flags;
@@ -177,14 +199,23 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	struct pt_regs *childregs;
 	unsigned long new_ssp;
 	int ret = 0;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct fork_frame construction = { };
+#endif
 
 	childregs = task_pt_regs(p);
 	fork_frame = container_of(childregs, struct fork_frame, regs);
+	p->thread.sp = (unsigned long)fork_frame;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* Build off-stack and copy once through the bounded constructor. The
+	 * child's stable address has never been mapped into this task's CR3. */
+	fork_frame = &construction;
+	childregs = &construction.regs;
+#endif
 	frame = &fork_frame->frame;
 
-	frame->bp = encode_frame_pointer(childregs);
+	frame->bp = encode_frame_pointer(task_pt_regs(p));
 	frame->ret_addr = (unsigned long) ret_from_fork_asm;
-	p->thread.sp = (unsigned long) fork_frame;
 	p->thread.io_bitmap = NULL;
 	clear_tsk_thread_flag(p, TIF_IO_BITMAP);
 	p->thread.iopl_warn = 0;
@@ -230,7 +261,7 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 		p->thread.pkru = pkru_get_init_value();
 		memset(childregs, 0, sizeof(struct pt_regs));
 		kthread_frame_init(frame, args->fn, args->fn_arg);
-		return 0;
+		return finish_fork_frame(p, fork_frame);
 	}
 
 	/*
@@ -259,7 +290,7 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 		childregs->sp = 0;
 		childregs->ip = 0;
 		kthread_frame_init(frame, args->fn, args->fn_arg);
-		return 0;
+		return finish_fork_frame(p, fork_frame);
 	}
 
 	/* Set a new TLS for the child thread? */
@@ -269,7 +300,7 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	if (!ret && unlikely(test_tsk_thread_flag(current, TIF_IO_BITMAP)))
 		io_bitmap_share(p);
 
-	return ret;
+	return ret ?: finish_fork_frame(p, fork_frame);
 }
 
 static void pkru_flush_thread(void)

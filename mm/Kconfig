@@ -201,6 +201,61 @@ config SLAB_MERGE_DEFAULT
 	  merging at runtime, "slab_nomerge" can be passed on the kernel
 	  command line.
 
+config SECURITY_HARDENING_AUTOSLAB
+	bool "Compiler-typed slab allocation domains"
+	depends on SECURITY_HARDENING && GCC_PLUGINS && X86_64 && !SLUB_TINY
+	select SLAB_BUCKETS
+	default n
+	help
+	  Route reviewed security types to dedicated, unmergeable cache families.
+	  Preserve normal, accounting, reclaim and DMA cache distinctions. Other
+	  complete types share bounded compatible kmalloc tiers, using a stable
+	  compiler identity instead of a call-site address when randomized caches
+	  are enabled. Module callers cannot select built-in mandatory domains.
+	  Type metadata and unclassified sites require a source-bound build report.
+	  Cache families are created before publication and never silently fall
+	  back to another domain. Keep disabled until allocator qualification.
+
+config SECURITY_HARDENING_SLAB_JITTER
+	bool "HDN typed critical-object placement and reuse hardening"
+	depends on SECURITY_HARDENING_AUTOSLAB && !KMSAN
+	default n
+	help
+	  Add aligned payload jitter, external keyed guards and bounded retirement
+	  queues to credentials, files and backing files. Generic frees cannot
+	  release these envelopes. Every moved file payload follows an RCU grace
+	  period, preserving speculative file-reference readers. Early allocations
+	  made before RNG initialization are reported as degraded until retired.
+	  KMSAN is Clang-only while the required AUTOSLAB identity producer is
+	  currently GCC-only, so that unsupported combination is rejected rather
+	  than silently claiming sanitizer coverage.
+	  Enable only after the supported sanitizer, lifetime and cost matrices.
+
+config SECURITY_HARDENING_SLAB_LAYOUT
+	bool "Vary SLUB order and per-slab object placement"
+	depends on SECURITY_HARDENING && X86_64 && !SLUB_TINY
+	default n
+	help
+	  Select between the normal cache order and at most one higher order,
+	  bounded by order three and the existing allocator limit. A boot-keyed
+	  generator chooses each new slab's aligned leading offset, up to 240
+	  bytes, sacrificing at most one eighth of its original object capacity.
+	  Slabs with insufficient aligned space retain a zero offset and are
+	  counted. Lower-order fallback retains offset selection where it fits.
+	  Early bootstrap slabs are explicitly unrandomized until random_init.
+	  This adds no per-object fast-path RNG or separately allocated metadata.
+	  Enable only in qualification profiles until the allocator matrix passes.
+
+config SECURITY_HARDENING_SLAB_LAYOUT_TEST
+	bool "Deterministic SLUB layout fallback probes"
+	depends on SECURITY_HARDENING_SLAB_LAYOUT && SLUB_KUNIT_TEST=y
+	default n
+	help
+	  Add a KUnit-only control scoped to one newly created test cache. It can
+	  select the order/offset choice and fail named slab orders so the exact
+	  lower-order fallback and retained offset policy can be checked without
+	  disturbing any other cache. Never enable this in a release kernel.
+
 config SLAB_FREELIST_RANDOM
 	bool "Randomize slab freelist"
 	depends on !SLUB_TINY

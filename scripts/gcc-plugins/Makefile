@@ -35,6 +35,7 @@ plugin_cxxflags	= -Wp,-MMD,$(depfile) $(KBUILD_HOSTCXXFLAGS) -fPIC \
 		  -Wno-format-diag
 
 plugin_ldflags	= -shared
+hdn_rap_plugin-libs := -lcrypto
 
 plugin-single	:= $(foreach m, $(GCC_PLUGIN), $(if $($(m:%.so=%-objs)),,$(m)))
 plugin-multi	:= $(filter-out $(plugin-single), $(GCC_PLUGIN))
@@ -48,7 +49,7 @@ plugin-multi	:= $(addprefix $(obj)/, $(plugin-multi))
 plugin-objs	:= $(addprefix $(obj)/, $(plugin-objs))
 
 quiet_cmd_plugin_cxx_so_c = HOSTCXX $@
-      cmd_plugin_cxx_so_c = $(HOSTCXX) $(plugin_cxxflags) $(plugin_ldflags) -o $@ $<
+      cmd_plugin_cxx_so_c = $(HOSTCXX) $(plugin_cxxflags) $(plugin_ldflags) -o $@ $< $($(target-stem)-libs)
 
 $(plugin-single): $(obj)/%.so: $(src)/%.c FORCE
 	$(call if_changed_dep,plugin_cxx_so_c)

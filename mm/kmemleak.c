@@ -101,6 +101,7 @@
 #include <linux/kasan.h>
 #include <linux/kfence.h>
 #include <linux/kmemleak.h>
+#include <linux/hdn_stack.h>
 #include <linux/memory_hotplug.h>
 
 /*
@@ -1542,6 +1543,26 @@ static void scan_block(void *_start, void *_end,
 	raw_spin_unlock_irqrestore(&kmemleak_lock, flags);
 }
 
+static void scan_task_stack(struct task_struct *task, void *stack)
+{
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (hdn_stack_address((unsigned long)stack)) {
+		/* A bounded local snapshot preserves stack roots without publishing
+		 * a mapping of the stopped task. The caller holds a stack reference. */
+		unsigned long words[32];
+
+		for (size_t offset = 0; offset < THREAD_SIZE; offset += sizeof(words)) {
+			if (scan_should_stop() ||
+			    hdn_stack_read(task, (unsigned long)stack + offset, words, sizeof(words)))
+				break;
+			scan_block(words, words + ARRAY_SIZE(words), NULL);
+		}
+		return;
+	}
+#endif
+	scan_block(stack, stack + THREAD_SIZE, NULL);
+}
+
 /*
  * Scan a large memory block in MAX_SCAN_SIZE chunks to reduce the latency.
  */
@@ -1784,7 +1805,7 @@ static void kmemleak_scan(void)
 		for_each_process_thread(g, p) {
 			void *stack = try_get_task_stack(p);
 			if (stack) {
-				scan_block(stack, stack + THREAD_SIZE, NULL);
+				scan_task_stack(p, stack);
 				put_task_stack(p);
 			}
 		}

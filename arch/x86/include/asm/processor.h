@@ -446,6 +446,11 @@ void current_save_fsgs(void);
 struct perf_event;
 
 struct thread_struct {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* Diagnostic output only. Execution and return authentication never
+	 * consume this copy; it is not an alias of the stack backing. */
+	struct pt_regs hdn_bpf_regs;
+#endif
 	/* Cached TLS descriptors: */
 	struct desc_struct	tls_array[GDT_ENTRY_TLS_ENTRIES];
 #ifdef CONFIG_X86_32
@@ -677,8 +682,14 @@ extern void start_thread(struct pt_regs *regs, unsigned long new_ip,
 #define __TASK_UNMAPPED_BASE(task_size)	(PAGE_ALIGN(task_size / 3))
 #define TASK_UNMAPPED_BASE		__TASK_UNMAPPED_BASE(TASK_SIZE_LOW)
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+unsigned long hdn_stack_task_reg(const struct task_struct *task, unsigned int offset);
+#define KSTK_EIP(task) hdn_stack_task_reg(task, offsetof(struct pt_regs, ip))
+#define KSTK_ESP(task) hdn_stack_task_reg(task, offsetof(struct pt_regs, sp))
+#else
 #define KSTK_EIP(task)		(task_pt_regs(task)->ip)
 #define KSTK_ESP(task)		(task_pt_regs(task)->sp)
+#endif
 
 /* Get/set a process' ability to use the timestamp counter instruction */
 #define GET_TSC_CTL(adr)	get_tsc_mode((adr))
@@ -718,7 +729,7 @@ static inline void amd_check_microcode(void)		{ }
 
 extern unsigned long arch_align_stack(unsigned long sp);
 void free_init_pages(const char *what, unsigned long begin, unsigned long end);
-extern void free_kernel_image_pages(const char *what, void *begin, void *end);
+extern unsigned long free_kernel_image_pages(const char *what, void *begin, void *end);
 
 void default_idle(void);
 #ifdef	CONFIG_XEN

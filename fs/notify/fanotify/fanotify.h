@@ -262,6 +262,9 @@ struct fanotify_event {
 		unsigned int hash : FANOTIFY_EVENT_HASH_BITS;
 	};
 	struct pid *pid;
+#ifdef CONFIG_SECURITY_HARDENING_SYSFS_VIEW
+	u64 hdn_disclosure;
+#endif
 };
 
 static inline void fanotify_init_event(struct fanotify_event *event,
@@ -272,6 +275,18 @@ static inline void fanotify_init_event(struct fanotify_event *event,
 	event->hash = hash;
 	event->mask = mask;
 	event->pid = NULL;
+#ifdef CONFIG_SECURITY_HARDENING_SYSFS_VIEW
+	event->hdn_disclosure = 0;
+#endif
+}
+
+static inline u64 fanotify_event_disclosure(struct fanotify_event *event)
+{
+#ifdef CONFIG_SECURITY_HARDENING_SYSFS_VIEW
+	return event->hdn_disclosure;
+#else
+	return 0;
+#endif
 }
 
 #define FANOTIFY_INLINE_FH(name, size)					\

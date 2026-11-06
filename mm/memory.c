@@ -7328,8 +7328,15 @@ static inline int process_huge_page(
 	return 0;
 }
 
-static void clear_contig_highpages(struct page *page, unsigned long addr,
-				   unsigned int nr_pages)
+/*
+ * Keep the architecture clear_pages() inline assembly out of the larger
+ * folio_zero_user() frame.  With KMSAN instrumentation, inlining this loop can
+ * make Clang spill the stack-pointer operand used by ASM_CALL_CONSTRAINT and
+ * leave objtool unable to recover the CFA at the alternative call site.
+ */
+static noinline_for_stack void clear_contig_highpages(struct page *page,
+					       unsigned long addr,
+					       unsigned int nr_pages)
 {
 	unsigned int i, count;
 	/*

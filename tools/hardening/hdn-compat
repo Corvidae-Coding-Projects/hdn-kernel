@@ -1,0 +1,445 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-2.0-only
+"""Offline, pinned-publisher compatibility compiler. Never loads or signs policy."""
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+
+VERSION = 1
+LIMIT = 1024 * 1024
+ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "OPENSSL_CONF": "/dev/null"}
+INTENTS = {"jit-private": 1 << 4, "fixed-private-code": 1 << 2}
+
+
+class Rejected(Exception):
+    def __init__(self, category, message):
+        self.category, self.message = category, message
+
+
+def require(condition, category="invalid-metadata", message="Invalid application metadata"):
+    if not condition:
+        raise Rejected(category, message)
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def pairs(entries):
+    result = {}
+    for key, value in entries:
+        require(key not in result, message="Duplicate metadata field")
+        result[key] = value
+    return result
+
+
+def decode(data):
+    require(len(data) <= LIMIT)
+    return json.loads(data.decode("utf-8", "strict"), object_pairs_hook=pairs,
+                      parse_constant=lambda _: require(False))
+
+
+def fields(value, names):
+    require(type(value) is dict and set(value) == set(names.split()))
+
+
+def integer(value, maximum=(1 << 64) - 2):
+    require(type(value) is int and 0 < value <= maximum)
+    return value
+
+
+def digest(value):
+    require(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value))
+    return value
+
+
+def package(value):
+    fields(value, "name version release")
+    for part in value.values():
+        require(type(part) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~:-]{0,127}", part))
+
+
+def pathname(value):
+    require(type(value) is str and value.startswith("/") and len(value.encode()) < 256)
+    require(all(re.fullmatch(r"[A-Za-z0-9_+.@-]+", part) and part not in (".", "..")
+                for part in value.split("/")[1:]))
+    return value
+
+
+def intents(value):
+    require(type(value) is list and 0 < len(value) <= len(INTENTS))
+    require(all(type(v) is str for v in value) and len(set(value)) == len(value))
+    require(all(v in INTENTS for v in value), "unsupported-request",
+            "This application needs an updated build; its requested exception is unsupported")
+    return sum(INTENTS[v] for v in value)
+
+
+def snapshot(path, maximum=LIMIT):
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and 0 < before.st_size <= maximum)
+        data = bytearray()
+        while len(data) <= maximum:
+            chunk = os.read(fd, min(65536, maximum + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        after = os.fstat(fd)
+        require(len(data) == before.st_size and
+                (before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+                (after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+                "changed-input", "Application metadata changed during verification")
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def memfile(data=None):
+    fd = os.memfd_create("hdn-compat", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    try:
+        if data is not None:
+            with os.fdopen(os.dup(fd), "wb") as stream:
+                stream.write(data)
+            os.lseek(fd, 0, os.SEEK_SET)
+            fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW |
+                        fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def fdpath(fd):
+    return f"/proc/self/fd/{fd}"
+
+
+def run(argv, fds=(), data=None):
+    result = subprocess.run(argv, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            pass_fds=fds, close_fds=True, env=ENV, timeout=30, check=False)
+    require(result.returncode == 0, "verification-failed",
+            "Application approval could not be verified; obtain a current signed package")
+    require(len(result.stdout) <= LIMIT and len(result.stderr) <= LIMIT)
+    return result.stdout
+
+
+def certificate(data):
+    # One explicitly pinned public certificate; no ambient CA or embedded signer.
+    require(re.fullmatch(rb"\s*-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+"
+                         rb"-----END CERTIFICATE-----\s*", data), "invalid-certificate")
+    return run(["/usr/bin/openssl", "x509", "-inform", "PEM", "-outform", "DER"], data=data)
+
+
+def der_items(data):
+    """Bounded definite-length DER framing, not a cryptographic implementation."""
+    result, cursor = [], 0
+    while cursor < len(data):
+        require(cursor + 2 <= len(data), "invalid-signature")
+        tag, length = data[cursor:cursor + 2]
+        cursor += 2
+        require(tag & 31 != 31, "invalid-signature")
+        if length & 128:
+            width = length & 127
+            require(1 <= width <= 4 and cursor + width <= len(data) and data[cursor] != 0,
+                    "invalid-signature")
+            length = int.from_bytes(data[cursor:cursor + width], "big")
+            cursor += width
+            require(length >= 128, "invalid-signature")
+        require(cursor + length <= len(data), "invalid-signature")
+        result.append((tag, data[cursor:cursor + length]))
+        cursor += length
+    return result
+
+
+def cms_digest_contract(signature):
+    # RFC 5652 sections 5.1 and 5.3. Only detached SignedData with one signer
+    # and a modern content digest is accepted; OpenSSL validates all signatures.
+    def sequence(data):
+        values = der_items(data)
+        require(len(values) == 1 and values[0][0] == 0x30, "invalid-signature")
+        return der_items(values[0][1])
+
+    def algorithm(value):
+        require(value[0] == 0x30, "invalid-signature")
+        parts = der_items(value[1])
+        require(len(parts) in (1, 2) and parts[0][0] == 6, "invalid-signature")
+        require(len(parts) == 1 or parts[1] == (5, b""), "invalid-signature")
+        allowed = {bytes.fromhex("608648016503040201"), bytes.fromhex("608648016503040202"),
+                   bytes.fromhex("608648016503040203")}
+        require(parts[0][1] in allowed, "unsupported-signature-digest")
+        return parts[0][1]
+
+    content = sequence(signature)
+    require(len(content) == 2 and content[0] == (6, bytes.fromhex("2a864886f70d010702"))
+            and content[1][0] == 0xa0, "invalid-signature")
+    signed = sequence(content[1][1])
+    require(4 <= len(signed) <= 6 and signed[0][0] == 2 and signed[1][0] == 0x31
+            and signed[2][0] == 0x30 and signed[-1][0] == 0x31, "invalid-signature")
+    require(der_items(signed[2][1]) == [(6, bytes.fromhex("2a864886f70d010701"))],
+            "attached-signature-not-supported")
+    digests = der_items(signed[1][1])
+    require(len(digests) == 1, "invalid-signature")
+    digest_oid = algorithm(digests[0])
+    signer = sequence(signed[-1][1])
+    require(len(signer) >= 5 and signer[0][0] == 2 and algorithm(signer[2]) == digest_oid,
+            "invalid-signature")
+
+
+def verify(data, signature, cert):
+    cms_digest_contract(signature)
+    pinned = certificate(cert)
+    with memfile(data) as content, memfile(signature) as sig, memfile(cert) as pem, memfile() as signer:
+        verified = run(["/usr/bin/openssl", "cms", "-verify", "-verify_retcode", "-binary",
+                        "-inform", "DER", "-in", fdpath(sig), "-content", fdpath(content),
+                        "-nointern", "-certfile", fdpath(pem), "-noverify", "-signer", fdpath(signer)],
+                       (content, sig, pem, signer))
+        require(verified == data, "signature-content-mismatch")
+        os.lseek(signer, 0, os.SEEK_SET)
+        signed_by = os.read(signer, 65537)
+        require(len(signed_by) <= 65536 and certificate(signed_by) == pinned, "wrong-publisher")
+    return sha(pinned)
+
+
+class Policy:
+    def __init__(self, data, abi):
+        self.abi, self.header = abi, abi["header"]
+        self.data = bytearray(data)
+        require(len(data) >= self.header["size"] and len(data) <= abi["max_policy"])
+        for field, expected in (("magic", abi["magic"]), ("abi_version", abi["abi"]),
+                                ("header_size", self.header["size"])):
+            require(self.get(data, self.header, field) == expected, "incompatible-policy")
+        self.records, self.offsets = {}, {}
+        cursor = self.header["size"]
+        for name in ("profile", "subject_rule", "object_rule", "exec_rule", "module_rule",
+                     "firmware_rule", "resource_rule"):
+            layout = abi["records"][name]
+            size, count = self.h(name + "_size"), self.h(name + "_count")
+            require(size == layout["size"] and count <= layout["maximum"], "incompatible-policy")
+            require(cursor + size * count <= len(data), "invalid-policy")
+            self.offsets[name] = cursor
+            self.records[name] = [data[cursor + i * size:cursor + (i + 1) * size] for i in range(count)]
+            cursor += size * count
+        require(cursor == len(data), "invalid-policy", "Expected an unsigned compiled base policy")
+
+    def get(self, data, layout, field):
+        offset, size = layout["fields"][field]
+        return int.from_bytes(data[offset:offset + size], self.abi["byteorder"])
+
+    def set(self, data, layout, field, value):
+        offset, size = layout["fields"][field]
+        encoded = value if isinstance(value, bytes) else value.to_bytes(size, self.abi["byteorder"])
+        require(len(encoded) <= size)
+        data[offset:offset + size] = encoded.ljust(size, b"\0")
+
+    def h(self, field):
+        return self.get(self.data, self.header, field)
+
+    def record(self, name, record, field):
+        return self.get(record, self.abi["records"][name], field)
+
+    def binding(self, approval, executable):
+        target, parent = integer(approval["profile_id"]), integer(approval["parent_profile_id"])
+        found = [r for r in self.records["profile"] if self.record("profile", r, "profile_id") == target]
+        require(len(found) == 1 and sha(found[0]) == digest(approval["profile_sha256"]), "profile-mismatch")
+        require(any(self.record("profile", r, "profile_id") == parent for r in self.records["profile"]),
+                "profile-mismatch")
+        require(target != parent and target not in (self.h("default_profile_id"), self.h("privileged_profile_id")))
+        for record in self.records["profile"]:
+            if self.record("profile", record, "profile_id") in (self.h("default_profile_id"), self.h("privileged_profile_id")):
+                require(self.record("profile", record, "memory_flags") == 0, "ambient-memory-grant")
+        flags = self.record("profile", found[0], "flags")
+        memory = self.record("profile", found[0], "memory_flags")
+        require(not flags & self.abi["inherit_flag"] and memory == intents(executable["intents"])
+                and not memory & ~self.abi["memory_mask"], "unsupported-request")
+        require(not any(self.record("subject_rule", r, "profile_id") == target
+                        for r in self.records["subject_rule"]), "ambient-profile")
+        require(not any(self.record("object_rule", r, "profile_id") == target
+                        for r in self.records["object_rule"]), "unsupported-object-policy")
+        # Dedicated preapproved profiles have no preexisting exec selector.
+        # Reject wildcard inheritance, which could copy this grant without its lease.
+        for rule in self.records["exec_rule"]:
+            require(self.record("exec_rule", rule, "target_profile_id") != target, "ambient-profile")
+            require(self.record("exec_rule", rule, "flags") & (1 << 3), "unsupported-base-selector")
+            path_offset, path_size = self.abi["records"]["exec_rule"]["fields"]["file_path"]
+            existing_path = rule[path_offset:path_offset + path_size].split(b"\0", 1)[0].decode("utf-8", "strict")
+            require(existing_path != executable["path"], "ambiguous-executable-binding")
+            if self.record("exec_rule", rule, "flags") & (1 << 5):
+                require(self.record("exec_rule", rule, "parent_profile_id") not in (0, target), "ambient-profile")
+        layout = self.abi["records"]["exec_rule"]
+        rule = bytearray(layout["size"])
+        values = {"target_profile_id": target, "parent_profile_id": parent,
+                  "flags": self.abi["lease_flags"], "verity_digest_size": 32,
+                  "verity_digest_algorithm": 1,
+                  "verity_digest": bytes.fromhex(executable["verity"]["digest"]),
+                  "file_path": executable["path"].encode() + b"\0"}
+        for key, value in values.items():
+            self.set(rule, layout, key, value)
+        return rule
+
+    def finish(self, rules):
+        count = self.h("exec_rule_count") + len(rules)
+        require(count <= self.abi["records"]["exec_rule"]["maximum"])
+        # Prepend exact approved selectors so earlier generic rules cannot shadow them.
+        cursor = self.offsets["exec_rule"]
+        self.data[cursor:cursor] = b"".join(rules)
+        self.set(self.data, self.header, "exec_rule_count", count)
+        require(len(self.data) <= self.abi["max_policy"])
+        return bytes(self.data)
+
+
+def open_image(rootfd, path):
+    directory = os.dup(rootfd)
+    try:
+        parts = pathname(path).split("/")[1:]
+        for part in parts[:-1]:
+            child = os.open(part, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        return os.open(parts[-1], os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    finally:
+        os.close(directory)
+
+
+def image_identity(fd, executable, abi):
+    info = os.fstat(fd)
+    require(stat.S_ISREG(info.st_mode) and info.st_mode & 0o111 and info.st_size <= 1024**3,
+            "unsupported-image")
+    head = os.pread(fd, 64, 0)
+    machine = {"x86_64": 62, "aarch64": 183, "riscv64": 243}.get(os.uname().machine)
+    require(len(head) == 64 and head[:6] == b"\x7fELF\x02\x01" and
+            int.from_bytes(head[18:20], "little") == machine and
+            int.from_bytes(head[16:18], "little") in (2, 3), "unsupported-image",
+            "Use a native executable package; scripts and foreign binaries need separate approval")
+    measured = bytearray(68)
+    measured[2:4] = (64).to_bytes(2, abi["byteorder"])
+    fcntl.ioctl(fd, abi["measure_verity"], measured, True)
+    require(int.from_bytes(measured[:2], abi["byteorder"]) == 1 and
+            int.from_bytes(measured[2:4], abi["byteorder"]) == 32 and
+            measured[4:36].hex() == executable["verity"]["digest"], "image-mismatch")
+    hasher = hashlib.sha256()
+    offset = 0
+    while chunk := os.pread(fd, 65536, offset):
+        hasher.update(chunk)
+        offset += len(chunk)
+    require(offset == info.st_size and hasher.hexdigest() == executable["sha256"], "image-mismatch")
+    return info.st_dev, info.st_ino
+
+
+def write_new(path, data):
+    # Never overwrite a previous output or follow a link. A failed write leaves
+    # an unsigned incomplete file, which must be discarded by the build owner.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def compile_policy(args):
+    manifest_bytes = snapshot(args.manifest)
+    approvals_bytes = snapshot(args.approvals)
+    publisher = verify(manifest_bytes, snapshot(args.manifest_signature, 131072),
+                       snapshot(args.publisher_cert, 65536))
+    authority = verify(approvals_bytes, snapshot(args.approvals_signature, 131072),
+                       snapshot(args.authority_cert, 65536))
+    require(publisher != authority, "non-independent-approval",
+            "Application approval must come from an independent distribution authority")
+    manifest, approvals = decode(manifest_bytes), decode(approvals_bytes)
+    fields(manifest, "schema kind package policy_generation executables")
+    fields(approvals, "schema kind package policy_generation publisher_sha256 base_policy_sha256 bindings")
+    require(type(manifest["schema"]) is int and manifest["schema"] == VERSION and
+            type(approvals["schema"]) is int and approvals["schema"] == VERSION, "unsupported-schema")
+    require(manifest["kind"] == "hdn.compat.package" and approvals["kind"] == "hdn.compat.approvals")
+    package(manifest["package"])
+    package(approvals["package"])
+    require(manifest["package"] == approvals["package"] and
+            publisher == digest(approvals["publisher_sha256"]), "wrong-publisher")
+    generation = integer(manifest["policy_generation"])
+    require(generation == integer(approvals["policy_generation"]), "stale-approval")
+    base = snapshot(args.base_policy)
+    require(sha(base) == digest(approvals["base_policy_sha256"]), "stale-approval")
+    abi = decode(run([os.path.join(os.path.dirname(os.path.realpath(__file__)), "hdn-compat-abi")]))
+    require(abi["schema"] == VERSION and abi["byteorder"] == sys.byteorder, "incompatible-tools")
+    policy = Policy(base, abi)
+    require(policy.h("generation") == generation and
+            policy.h("expected_generation") != (1 << 64) - 1, "stale-approval")
+    executables, bindings = manifest["executables"], approvals["bindings"]
+    require(type(executables) is list and 0 < len(executables) <= 128 and type(bindings) is list
+            and len(bindings) == len(executables))
+    approved = {}
+    for binding in bindings:
+        fields(binding, "path profile_id parent_profile_id profile_sha256 intents")
+        path = pathname(binding["path"])
+        require(path not in approved)
+        intents(binding["intents"])
+        approved[path] = binding
+    rootfd = os.open(args.image_root, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    rules, identities, seen = [], [], set()
+    try:
+        for executable in executables:
+            fields(executable, "path sha256 verity intents")
+            path = pathname(executable["path"])
+            require(path not in seen and path in approved)
+            seen.add(path)
+            digest(executable["sha256"])
+            fields(executable["verity"], "algorithm digest")
+            require(executable["verity"]["algorithm"] == "sha256", "unsupported-digest")
+            digest(executable["verity"]["digest"])
+            require(intents(executable["intents"]) == intents(approved[path]["intents"]), "unapproved-intent")
+            fd = open_image(rootfd, path)
+            try:
+                identity = image_identity(fd, executable, abi)
+            finally:
+                os.close(fd)
+            identities.append((path, identity))
+            rules.append(policy.binding(approved[path], executable))
+        for path, identity in identities:
+            fd = open_image(rootfd, path)
+            try:
+                info = os.fstat(fd)
+                require((info.st_dev, info.st_ino) == identity, "changed-input")
+            finally:
+                os.close(fd)
+    finally:
+        os.close(rootfd)
+    output = policy.finish(rules)
+    report = {"schema": VERSION, "compiler_version": VERSION, "status": "ready-for-signing",
+              "package": manifest["package"], "policy_generation": generation,
+              "manifest_sha256": sha(manifest_bytes), "approvals_sha256": sha(approvals_bytes),
+              "publisher_sha256": publisher, "authority_sha256": authority,
+              "base_policy_sha256": sha(base), "output_policy_sha256": sha(output),
+              "executables": sorted(seen), "runtime_applied": False}
+    write_new(args.output, output)
+    print(json.dumps(report, sort_keys=True))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"hdn-compat {VERSION}; intent schema {VERSION}")
+    sub = parser.add_subparsers(dest="command", required=True)
+    command = sub.add_parser("compile")
+    for name in ("manifest", "manifest-signature", "publisher-cert", "approvals", "approvals-signature",
+                 "authority-cert", "base-policy", "image-root", "output"):
+        command.add_argument("--" + name, required=True)
+    args = parser.parse_args()
+    try:
+        compile_policy(args)
+        return 0
+    except Rejected as error:
+        category, message = error.category, error.message
+    except (OSError, ValueError, OverflowError, KeyError, TypeError, RecursionError, subprocess.SubprocessError):
+        category, message = "verification-failed", "Application approval could not be verified; obtain a current signed package"
+    print(json.dumps({"schema": VERSION, "status": "rejected", "category": category,
+                      "message": message, "runtime_applied": False}), file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -17,6 +17,7 @@
 #include "internal.h"
 
 #include <linux/prmt.h>
+#include <linux/slab.h>
 
 /*
  * PRM parameter buffer - normalized to system physical address, as described
@@ -32,15 +33,21 @@ struct norm_to_sys_param_buf {
 unsigned long prm_umc_norm_to_sys_addr(u8 socket_id, u64 bank_id, unsigned long addr)
 {
 	struct norm_to_sys_param_buf p_buf;
-	unsigned long ret_addr;
+	unsigned long ret_addr, *result;
 	int ret;
+
+	result = kzalloc_obj(*result);
+	if (!result)
+		return -ENOMEM;
 
 	p_buf.norm_addr = addr;
 	p_buf.socket    = socket_id;
 	p_buf.bank_id   = bank_id;
-	p_buf.out_buf   = &ret_addr;
+	p_buf.out_buf   = result;
 
-	ret = acpi_call_prm_handler(norm_to_sys_guid, &p_buf);
+	ret = acpi_call_prm_handler(norm_to_sys_guid, &p_buf, sizeof(p_buf));
+	ret_addr = *result;
+	kfree(result);
 	if (!ret)
 		return ret_addr;
 

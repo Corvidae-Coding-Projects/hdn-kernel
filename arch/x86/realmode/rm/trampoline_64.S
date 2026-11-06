@@ -282,13 +282,28 @@ SYM_DATA_END(tr_compat)
 	.balign	PAGE_SIZE
 SYM_DATA(trampoline_pgd, .space PAGE_SIZE)
 
-	.balign	8
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	/* Immutable launch parameters have their own page. The real-mode lock
+	 * remains writable on a different page and never selects code or CR3. */
+	.section ".data", "aw"
+	.balign PAGE_SIZE
+#else
+	.balign 8
+#endif
 SYM_DATA_START(trampoline_header)
 	SYM_DATA_LOCAL(tr_start,	.space 8)
 	SYM_DATA(tr_efer,		.space 8)
 	SYM_DATA(tr_cr4,		.space 4)
 	SYM_DATA(tr_flags,		.space 4)
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	.long pa_tr_lock
+#else
 	SYM_DATA(tr_lock,		.space 4)
+#endif
 SYM_DATA_END(trampoline_header)
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	.balign PAGE_SIZE
+	SYM_DATA(tr_lock, .space 4)
+#endif
 
 #include "trampoline_common.S"

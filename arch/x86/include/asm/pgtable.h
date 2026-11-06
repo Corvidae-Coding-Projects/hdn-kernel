@@ -17,6 +17,7 @@
 
 #ifndef __ASSEMBLER__
 #include <linux/spinlock.h>
+#include <asm/hdn_pgtable.h>
 #include <asm/x86_init.h>
 #include <asm/pkru.h>
 #include <asm/fpu/api.h>
@@ -1289,7 +1290,8 @@ static inline void ptep_set_wrprotect(struct mm_struct *mm,
 	old_pte = READ_ONCE(*ptep);
 	do {
 		new_pte = pte_wrprotect(old_pte);
-	} while (!try_cmpxchg((long *)&ptep->pte, (long *)&old_pte, *(long *)&new_pte));
+	} while (!hdn_pt_try_cmpxchg((unsigned long *)&ptep->pte,
+				    (unsigned long *)&old_pte, *(unsigned long *)&new_pte, 1));
 }
 
 #define flush_tlb_fix_spurious_fault(vma, address, ptep) do { } while (0)
@@ -1349,7 +1351,8 @@ static inline void pmdp_set_wrprotect(struct mm_struct *mm,
 	old_pmd = READ_ONCE(*pmdp);
 	do {
 		new_pmd = pmd_wrprotect(old_pmd);
-	} while (!try_cmpxchg((long *)pmdp, (long *)&old_pmd, *(long *)&new_pmd));
+	} while (!hdn_pt_try_cmpxchg((unsigned long *)pmdp,
+				    (unsigned long *)&old_pmd, *(unsigned long *)&new_pmd, 2));
 }
 
 #ifndef pmdp_establish
@@ -1358,6 +1361,9 @@ static inline pmd_t pmdp_establish(struct vm_area_struct *vma,
 		unsigned long address, pmd_t *pmdp, pmd_t pmd)
 {
 	page_table_check_pmd_set(vma->vm_mm, address, pmdp, pmd);
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	return native_make_pmd(hdn_pt_exchange(&pmdp->pmd, pmd_val(pmd), 2));
+#else
 	if (IS_ENABLED(CONFIG_SMP)) {
 		return xchg(pmdp, pmd);
 	} else {
@@ -1365,6 +1371,7 @@ static inline pmd_t pmdp_establish(struct vm_area_struct *vma,
 		WRITE_ONCE(*pmdp, pmd);
 		return old;
 	}
+#endif
 }
 #endif
 
@@ -1373,6 +1380,9 @@ static inline pud_t pudp_establish(struct vm_area_struct *vma,
 		unsigned long address, pud_t *pudp, pud_t pud)
 {
 	page_table_check_pud_set(vma->vm_mm, address, pudp, pud);
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	return native_make_pud(hdn_pt_exchange(&pudp->pud, pud_val(pud), 3));
+#else
 	if (IS_ENABLED(CONFIG_SMP)) {
 		return xchg(pudp, pud);
 	} else {
@@ -1380,6 +1390,7 @@ static inline pud_t pudp_establish(struct vm_area_struct *vma,
 		WRITE_ONCE(*pudp, pud);
 		return old;
 	}
+#endif
 }
 #endif
 
@@ -1465,13 +1476,13 @@ static inline p4d_t *user_to_kernel_p4dp(p4d_t *p4dp)
  */
 static inline void clone_pgd_range(pgd_t *dst, pgd_t *src, int count)
 {
-	memcpy(dst, src, count * sizeof(pgd_t));
+	hdn_pt_copy(dst, src, count * sizeof(pgd_t), pgtable_l5_enabled() ? 5 : 4);
 #ifdef CONFIG_MITIGATION_PAGE_TABLE_ISOLATION
 	if (!static_cpu_has(X86_FEATURE_PTI))
 		return;
 	/* Clone the user space pgd as well */
-	memcpy(kernel_to_user_pgdp(dst), kernel_to_user_pgdp(src),
-	       count * sizeof(pgd_t));
+	hdn_pt_copy(kernel_to_user_pgdp(dst), kernel_to_user_pgdp(src),
+	       count * sizeof(pgd_t), pgtable_l5_enabled() ? 5 : 4);
 #endif
 }
 

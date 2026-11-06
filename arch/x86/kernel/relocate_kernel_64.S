@@ -14,6 +14,7 @@
 #include <asm/nospec-branch.h>
 #include <asm/unwind_hints.h>
 #include <asm/asm-offsets.h>
+#include <asm/hdn_rap.h>
 
 /*
  * Must be relocatable PIC code callable as a C function, in particular
@@ -38,6 +39,9 @@ SYM_DATA_LOCAL(saved_cr4, .quad 0)
 SYM_DATA(kexec_va_control_page, .quad 0)
 SYM_DATA(kexec_pa_table_page, .quad 0)
 SYM_DATA(kexec_pa_swap_page, .quad 0)
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+SYM_DATA(kexec_pa_rap_state, .quad 0)
+#endif
 SYM_DATA_LOCAL(pa_backup_pages_map, .quad 0)
 SYM_DATA(kexec_debug_8250_mmio32, .quad 0)
 SYM_DATA(kexec_debug_8250_port, .word 0)
@@ -60,6 +64,7 @@ SYM_DATA_END(kexec_debug_idt)
 	.section .text..relocate_kernel,"ax";
 	.code64
 SYM_CODE_START_NOALIGN(relocate_kernel)
+	HDN_KEXEC_FUNC relocate_kernel, 11
 	UNWIND_HINT_END_OF_STACK
 	ANNOTATE_NOENDBR
 	/*
@@ -89,7 +94,11 @@ SYM_CODE_START_NOALIGN(relocate_kernel)
 
 	/* Switch to the identity mapped page tables */
 	movq	%cr3, %rax
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	movq %r8, %r9
+#else
 	movq	kexec_pa_table_page(%rip), %r9
+#endif
 	movq	%r9, %cr3
 
 	/* Leave CR4 in %r13 to enable the right paging mode later. */
@@ -120,13 +129,20 @@ SYM_CODE_START_NOALIGN(relocate_kernel)
 	lea	PAGE_SIZE(%rsi), %rsp
 
 	/* jump to identity mapped page */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	leaq identity_mapped(%rip), %rax
+	subq kexec_va_control_page(%rip), %rax
+	addq %rax, %rsi
+#else
 0:	addq	$identity_mapped - 0b, %rsi
 	subq	$__relocate_kernel_start - 0b, %rsi
+#endif
 	ANNOTATE_RETPOLINE_SAFE
 	jmp	*%rsi
 SYM_CODE_END(relocate_kernel)
 
 SYM_CODE_START_LOCAL_NOALIGN(identity_mapped)
+	HDN_KEXEC_FUNC identity_mapped, 11
 	UNWIND_HINT_END_OF_STACK
 	/*
 	 * %rdi	indirection page
@@ -297,9 +313,15 @@ SYM_CODE_START_LOCAL_NOALIGN(identity_mapped)
 	 */
 	movl	$RELOC_KERNEL_PRESERVE_CONTEXT, %r11d
 	call	swap_pages
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	leaq virtual_mapped(%rip), %rax
+	subq %r8, %rax
+	addq kexec_va_control_page(%rip), %rax
+#else
 	movq	kexec_va_control_page(%rip), %rax
 0:	addq	$virtual_mapped - 0b, %rax
 	subq	$__relocate_kernel_start - 0b, %rax
+#endif
 	pushq	%rax
 	ANNOTATE_UNRET_SAFE
 	ret
@@ -307,8 +329,24 @@ SYM_CODE_START_LOCAL_NOALIGN(identity_mapped)
 SYM_CODE_END(identity_mapped)
 
 SYM_CODE_START_LOCAL_NOALIGN(virtual_mapped)
+	HDN_KEXEC_FUNC virtual_mapped, 11
 	UNWIND_HINT_END_OF_STACK
 	ANNOTATE_NOENDBR // RET target, above
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* After swap-back the original sealed checkpoint is again resident.
+	 * Read it through the identity map before switching to the old CR3.
+	 * No control-page stack slot supplies a return address or saved RSP. */
+	movq kexec_pa_rap_state(%rip), %rsi
+	movq HDN_KEXEC_CR4(%rsi), %rax
+	movq %rax, %cr4
+	movq HDN_KEXEC_CR3(%rsi), %rax
+	movq HDN_KEXEC_CR0(%rsi), %r8
+	movq %rax, %cr3
+	movq %r8, %cr0
+	movq $hdn_rap_kexec_return, %rax
+	ANNOTATE_RETPOLINE_SAFE
+	jmp *%rax
+#else
 	movq	saved_rsp(%rip), %rsp
 	movq	saved_cr4(%rip), %rax
 	movq	%rax, %cr4
@@ -336,10 +374,12 @@ SYM_CODE_START_LOCAL_NOALIGN(virtual_mapped)
 	ANNOTATE_UNRET_SAFE
 	ret
 	int3
+#endif
 SYM_CODE_END(virtual_mapped)
 
 	/* Do the copies */
 SYM_CODE_START_LOCAL_NOALIGN(swap_pages)
+	HDN_KEXEC_FUNC swap_pages, 11
 	UNWIND_HINT_END_OF_STACK
 	/*
 	 * %rdi indirection page
@@ -420,6 +460,7 @@ SYM_CODE_END(swap_pages)
 #define LSR             5       /*  Line Status               */
 
 SYM_CODE_START_LOCAL_NOALIGN(pr_char_8250)
+	HDN_KEXEC_FUNC pr_char_8250, 11
 	UNWIND_HINT_FUNC
 	ANNOTATE_NOENDBR
 	addw	$LSR, %dx
@@ -443,6 +484,7 @@ pr_char_null:
 SYM_CODE_END(pr_char_8250)
 
 SYM_CODE_START_LOCAL_NOALIGN(pr_char_8250_mmio32)
+	HDN_KEXEC_FUNC pr_char_8250_mmio32, 11
 	UNWIND_HINT_FUNC
 	ANNOTATE_NOENDBR
 .Lxmtrdy_loop_mmio:
@@ -479,6 +521,7 @@ SYM_CODE_END(pr_char_8250_mmio32)
 
 /* Print the nybble in %bl, clobber %rax */
 SYM_CODE_START_LOCAL_NOALIGN(pr_nybble)
+	HDN_KEXEC_FUNC pr_nybble, 11
 	UNWIND_HINT_FUNC
 	movb	%bl, %al
 	nop
@@ -492,6 +535,7 @@ SYM_CODE_START_LOCAL_NOALIGN(pr_nybble)
 SYM_CODE_END(pr_nybble)
 
 SYM_CODE_START_LOCAL_NOALIGN(pr_qword)
+	HDN_KEXEC_FUNC pr_qword, 11
 	UNWIND_HINT_FUNC
 	movq	$16, %rcx
 1:	rolq	$4, %rbx
@@ -520,6 +564,7 @@ SYM_CODE_END(pr_qword)
 .endm
 
 SYM_CODE_START_NOALIGN(kexec_debug_exc_vectors)
+	HDN_KEXEC_FUNC kexec_debug_exc_vectors, 11
 	/* Each of these is 6 bytes. */
 .macro vec_err exc
 	UNWIND_HINT_ENTRY
@@ -558,6 +603,7 @@ SYM_CODE_START_NOALIGN(kexec_debug_exc_vectors)
 SYM_CODE_END(kexec_debug_exc_vectors)
 
 SYM_CODE_START_LOCAL_NOALIGN(exc_handler)
+	HDN_KEXEC_FUNC exc_handler, 11
 	/* No need for RET mitigations during kexec */
 	VALIDATE_UNRET_END
 

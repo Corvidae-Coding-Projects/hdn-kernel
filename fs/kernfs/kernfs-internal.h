@@ -19,6 +19,16 @@
 #include <linux/kernfs.h>
 #include <linux/fs_context.h>
 
+#ifdef CONFIG_SECURITY_HARDENING_SYSFS_VIEW
+void hdn_kernfs_classify(struct kernfs_node *kn, struct kernfs_node *parent,
+			const char *name);
+bool hdn_kernfs_hidden(struct kernfs_node *kn);
+#else
+static inline void hdn_kernfs_classify(struct kernfs_node *kn,
+		struct kernfs_node *parent, const char *name) { }
+static inline bool hdn_kernfs_hidden(struct kernfs_node *kn) { return false; }
+#endif
+
 struct kernfs_iattrs {
 	kuid_t			ia_uid;
 	kgid_t			ia_gid;

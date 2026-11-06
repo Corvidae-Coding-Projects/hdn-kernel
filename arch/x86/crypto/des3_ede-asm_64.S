@@ -6,6 +6,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 .file "des3_ede-asm_64.S"
 .text
@@ -171,6 +172,7 @@
 	movl   right##d, 4(io);
 
 SYM_FUNC_START(des3_ede_x86_64_crypt_blk)
+	HDN_ASM_FUNCTION des3_ede_x86_64_crypt_blk
 	/* input:
 	 *	%rdi: round keys, CTX
 	 *	%rsi: dst
@@ -251,7 +253,8 @@ SYM_FUNC_START(des3_ede_x86_64_crypt_blk)
 	popq %r12;
 	popq %rbx;
 
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END des3_ede_x86_64_crypt_blk
 SYM_FUNC_END(des3_ede_x86_64_crypt_blk)
 
 /***********************************************************************
@@ -451,6 +454,7 @@ SYM_FUNC_END(des3_ede_x86_64_crypt_blk)
 	movq src, dst;
 
 SYM_FUNC_START(des3_ede_x86_64_crypt_blk_3way)
+	HDN_ASM_FUNCTION des3_ede_x86_64_crypt_blk_3way
 	/* input:
 	 *	%rdi: ctx, round keys
 	 *	%rsi: dst (3 blocks)
@@ -560,7 +564,8 @@ SYM_FUNC_START(des3_ede_x86_64_crypt_blk_3way)
 	popq %r12;
 	popq %rbx;
 
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END des3_ede_x86_64_crypt_blk_3way
 SYM_FUNC_END(des3_ede_x86_64_crypt_blk_3way)
 
 .section	.rodata, "a", @progbits

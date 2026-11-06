@@ -8,6 +8,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 #define		PASS0_SUMS	%ymm0
 #define		PASS1_SUMS	%ymm1
@@ -70,6 +71,7 @@
  * It's guaranteed that message_len % 16 == 0.
  */
 SYM_FUNC_START(nh_avx2)
+	HDN_ASM_FUNCTION nh_avx2
 
 	vmovdqu		0x00(KEY), K0
 	vmovdqu		0x10(KEY), K1
@@ -154,5 +156,6 @@ SYM_FUNC_START(nh_avx2)
 	vpaddq		T4, T0, T0
 	vmovdqu		T0, (HASH)
 	vzeroupper
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END nh_avx2
 SYM_FUNC_END(nh_avx2)

@@ -25,6 +25,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 #define CTX	%rdi	// arg1
 #define BUF	%rsi	// arg2
@@ -68,6 +69,7 @@
  */
 .macro SHA1_VECTOR_ASM  name
 	SYM_FUNC_START(\name)
+		HDN_ASM_FUNCTION \name
 
 	push	%rbx
 	push	%r12
@@ -99,8 +101,9 @@
 	pop	%rbp
 	pop	%r12
 	pop	%rbx
-	RET
+	HDN_ASM_RETURN
 
+		HDN_ASM_FUNCTION_END \name
 	SYM_FUNC_END(\name)
 .endm
 

@@ -146,7 +146,11 @@ struct kimage_arch {
 	pte_t *pte1;
 };
 #else
+struct hdn_pt_transition;
 struct kimage_arch {
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	struct hdn_pt_transition *hdn_tables;
+#endif
 	/*
 	 * This is a kimage control page, as it must not overlap with either
 	 * source or destination address ranges.
@@ -168,6 +172,12 @@ struct kimage_arch {
 #endif /* CONFIG_X86_32 */
 
 #ifdef CONFIG_X86_64
+struct kimage;
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+int machine_kexec_post_load(struct kimage *image);
+#define machine_kexec_post_load machine_kexec_post_load
+extern unsigned long kexec_pa_rap_state;
+#endif
 /*
  * Number of elements and order of elements in this structure should match
  * with the ones in arch/x86/purgatory/entry64.S. If you make a change here

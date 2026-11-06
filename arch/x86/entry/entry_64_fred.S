@@ -4,11 +4,13 @@
  */
 
 #include <linux/export.h>
+#include <linux/cfi_types.h>
 #include <linux/kvm_types.h>
 
 #include <asm/asm.h>
 #include <asm/fred.h>
 #include <asm/segment.h>
+#include <asm/hdn_rap.h>
 
 #include "calling.h"
 
@@ -35,8 +37,9 @@
 	.align 4096
 
 SYM_CODE_START_NOALIGN(asm_fred_entrypoint_user)
+	HDN_KEXEC_FUNC asm_fred_entrypoint_user, 28
 	FRED_ENTER
-	call	fred_entry_from_user
+	HDN_C_CALL fred_entry_from_user
 SYM_INNER_LABEL(asm_fred_exit_user, SYM_L_GLOBAL)
 	FRED_EXIT
 1:	ERETU
@@ -51,15 +54,19 @@ SYM_CODE_END(asm_fred_entrypoint_user)
  */
 	.org asm_fred_entrypoint_user + 256, 0xcc
 SYM_CODE_START_NOALIGN(asm_fred_entrypoint_kernel)
+	HDN_KEXEC_FUNC asm_fred_entrypoint_kernel, 28
 	FRED_ENTER
-	call	fred_entry_from_kernel
+	HDN_FRAME_ENTER HDN_RAP_FRAME_FRED
+	movq	%rsp, %rdi
+	HDN_C_CALL fred_entry_from_kernel
+	HDN_FRAME_EXIT HDN_RAP_FRAME_FRED
 	FRED_EXIT
 	ERETS
 SYM_CODE_END(asm_fred_entrypoint_kernel)
 
 #if IS_ENABLED(CONFIG_KVM_INTEL)
-SYM_FUNC_START(asm_fred_entry_from_kvm)
-	ANNOTATE_NOENDBR
+SYM_TYPED_FUNC_START(asm_fred_entry_from_kvm)
+	HDN_TYPED_FUNC_ENTER asm_fred_entry_from_kvm
 	push %rbp
 	mov %rsp, %rbp
 
@@ -126,7 +133,10 @@ SYM_FUNC_START(asm_fred_entry_from_kvm)
 	 *
 	 * Further calling another C function will not alter this state.
 	 */
-	call __fred_entry_from_kvm		/* Call the C entry point */
+	HDN_FRAME_ENTER HDN_RAP_FRAME_FRED_SYNTH
+	movq %rsp, %rdi
+	HDN_C_CALL __fred_entry_from_kvm
+	HDN_FRAME_EXIT HDN_RAP_FRAME_FRED_SYNTH
 
 	/*
 	 * When FRED, use ERETS to potentially clear NMIs, otherwise simply
@@ -144,7 +154,7 @@ SYM_FUNC_START(asm_fred_entry_from_kvm)
 	UNWIND_HINT_RESTORE
 
 	pop %rbp
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 SYM_FUNC_END(asm_fred_entry_from_kvm)
 EXPORT_SYMBOL_FOR_KVM(asm_fred_entry_from_kvm);

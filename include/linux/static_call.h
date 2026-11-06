@@ -134,6 +134,7 @@
 #include <linux/types.h>
 #include <linux/cpu.h>
 #include <linux/static_call_types.h>
+#include <linux/hdn_rap.h>
 
 #ifdef CONFIG_HAVE_STATIC_CALL
 #include <asm/static_call.h>
@@ -258,6 +259,7 @@ static inline
 void __static_call_update(struct static_call_key *key, void *tramp, void *func)
 {
 	cpus_read_lock();
+	hdn_rap_static_update((unsigned long)key, (unsigned long)tramp, (unsigned long)func);
 	WRITE_ONCE(key->func, func);
 	arch_static_call_transform(NULL, tramp, func, false);
 	cpus_read_unlock();

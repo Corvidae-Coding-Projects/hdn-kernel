@@ -257,6 +257,7 @@ cpu_initialize_context(unsigned int cpu, struct task_struct *idle)
 	BUG_ON((unsigned long)gdt & ~PAGE_MASK);
 
 	gdt_mfn = arbitrary_virt_to_mfn(gdt);
+	hdn_gdt_xen_bind(cpu, mfn_to_pfn(gdt_mfn), GDT_SIZE);
 	make_lowmem_page_readonly(gdt);
 	make_lowmem_page_readonly(mfn_to_virt(gdt_mfn));
 

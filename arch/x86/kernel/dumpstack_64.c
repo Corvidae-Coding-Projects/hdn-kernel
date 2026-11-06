@@ -15,9 +15,11 @@
 #include <linux/sysfs.h>
 #include <linux/bug.h>
 #include <linux/nmi.h>
+#include <linux/hdn_rap.h>
 
 #include <asm/cpu_entry_area.h>
 #include <asm/stacktrace.h>
+#include <asm/hdn_rap_efi.h>
 
 static const char * const exception_stack_names[] = {
 		[ ESTACK_DF	]	= "#DF",
@@ -34,6 +36,10 @@ const char *stack_type_name(enum stack_type type)
 
 	if (type == STACK_TYPE_TASK)
 		return "TASK";
+	if (type == STACK_TYPE_HDN_EFI)
+		return "EFI";
+	if (type == STACK_TYPE_HDN_FAILURE)
+		return "HDN_FAILURE";
 
 	if (type == STACK_TYPE_IRQ)
 		return "IRQ";
@@ -170,11 +176,33 @@ static __always_inline bool in_irq_stack(unsigned long *stack, struct stack_info
 bool noinstr get_stack_info_noinstr(unsigned long *stack, struct task_struct *task,
 				    struct stack_info *info)
 {
+	unsigned long begin, end;
+#ifdef CONFIG_EFI
+	unsigned long next;
+#endif
+
 	if (in_task_stack(stack, task, info))
 		return true;
 
 	if (task != current)
 		return false;
+	if (hdn_rap_failure_stack((unsigned long)stack, &begin, &end)) {
+		info->type = STACK_TYPE_HDN_FAILURE;
+		info->begin = (unsigned long *)begin;
+		info->end = (unsigned long *)end;
+		info->next_sp = NULL; /* Never follow the rejected call chain. */
+		return true;
+	}
+
+#ifdef CONFIG_EFI
+	if (hdn_efi_stack_info((unsigned long)stack, &begin, &end, &next)) {
+		info->type = STACK_TYPE_HDN_EFI;
+		info->begin = (void *)begin;
+		info->end = (void *)end;
+		info->next_sp = (void *)next;
+		return true;
+	}
+#endif
 
 	if (in_exception_stack(stack, info))
 		return true;

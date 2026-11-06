@@ -5,6 +5,7 @@
  * License.  See the file COPYING in the main directory of this archive
  * for more details. No warranty for anything given at all.
  */
+#include <asm/hdn_rap.h>
 #include <linux/linkage.h>
 #include <asm/errno.h>
 #include <asm/asm.h>
@@ -37,6 +38,10 @@
 	.endm
 
 SYM_FUNC_START(csum_partial_copy_generic)
+#ifdef HDN_RAP_ASM_ACTIVE
+	ENDBR
+#endif
+	HDN_TYPED_FUNC_ENTER csum_partial_copy_generic, 1
 	subq  $5*8, %rsp
 	movq  %rbx, 0*8(%rsp)
 	movq  %r12, 1*8(%rsp)
@@ -201,7 +206,7 @@ SYM_FUNC_START(csum_partial_copy_generic)
 	movq 3*8(%rsp), %r13
 	movq 4*8(%rsp), %r15
 	addq $5*8, %rsp
-	RET
+	HDN_ENTRY_ROOT_RETURN
 .Lshort:
 	movl %ecx, %r10d
 	jmp  .L1

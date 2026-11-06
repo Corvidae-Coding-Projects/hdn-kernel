@@ -17,6 +17,7 @@
 #include <linux/err.h>
 #include <linux/acct.h>
 #include <linux/slab.h>
+#include <linux/hdn_alloc.h>
 #include <linux/proc_ns.h>
 #include <linux/reboot.h>
 #include <linux/export.h>
@@ -53,9 +54,12 @@ static struct kmem_cache *create_pid_cachep(unsigned int level)
 	len = struct_size_t(struct pid, numbers, level + 1);
 	mutex_lock(&pid_caches_mutex);
 	/* Name collision forces to do allocation under mutex. */
-	if (!*pkc)
+	if (!*pkc) {
 		*pkc = kmem_cache_create(name, len, 0,
-					 SLAB_HWCACHE_ALIGN | SLAB_ACCOUNT, NULL);
+					 SLAB_HWCACHE_ALIGN | SLAB_ACCOUNT | SLAB_HDN_DOMAIN, NULL);
+		if (*pkc)
+			hdn_cache_domain(*pkc, HDN_ALLOC_PID);
+	}
 	mutex_unlock(&pid_caches_mutex);
 	/* current can fail, but someone else can succeed. */
 	return READ_ONCE(*pkc);
@@ -468,7 +472,8 @@ const struct proc_ns_operations pidns_for_children_operations = {
 
 static __init int pid_namespaces_init(void)
 {
-	pid_ns_cachep = KMEM_CACHE(pid_namespace, SLAB_PANIC | SLAB_ACCOUNT);
+	pid_ns_cachep = KMEM_CACHE(pid_namespace, SLAB_PANIC | SLAB_ACCOUNT | SLAB_HDN_DOMAIN);
+	hdn_cache_domain(pid_ns_cachep, HDN_ALLOC_PID_NAMESPACE);
 
 #ifdef CONFIG_CHECKPOINT_RESTORE
 	register_sysctl_init("kernel", pid_ns_ctl_table);

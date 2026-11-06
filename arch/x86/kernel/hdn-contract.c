@@ -1,0 +1,101 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#include <linux/hdn_capabilities.h>
+#include <linux/hdn_kernexec.h>
+#include <linux/hdn_pgtable.h>
+#include <linux/hdn_rap.h>
+#include <linux/hdn_uaccess.h>
+#include <linux/string.h>
+#include <asm/hdn_gdt.h>
+#include <asm/set_memory.h>
+
+static struct hdn_capability_record query(enum hdn_capability_id id)
+{
+	switch (id) {
+	case HDN_CAP_KERNEL_WX:
+		return hdn_cap_option(id, IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNEL_WX));
+	case HDN_CAP_STATIC_ALIASES:
+		return hdn_cap_record(id,
+			!IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNEL_WX) ? HDN_CAP_DISABLED :
+			kernel_set_to_readonly ? HDN_CAP_ENFORCED : HDN_CAP_INITIALIZING,
+			IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNEL_WX) ?
+			HDN_CAP_BACKING_SOFTWARE : HDN_CAP_BACKING_NONE);
+	case HDN_CAP_EXECMEM_ALIASES:
+		return hdn_cap_option(id, IS_ENABLED(CONFIG_SECURITY_HARDENING_EXECMEM));
+	case HDN_CAP_DESCRIPTOR_ALIASES:
+		return hdn_cap_record(id,
+			!IS_ENABLED(CONFIG_SECURITY_HARDENING_GDT) ? HDN_CAP_DISABLED :
+			!hdn_gdt_sealed() || !hdn_idt_sealed() ? HDN_CAP_INITIALIZING :
+			IS_ENABLED(CONFIG_MODIFY_LDT_SYSCALL) &&
+			!IS_ENABLED(CONFIG_SECURITY_HARDENING_LDT) ? HDN_CAP_DEGRADED : HDN_CAP_ENFORCED,
+			IS_ENABLED(CONFIG_SECURITY_HARDENING_GDT) ?
+			HDN_CAP_BACKING_HYBRID : HDN_CAP_BACKING_NONE);
+	case HDN_CAP_INIT_RETIREMENT:
+		return hdn_cap_record(id,
+			!IS_ENABLED(CONFIG_SECURITY_HARDENING_INITIFY) ? HDN_CAP_DISABLED :
+			hdn_init_aliases_retired() ? HDN_CAP_ENFORCED : HDN_CAP_INITIALIZING,
+			IS_ENABLED(CONFIG_SECURITY_HARDENING_INITIFY) ?
+			HDN_CAP_BACKING_SOFTWARE : HDN_CAP_BACKING_NONE);
+	case HDN_CAP_USER_ACCESS:
+		if (!strcmp(hdn_uderef_state(), "hardware"))
+			return hdn_cap_record(id, HDN_CAP_ENFORCED, HDN_CAP_BACKING_HARDWARE);
+		return hdn_cap_record(id,
+			!strcmp(hdn_uderef_state(), "initializing") ? HDN_CAP_INITIALIZING :
+			IS_ENABLED(CONFIG_SECURITY_HARDENING_UDEREF) ? HDN_CAP_UNSUPPORTED :
+			HDN_CAP_DISABLED, HDN_CAP_BACKING_NONE);
+	case HDN_CAP_ACCESS_WINDOW_VALIDATION:
+		return hdn_cap_option(id, IS_ENABLED(CONFIG_SECURITY_HARDENING_UDEREF));
+	case HDN_CAP_BPF_DOMAIN:
+	case HDN_CAP_BPF_RETIREMENT:
+		return hdn_cap_option(id, IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM));
+	case HDN_CAP_FORWARD_CFI:
+		if (IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP))
+			return hdn_cap_record(id,
+				!strcmp(hdn_rap_state(), "active") ? HDN_CAP_ENFORCED :
+				HDN_CAP_INITIALIZING, HDN_CAP_BACKING_SOFTWARE);
+		return hdn_cap_record(id, IS_ENABLED(CONFIG_CFI) ? HDN_CAP_DEGRADED :
+			HDN_CAP_UNSUPPORTED, IS_ENABLED(CONFIG_CFI) ?
+			HDN_CAP_BACKING_SOFTWARE : HDN_CAP_BACKING_NONE);
+	case HDN_CAP_FIRMWARE_WX:
+		return hdn_cap_record(id, IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNEL_WX) ?
+			HDN_CAP_DEGRADED : HDN_CAP_UNSUPPORTED,
+			IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNEL_WX) ?
+			HDN_CAP_BACKING_SOFTWARE : HDN_CAP_BACKING_NONE);
+	case HDN_CAP_PAGE_TABLE_ALIASES:
+		return hdn_cap_record(id,
+			!IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE) ? HDN_CAP_DISABLED :
+			!strcmp(hdn_pt_state(), "initializing") ? HDN_CAP_INITIALIZING :
+			!strcmp(hdn_pt_state(), "active") ? HDN_CAP_ENFORCED : HDN_CAP_UNSUPPORTED,
+			IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE) ?
+			HDN_CAP_BACKING_SOFTWARE : HDN_CAP_BACKING_NONE);
+	case HDN_CAP_RETURN_CFI:
+		return hdn_cap_record(id,
+			!IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP) ? HDN_CAP_UNSUPPORTED :
+			!strcmp(hdn_rap_state(), "active") ? HDN_CAP_ENFORCED : HDN_CAP_INITIALIZING,
+			IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP) ?
+			HDN_CAP_BACKING_SOFTWARE : HDN_CAP_BACKING_NONE);
+	case HDN_CAP_PRIVATE_STACK_ALIASES:
+		return hdn_cap_record(id,
+			!IS_ENABLED(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS) ? HDN_CAP_UNSUPPORTED :
+			!strcmp(hdn_rap_state(), "active") ? HDN_CAP_ENFORCED : HDN_CAP_INITIALIZING,
+			IS_ENABLED(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS) ?
+			HDN_CAP_BACKING_SOFTWARE : HDN_CAP_BACKING_NONE);
+	case HDN_CAP_TYPED_SLAB:
+	case HDN_CAP_CRITICAL_JITTER:
+		return hdn_cap_record(id, HDN_CAP_UNSUPPORTED, HDN_CAP_BACKING_NONE);
+	case HDN_CAP_TRANSIENT_DATAFLOW:
+		return hdn_cap_record(id,
+			IS_ENABLED(CONFIG_SECURITY_HARDENING_RESPECTRE) ? HDN_CAP_DEGRADED :
+			HDN_CAP_DISABLED, IS_ENABLED(CONFIG_SECURITY_HARDENING_RESPECTRE) ?
+			HDN_CAP_BACKING_SOFTWARE : HDN_CAP_BACKING_NONE);
+	case HDN_CAP_IMMUTABLE_POLICY:
+	case HDN_CAP_SLAB_LAYOUT:
+	case HDN_CAP_SYSFS_VIEW:
+	case HDN_CAP__MAX:
+		break;
+	}
+	return hdn_cap_record(id, HDN_CAP_UNDECLARED, HDN_CAP_BACKING_NONE);
+}
+
+const struct hdn_arch_contract hdn_arch_contract = {
+	.name = "x86-64", .query = query,
+};

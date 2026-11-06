@@ -677,6 +677,7 @@ static struct kernfs_node *__kernfs_new_node(struct kernfs_root *root,
 	rcu_assign_pointer(kn->name, name);
 	kn->mode = mode;
 	kn->flags = flags;
+	hdn_kernfs_classify(kn, parent, name);
 
 	if (!uid_eq(uid, GLOBAL_ROOT_UID) || !gid_eq(gid, GLOBAL_ROOT_GID)) {
 		struct iattr iattr = {
@@ -1203,6 +1204,8 @@ static int kernfs_dop_revalidate(struct inode *dir, const struct qstr *name,
 
 	kn = kernfs_dentry_node(dentry);
 	root = kernfs_root(kn);
+	if (hdn_kernfs_hidden(kn))
+		return -ENOENT;
 	down_read(&root->kernfs_rwsem);
 
 	/* The kernfs node has been deactivated */
@@ -1250,6 +1253,11 @@ static struct dentry *kernfs_iop_lookup(struct inode *dir,
 		ns = kernfs_info(dir->i_sb)->ns;
 
 	kn = kernfs_find_ns(parent, dentry->d_name.name, ns);
+	if (kn && hdn_kernfs_hidden(kn)) {
+		up_read(&root->kernfs_rwsem);
+		/* Never share a profile-specific negative dentry with another task. */
+		return ERR_PTR(-ENOENT);
+	}
 	/* attach dentry and inode */
 	if (kn) {
 		/* Inactive nodes are invisible to the VFS so don't
@@ -1919,6 +1927,8 @@ static bool hdn_kernfs_readdir_visible(struct kernfs_root *root,
 	struct kernfs_node *grandparent;
 	bool sensitive = false;
 
+	if (hdn_kernfs_hidden(kn))
+		return false;
 	if (root->syscall_ops)
 		return true;
 	if (kernfs_type(kn) != KERNFS_FILE)
@@ -1981,6 +1991,8 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 	struct kernfs_root *root;
 	const struct ns_common *ns = NULL;
 
+	if (hdn_kernfs_hidden(parent))
+		return -ENOENT;
 	if (!dir_emit_dots(file, ctx))
 		return 0;
 
@@ -2016,9 +2028,17 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 	return 0;
 }
 
+static loff_t kernfs_dir_fop_llseek(struct file *file, loff_t offset,
+				    int whence)
+{
+	if (hdn_kernfs_hidden(kernfs_dentry_node(file->f_path.dentry)))
+		return -ENOENT;
+	return generic_file_llseek(file, offset, whence);
+}
+
 const struct file_operations kernfs_dir_fops = {
 	.read		= generic_read_dir,
 	.iterate_shared	= kernfs_fop_readdir,
 	.release	= kernfs_dir_fop_release,
-	.llseek		= generic_file_llseek,
+	.llseek		= kernfs_dir_fop_llseek,
 };

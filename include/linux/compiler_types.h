@@ -472,6 +472,22 @@ struct ftrace_likely_data {
 # define __latent_entropy
 #endif
 
+#ifndef __hdn_null_attacker_entry
+# define __hdn_null_attacker_entry
+#endif
+
+#ifndef __hdn_null_probe
+# define __hdn_null_probe(owner, invalidation)
+#endif
+
+#ifndef __hdn_size_wrap
+# define __hdn_size_wrap(owner, reason, invalidation)
+#endif
+
+#ifndef __hdn_spec_review
+# define __hdn_spec_review(category, owner, reason, invalidation)
+#endif
+
 #if defined(RANDSTRUCT) && !defined(__CHECKER__)
 # define __randomize_layout __designated_init __attribute__((randomize_layout))
 # define __no_randomize_layout __attribute__((no_randomize_layout))

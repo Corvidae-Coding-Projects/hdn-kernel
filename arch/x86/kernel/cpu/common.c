@@ -28,6 +28,9 @@
 #include <linux/stackprotector.h>
 #include <linux/utsname.h>
 #include <linux/efi.h>
+#include <linux/hdn_uaccess.h>
+#include <linux/hardening.h>
+#include <asm/hdn_text.h>
 
 #include <asm/alternative.h>
 #include <asm/cmdline.h>
@@ -450,6 +453,23 @@ static const unsigned long cr4_pinned_mask = X86_CR4_SMEP | X86_CR4_SMAP | X86_C
 static DEFINE_STATIC_KEY_FALSE_RO(cr_pinning);
 static unsigned long cr4_pinned_bits __ro_after_init;
 
+#ifdef CONFIG_SECURITY_HARDENING_UDEREF
+static atomic64_t hdn_smap_repairs;
+
+const char *hdn_uderef_state(void)
+{
+	if (!boot_cpu_has(X86_FEATURE_SMAP))
+		return "unsupported";
+	return static_branch_likely(&cr_pinning) && (cr4_pinned_bits & X86_CR4_SMAP) ?
+		"hardware" : "initializing";
+}
+
+u64 hdn_uderef_repairs(void)
+{
+	return atomic64_read(&hdn_smap_repairs);
+}
+#endif
+
 void native_write_cr0(unsigned long val)
 {
 	unsigned long bits_missing = 0;
@@ -483,6 +503,13 @@ set_register:
 			goto set_register;
 		}
 		/* Warn after we've corrected the changed bits. */
+#ifdef CONFIG_SECURITY_HARDENING_UDEREF
+		if (unlikely(bits_changed & X86_CR4_SMAP)) {
+			atomic64_inc(&hdn_smap_repairs);
+			hdn_x86_defer_transition(HDN_TRANS_KERNEL_UACCESS,
+				hdn_uderef_site_id(_RET_IP_), HDN_REASON_KERNEL_SMAP_RESTORED);
+		}
+#endif
 		WARN_ONCE(bits_changed, "pinned CR4 bits changed: 0x%lx!?\n",
 			  bits_changed);
 	}

@@ -10,6 +10,7 @@
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/cred.h>
+#include <linux/hdn_jitter.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
@@ -41,6 +42,7 @@ static unsigned long number_cred_unused;
 static struct cred machine_cred = {
 	.usage = ATOMIC_INIT(1),
 };
+HDN_STATIC_CRED(machine_cred);
 
 /*
  * Return the machine_cred pointer to be used whenever

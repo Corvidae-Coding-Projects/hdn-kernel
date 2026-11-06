@@ -14,6 +14,10 @@ obj-m += test_klp_atomic_replace.o \
 	test_klp_state3.o \
 	test_klp_syscall.o
 
+ifeq ($(CONFIG_SECURITY_HARDENING_PGTABLE),y)
+obj-m += test_hdn_klp_target.o test_hdn_klp_patch.o
+endif
+
 # Ensure that KDIR exists, otherwise skip the compilation
 modules:
 ifneq ("$(wildcard $(KDIR))", "")

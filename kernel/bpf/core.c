@@ -40,6 +40,7 @@
 #include <linux/bpf_mem_alloc.h>
 #include <linux/memcontrol.h>
 #include <linux/execmem.h>
+#include <linux/hdn_execmem.h>
 #include <crypto/sha2.h>
 
 #include <asm/barrier.h>
@@ -936,12 +937,31 @@ out:
 	return NULL;
 }
 
+void *bpf_prog_pack_alloc_type(u32 size, bpf_jit_fill_hole_t fill, unsigned int type)
+{
+	void *ptr;
+	size_t length = PAGE_ALIGN((size_t)size);
+
+	if (!IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM))
+		return bpf_prog_pack_alloc(size, fill);
+	if (!size || !execmem_is_bpf(type))
+		return NULL;
+	/* No two images share a protection or retirement granule. */
+	ptr = execmem_alloc_rw(type, length);
+	if (ptr)
+		fill(ptr, length);
+	return ptr;
+}
+
 void *bpf_prog_pack_alloc(u32 size, bpf_jit_fill_hole_t bpf_fill_ill_insns)
 {
 	unsigned int nbits = BPF_PROG_SIZE_TO_NBITS(size);
 	struct bpf_prog_pack *pack;
 	unsigned long pos;
 	void *ptr = NULL;
+
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM))
+		return bpf_prog_pack_alloc_type(size, bpf_fill_ill_insns, EXECMEM_BPF);
 
 	mutex_lock(&pack_mutex);
 	if (size > BPF_PROG_PACK_SIZE) {
@@ -989,6 +1009,11 @@ void bpf_prog_pack_free(void *ptr, u32 size)
 	unsigned int nbits;
 	unsigned long pos;
 
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM)) {
+		execmem_free(ptr);
+		return;
+	}
+
 	mutex_lock(&pack_mutex);
 	if (size > BPF_PROG_PACK_SIZE) {
 		bpf_jit_free_exec(ptr);
@@ -1030,6 +1055,8 @@ static atomic_long_t bpf_jit_current;
  */
 u64 __weak bpf_jit_alloc_exec_limit(void)
 {
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM))
+		return execmem_bpf_capacity();
 #if defined(MODULES_VADDR)
 	return MODULES_END - MODULES_VADDR;
 #else
@@ -1144,6 +1171,13 @@ bpf_jit_binary_pack_alloc(unsigned int proglen, u8 **image_ptr,
 
 	/* add 16 bytes for a random section of illegal instructions */
 	size = round_up(proglen + sizeof(*ro_header) + 16, BPF_PROG_CHUNK_SIZE);
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM)) {
+		size_t extent = size_add(proglen, sizeof(*ro_header) + 16);
+
+		if (extent > U32_MAX - (PAGE_SIZE - 1))
+			return NULL;
+		size = PAGE_ALIGN(extent);
+	}
 
 	if (bpf_jit_charge_modmem(size))
 		return NULL;
@@ -1165,7 +1199,8 @@ bpf_jit_binary_pack_alloc(unsigned int proglen, u8 **image_ptr,
 	(*rw_header)->size = size;
 
 	hole = min_t(unsigned int, size - (proglen + sizeof(*ro_header)),
-		     BPF_PROG_CHUNK_SIZE - sizeof(*ro_header));
+		     (IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM) ? PAGE_SIZE :
+		      BPF_PROG_CHUNK_SIZE) - sizeof(*ro_header));
 	start = get_random_u32_below(hole) & ~(alignment - 1);
 
 	*image_ptr = &ro_header->image[start];
@@ -1179,14 +1214,26 @@ int bpf_jit_binary_pack_finalize(struct bpf_binary_header *ro_header,
 				 struct bpf_binary_header *rw_header)
 {
 	void *ptr;
+	u32 size = rw_header->size;
+	int error;
 
 	ptr = bpf_arch_text_copy(ro_header, rw_header, rw_header->size);
 
 	kvfree(rw_header);
 
 	if (IS_ERR(ptr)) {
-		bpf_prog_pack_free(ro_header, ro_header->size);
+		bpf_prog_pack_free(ro_header, size);
+		if (IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM))
+			bpf_jit_uncharge_modmem(size);
 		return PTR_ERR(ptr);
+	}
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM)) {
+		error = hdn_execmem_bpf_finalize(ro_header);
+		if (error) {
+			bpf_prog_pack_free(ro_header, size);
+			bpf_jit_uncharge_modmem(size);
+			return error;
+		}
 	}
 	return 0;
 }
@@ -1196,15 +1243,14 @@ int bpf_jit_binary_pack_finalize(struct bpf_binary_header *ro_header,
  *   2) when the JIT engine fails (before bpf_jit_binary_pack_finalize).
  * For case 2), we need to free both the RO memory and the RW buffer.
  *
- * bpf_jit_binary_pack_free requires proper ro_header->size. However,
- * bpf_jit_binary_pack_alloc does not set it. Therefore, ro_header->size
- * must be set with either bpf_jit_binary_pack_finalize (normal path) or
- * bpf_arch_text_copy (when jit fails).
+ * An unfinished image takes its size from the construction buffer. Aborting
+ * construction must not require copying into, or finalizing, executable
+ * storage. A finalized image has its size in ro_header.
  */
 void bpf_jit_binary_pack_free(struct bpf_binary_header *ro_header,
 			      struct bpf_binary_header *rw_header)
 {
-	u32 size = ro_header->size;
+	u32 size = rw_header ? rw_header->size : ro_header->size;
 
 	bpf_prog_pack_free(ro_header, size);
 	kvfree(rw_header);
@@ -1217,7 +1263,11 @@ bpf_jit_binary_pack_hdr(const struct bpf_prog *fp)
 	unsigned long real_start = (unsigned long)fp->bpf_func;
 	unsigned long addr;
 
-	addr = real_start & BPF_PROG_CHUNK_MASK;
+	/* HDN randomizes the image start across the allocation's first page,
+	 * rather than only across the first pack chunk. Keep destruction paired
+	 * with the allocation base selected by that layout. */
+	addr = real_start & (IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM) ?
+		PAGE_MASK : BPF_PROG_CHUNK_MASK);
 	return (void *)addr;
 }
 

@@ -8,6 +8,68 @@ ifdef CONFIG_GCC_PLUGIN_LATENT_ENTROPY
 endif
 export DISABLE_LATENT_ENTROPY_PLUGIN
 
+gcc-plugin-$(CONFIG_SECURITY_HARDENING_LATENT_ENTROPY) += hdn_latent_entropy_plugin.so
+gcc-plugin-cflags-$(CONFIG_SECURITY_HARDENING_LATENT_ENTROPY) \
+	+= -fplugin-arg-hdn_latent_entropy_plugin-source-root=$(srctree)
+gcc-plugin-cflags-$(CONFIG_SECURITY_HARDENING_LATENT_ENTROPY_TEST) \
+	+= -fplugin-arg-hdn_latent_entropy_plugin-test-sites
+
+gcc-plugin-$(CONFIG_GCC_PLUGIN_HDN_NULL_ANALYSIS) \
+	+= hdn_null_analysis_plugin.so
+gcc-plugin-cflags-$(CONFIG_GCC_PLUGIN_HDN_NULL_ANALYSIS) \
+	+= -DHDN_NULL_ANALYSIS_PLUGIN \
+	   -fplugin-arg-hdn_null_analysis_plugin-report-dir=$(objtree)/null-analysis/raw \
+	   -fplugin-arg-hdn_null_analysis_plugin-source-root=$(srctree) \
+	   -fplugin-arg-hdn_null_analysis_plugin-profile=$(if $(HDN_NULL_PROFILE),$(HDN_NULL_PROFILE),unknown)
+
+gcc-plugin-$(CONFIG_GCC_PLUGIN_HDN_SIZE_ANALYSIS) += hdn_size_analysis_plugin.so
+gcc-plugin-cflags-$(CONFIG_GCC_PLUGIN_HDN_SIZE_ANALYSIS) \
+	+= -DHDN_SIZE_ANALYSIS_PLUGIN \
+	   -fplugin-arg-hdn_size_analysis_plugin-report=$(objtree)/hdn-size-analysis.jsonl \
+	   -fplugin-arg-hdn_size_analysis_plugin-source-root=$(srctree) \
+	   -fplugin-arg-hdn_size_analysis_plugin-profile=$(if $(HDN_SIZE_PROFILE),$(HDN_SIZE_PROFILE),unknown)
+
+gcc-plugin-$(CONFIG_GCC_PLUGIN_HDN_LIFETIME) += hdn_lifetime_plugin.so
+gcc-plugin-cflags-$(CONFIG_GCC_PLUGIN_HDN_LIFETIME) \
+	+= -fplugin-arg-hdn_lifetime_plugin-report=$(objtree)/hdn-lifetime.jsonl \
+	   -fplugin-arg-hdn_lifetime_plugin-source-root=$(srctree) \
+	   -fplugin-arg-hdn_lifetime_plugin-profile=$(if $(HDN_LIFETIME_PROFILE),$(HDN_LIFETIME_PROFILE),unknown)
+
+gcc-plugin-$(CONFIG_GCC_PLUGIN_HDN_PGTABLE_ANALYSIS) += hdn_pgtable_plugin.so
+gcc-plugin-cflags-$(CONFIG_GCC_PLUGIN_HDN_PGTABLE_ANALYSIS) \
+	+= -fplugin-arg-hdn_pgtable_plugin-report=$(objtree)/hdn-pgtable.jsonl \
+	   -fplugin-arg-hdn_pgtable_plugin-source-root=$(srctree) \
+	   -fplugin-arg-hdn_pgtable_plugin-profile=$(if $(HDN_PGTABLE_PROFILE),$(HDN_PGTABLE_PROFILE),unknown)
+
+gcc-plugin-$(CONFIG_SECURITY_HARDENING_AUTOSLAB) += hdn_alloc_plugin.so
+gcc-plugin-cflags-$(CONFIG_SECURITY_HARDENING_AUTOSLAB) \
+	+= -fplugin-arg-hdn_alloc_plugin-report=$(objtree)/hdn-alloc.jsonl \
+	   -fplugin-arg-hdn_alloc_plugin-source-root=$(srctree) \
+	   -fplugin-arg-hdn_alloc_plugin-profile=$(if $(HDN_ALLOC_PROFILE),$(HDN_ALLOC_PROFILE),unknown)
+ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+KBUILD_CFLAGS_MODULE += -fplugin-arg-hdn_alloc_plugin-module=1
+endif
+
+gcc-plugin-$(CONFIG_SECURITY_HARDENING_RESPECTRE) += hdn_respectre_plugin.so
+gcc-plugin-cflags-$(CONFIG_SECURITY_HARDENING_RESPECTRE) \
+	+= -DHDN_RESPECTRE_PLUGIN \
+	   -fplugin-arg-hdn_respectre_plugin-report=$(objtree)/hdn-respectre.jsonl \
+	   -fplugin-arg-hdn_respectre_plugin-source-root=$(srctree) \
+	   -fplugin-arg-hdn_respectre_plugin-profile=$(if $(HDN_SPEC_PROFILE),$(HDN_SPEC_PROFILE),unknown) \
+	   -fplugin-arg-hdn_respectre_plugin-defer-reviews=1
+
+# RAP build identity is a source/config manifest digest, not a secret or an
+# automatically changing timestamp. Qualification verifies its manifest.
+gcc-plugin-$(CONFIG_SECURITY_HARDENING_RAP) += hdn_rap_plugin.so
+gcc-plugin-cflags-$(CONFIG_SECURITY_HARDENING_RAP) \
+	+= -fplugin-arg-hdn_rap_plugin-build-id=$(CONFIG_HDN_RAP_BUILD_ID) \
+	   -fplugin-arg-hdn_rap_plugin-report=$(objtree)/hdn-rap.jsonl \
+	   -fplugin-arg-hdn_rap_plugin-source-root=$(srctree) \
+	   -fplugin-arg-hdn_rap_plugin-profile=$(if $(HDN_RAP_PROFILE),$(HDN_RAP_PROFILE),unknown)
+ifdef CONFIG_SECURITY_HARDENING_RAP
+KBUILD_CFLAGS += -ffixed-r10 -ffixed-r11 -fno-optimize-sibling-calls -fno-ipa-icf
+endif
+
 # All the plugin CFLAGS are collected here in case a build target needs to
 # filter them out of the KBUILD_CFLAGS.
 GCC_PLUGINS_CFLAGS := $(strip $(addprefix -fplugin=$(objtree)/scripts/gcc-plugins/, $(gcc-plugin-y)) $(gcc-plugin-cflags-y)) -DGCC_PLUGINS

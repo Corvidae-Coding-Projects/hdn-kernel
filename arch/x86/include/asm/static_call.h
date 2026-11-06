@@ -4,6 +4,21 @@
 
 #include <asm/text-patching.h>
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+/* Keep the compiler's actual declaration alive for the type and scalar-return
+ * anchors. The immutable contract never grants an ordinary indirect target. */
+#define __HDN_STATIC_CALL_CONTRACT(name)					\
+	__ADDRESSABLE(STATIC_CALL_TRAMP(name));				\
+	asm(".pushsection .hdn.rap.static_calls, \"a\"\n.balign 8\n" \
+	    ".quad " STATIC_CALL_TRAMP_STR(name) "," STATIC_CALL_KEY_STR(name) "," \
+	    "__hdn_rap_type_" STATIC_CALL_TRAMP_STR(name) "," \
+	    "__hdn_rap_static_zero_" STATIC_CALL_TRAMP_STR(name) "\n.popsection\n" \
+	    ".pushsection .discard.hdn_rap.functions, \"\"\n.balign 8\n" \
+	    ".quad " STATIC_CALL_TRAMP_STR(name) ",6,0\n.popsection\n");
+#else
+#define __HDN_STATIC_CALL_CONTRACT(name)
+#endif
+
 /*
  * For CONFIG_HAVE_STATIC_CALL_INLINE, this is a temporary trampoline which
  * uses the current value of the key->func pointer to do an indirect jump to
@@ -32,6 +47,7 @@
  * and __static_call_fixup().
  */
 #define __ARCH_DEFINE_STATIC_CALL_TRAMP(name, insns)			\
+	__HDN_STATIC_CALL_CONTRACT(name)					\
 	asm(".pushsection .static_call.text, \"ax\"		\n"	\
 	    ".align 4						\n"	\
 	    ".globl " STATIC_CALL_TRAMP_STR(name) "		\n"	\
@@ -46,7 +62,10 @@
 #define ARCH_DEFINE_STATIC_CALL_TRAMP(name, func)			\
 	__ARCH_DEFINE_STATIC_CALL_TRAMP(name, ".byte 0xe9; .long " #func " - (. + 4)")
 
-#ifdef CONFIG_MITIGATION_RETHUNK
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+#define ARCH_DEFINE_STATIC_CALL_NULL_TRAMP(name)			\
+	__ARCH_DEFINE_STATIC_CALL_TRAMP(name, "jmp __hdn_rap_static_null")
+#elif defined(CONFIG_MITIGATION_RETHUNK)
 #define ARCH_DEFINE_STATIC_CALL_NULL_TRAMP(name)			\
 	__ARCH_DEFINE_STATIC_CALL_TRAMP(name, "jmp __x86_return_thunk")
 #else
@@ -74,7 +93,9 @@ extern void __static_call_update_early(void *tramp, void *func);
 		__static_call_update(&STATIC_CALL_KEY(name),		\
 				     STATIC_CALL_TRAMP_ADDR(name), __F);\
 	} else {							\
-		WRITE_ONCE(STATIC_CALL_KEY(name).func, _func);		\
+		hdn_rap_static_update((unsigned long)&STATIC_CALL_KEY(name), \
+			(unsigned long)STATIC_CALL_TRAMP_ADDR(name), (unsigned long)__F); \
+		WRITE_ONCE(STATIC_CALL_KEY(name).func, __F);		\
 		__static_call_update_early(STATIC_CALL_TRAMP_ADDR(name),\
 					   __F);			\
 	}								\

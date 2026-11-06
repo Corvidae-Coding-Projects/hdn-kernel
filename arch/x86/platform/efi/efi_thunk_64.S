@@ -24,6 +24,89 @@
 #include <asm/page_types.h>
 #include <asm/segment.h>
 
+#include <asm/hdn_rap.h>
+#include <asm/hdn_rap_efi.h>
+
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	.text
+	.code64
+SYM_FUNC_START(__hdn_efi64_thunk)
+	HDN_KEXEC_FUNC __hdn_efi64_thunk, 17
+	HDN_FUNC_ENTER
+	pushfq
+	cli
+	pushq %rbx
+	pushq %rbp
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $64, %rsp
+	movq %rdx, 0(%rsp)
+	movq %rcx, 8(%rsp)
+	movq %r8, 16(%rsp)
+	movq %r9, 24(%rsp)
+	movq 128(%rsp), %rax
+	movq %rax, 32(%rsp)
+	movq 136(%rsp), %rax
+	movq %rax, 40(%rsp)
+	movq 144(%rsp), %rax
+	movq %rax, 48(%rsp)
+	movq 152(%rsp), %rax
+	movq %rax, 56(%rsp)
+	movq %rsp, %rdx
+	movl $1, %ecx
+	HDN_C_CALL hdn_efi_enter
+	movq %rax, %r10
+	movq efi_mixed_mode_stack_pa(%rip), %rsp
+	subq $36, %rsp
+	movq $__START_KERNEL_map, %rax
+	subq phys_base(%rip), %rax
+	leaq __efi64_thunk_ret_tramp(%rip), %rbp
+	leaq __hdn_efi32_return(%rip), %rbx
+	subq %rax, %rbp
+	subq %rax, %rbx
+	movl %ebx, 0(%rsp)
+	movl 0(%r10), %edx
+	movl %edx, 4(%rsp)
+	movl 8(%r10), %edx
+	movl %edx, 8(%rsp)
+	movl 16(%r10), %edx
+	movl %edx, 12(%rsp)
+	movl 24(%r10), %edx
+	movl %edx, 16(%rsp)
+	movl 32(%r10), %edx
+	movl %edx, 20(%rsp)
+	movl 40(%r10), %edx
+	movl %edx, 24(%rsp)
+	movl 48(%r10), %edx
+	movl %edx, 28(%rsp)
+	movl 56(%r10), %edx
+	movl %edx, 32(%rsp)
+	pushq $__KERNEL32_CS
+	pushq HDN_EFI_TARGET(%r10)
+	lretq
+SYM_FUNC_END(__hdn_efi64_thunk)
+STACK_FRAME_NON_STANDARD __hdn_efi64_thunk
+_ASM_NOKPROBE(__hdn_efi64_thunk)
+
+/* One dedicated immutable page is executable only in the EFI identity map.
+ * The 32-bit callee preserves EBP, containing the physical 64-bit entry. That
+ * entry makes a fixed absolute jump; no saved stack pointer is trusted. */
+	.section ".rodata", "a", @progbits
+	.balign PAGE_SIZE
+SYM_DATA_START(__efi64_thunk_ret_tramp)
+	movabsq $__hdn_efi_return, %r11
+	ANNOTATE_RETPOLINE_SAFE
+	jmp *%r11
+	.code32
+SYM_INNER_LABEL(__hdn_efi32_return, SYM_L_GLOBAL)
+	pushl $__KERNEL_CS
+	pushl %ebp
+	lret
+SYM_DATA_END(__efi64_thunk_ret_tramp)
+	.code64
+#else
 	.text
 	.code64
 SYM_FUNC_START(__efi64_thunk)
@@ -93,6 +176,7 @@ SYM_DATA_START(__efi64_thunk_ret_tramp)
 	lret
 SYM_DATA_END(__efi64_thunk_ret_tramp)
 
-	.bss
+#endif
+	.section ".data..ro_after_init", "aw"
 	.balign 8
 SYM_DATA(efi_mixed_mode_stack_pa, .quad 0)

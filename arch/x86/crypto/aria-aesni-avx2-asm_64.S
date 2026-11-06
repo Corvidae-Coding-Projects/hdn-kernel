@@ -7,6 +7,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <asm/frame.h>
 #include <asm/asm-offsets.h>
 #include <linux/cfi_types.h>
@@ -873,6 +874,7 @@
 .text
 
 SYM_FUNC_START_LOCAL(__aria_aesni_avx2_crypt_32way)
+	HDN_REGS_FUNC __aria_aesni_avx2_crypt_32way
 	/* input:
 	 *      %r9: rk
 	 *      %rsi: dst
@@ -958,10 +960,12 @@ SYM_FUNC_START_LOCAL(__aria_aesni_avx2_crypt_32way)
 			   (%rax), (%r8));
 
 	FRAME_END
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __aria_aesni_avx2_crypt_32way
 SYM_FUNC_END(__aria_aesni_avx2_crypt_32way)
 
 SYM_TYPED_FUNC_START(aria_aesni_avx2_encrypt_32way)
+	HDN_ASM_FUNCTION aria_aesni_avx2_encrypt_32way, 1
 	/* input:
 	 *      %rdi: ctx, CTX
 	 *      %rsi: dst
@@ -976,17 +980,19 @@ SYM_TYPED_FUNC_START(aria_aesni_avx2_encrypt_32way)
 		     %ymm8, %ymm9, %ymm10, %ymm11, %ymm12, %ymm13, %ymm14,
 		     %ymm15, %rdx);
 
-	call __aria_aesni_avx2_crypt_32way;
+	HDN_REGS_CALL __aria_aesni_avx2_crypt_32way;
 
 	write_output(%ymm1, %ymm0, %ymm3, %ymm2, %ymm4, %ymm5, %ymm6, %ymm7,
 		     %ymm8, %ymm9, %ymm10, %ymm11, %ymm12, %ymm13, %ymm14,
 		     %ymm15, %rax);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_aesni_avx2_encrypt_32way
 SYM_FUNC_END(aria_aesni_avx2_encrypt_32way)
 
 SYM_TYPED_FUNC_START(aria_aesni_avx2_decrypt_32way)
+	HDN_ASM_FUNCTION aria_aesni_avx2_decrypt_32way, 1
 	/* input:
 	 *      %rdi: ctx, CTX
 	 *      %rsi: dst
@@ -1001,17 +1007,19 @@ SYM_TYPED_FUNC_START(aria_aesni_avx2_decrypt_32way)
 		     %ymm8, %ymm9, %ymm10, %ymm11, %ymm12, %ymm13, %ymm14,
 		     %ymm15, %rdx);
 
-	call __aria_aesni_avx2_crypt_32way;
+	HDN_REGS_CALL __aria_aesni_avx2_crypt_32way;
 
 	write_output(%ymm1, %ymm0, %ymm3, %ymm2, %ymm4, %ymm5, %ymm6, %ymm7,
 		     %ymm8, %ymm9, %ymm10, %ymm11, %ymm12, %ymm13, %ymm14,
 		     %ymm15, %rax);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_aesni_avx2_decrypt_32way
 SYM_FUNC_END(aria_aesni_avx2_decrypt_32way)
 
 SYM_FUNC_START_LOCAL(__aria_aesni_avx2_ctr_gen_keystream_32way)
+	HDN_REGS_FUNC __aria_aesni_avx2_ctr_gen_keystream_32way
 	/* input:
 	 *      %rdi: ctx
 	 *      %rsi: dst
@@ -1166,10 +1174,12 @@ SYM_FUNC_START_LOCAL(__aria_aesni_avx2_ctr_gen_keystream_32way)
 	.Lctr_carry_done:
 
 	FRAME_END
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __aria_aesni_avx2_ctr_gen_keystream_32way
 SYM_FUNC_END(__aria_aesni_avx2_ctr_gen_keystream_32way)
 
 SYM_TYPED_FUNC_START(aria_aesni_avx2_ctr_crypt_32way)
+	HDN_ASM_FUNCTION aria_aesni_avx2_ctr_crypt_32way, 1
 	/* input:
 	 *      %rdi: ctx
 	 *      %rsi: dst
@@ -1179,7 +1189,7 @@ SYM_TYPED_FUNC_START(aria_aesni_avx2_ctr_crypt_32way)
 	 */
 	FRAME_BEGIN
 
-	call __aria_aesni_avx2_ctr_gen_keystream_32way;
+	HDN_REGS_CALL __aria_aesni_avx2_ctr_gen_keystream_32way;
 
 	leaq (%rsi), %r10;
 	leaq (%rdx), %r11;
@@ -1187,7 +1197,7 @@ SYM_TYPED_FUNC_START(aria_aesni_avx2_ctr_crypt_32way)
 	leaq (%rcx), %rdx;
 	leaq ARIA_CTX_enc_key(CTX), %r9;
 
-	call __aria_aesni_avx2_crypt_32way;
+	HDN_REGS_CALL __aria_aesni_avx2_crypt_32way;
 
 	vpxor (0 * 32)(%r11), %ymm1, %ymm1;
 	vpxor (1 * 32)(%r11), %ymm0, %ymm0;
@@ -1210,10 +1220,12 @@ SYM_TYPED_FUNC_START(aria_aesni_avx2_ctr_crypt_32way)
 		     %ymm15, %r10);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_aesni_avx2_ctr_crypt_32way
 SYM_FUNC_END(aria_aesni_avx2_ctr_crypt_32way)
 
 SYM_FUNC_START_LOCAL(__aria_aesni_avx2_gfni_crypt_32way)
+	HDN_REGS_FUNC __aria_aesni_avx2_gfni_crypt_32way
 	/* input:
 	 *      %r9: rk
 	 *      %rsi: dst
@@ -1335,10 +1347,12 @@ SYM_FUNC_START_LOCAL(__aria_aesni_avx2_gfni_crypt_32way)
 			   (%rax), (%r8));
 
 	FRAME_END
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __aria_aesni_avx2_gfni_crypt_32way
 SYM_FUNC_END(__aria_aesni_avx2_gfni_crypt_32way)
 
 SYM_TYPED_FUNC_START(aria_aesni_avx2_gfni_encrypt_32way)
+	HDN_ASM_FUNCTION aria_aesni_avx2_gfni_encrypt_32way, 1
 	/* input:
 	 *      %rdi: ctx, CTX
 	 *      %rsi: dst
@@ -1353,17 +1367,19 @@ SYM_TYPED_FUNC_START(aria_aesni_avx2_gfni_encrypt_32way)
 		     %ymm8, %ymm9, %ymm10, %ymm11, %ymm12, %ymm13, %ymm14,
 		     %ymm15, %rdx);
 
-	call __aria_aesni_avx2_gfni_crypt_32way;
+	HDN_REGS_CALL __aria_aesni_avx2_gfni_crypt_32way;
 
 	write_output(%ymm1, %ymm0, %ymm3, %ymm2, %ymm4, %ymm5, %ymm6, %ymm7,
 		     %ymm8, %ymm9, %ymm10, %ymm11, %ymm12, %ymm13, %ymm14,
 		     %ymm15, %rax);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_aesni_avx2_gfni_encrypt_32way
 SYM_FUNC_END(aria_aesni_avx2_gfni_encrypt_32way)
 
 SYM_TYPED_FUNC_START(aria_aesni_avx2_gfni_decrypt_32way)
+	HDN_ASM_FUNCTION aria_aesni_avx2_gfni_decrypt_32way, 1
 	/* input:
 	 *      %rdi: ctx, CTX
 	 *      %rsi: dst
@@ -1378,17 +1394,19 @@ SYM_TYPED_FUNC_START(aria_aesni_avx2_gfni_decrypt_32way)
 		     %ymm8, %ymm9, %ymm10, %ymm11, %ymm12, %ymm13, %ymm14,
 		     %ymm15, %rdx);
 
-	call __aria_aesni_avx2_gfni_crypt_32way;
+	HDN_REGS_CALL __aria_aesni_avx2_gfni_crypt_32way;
 
 	write_output(%ymm1, %ymm0, %ymm3, %ymm2, %ymm4, %ymm5, %ymm6, %ymm7,
 		     %ymm8, %ymm9, %ymm10, %ymm11, %ymm12, %ymm13, %ymm14,
 		     %ymm15, %rax);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_aesni_avx2_gfni_decrypt_32way
 SYM_FUNC_END(aria_aesni_avx2_gfni_decrypt_32way)
 
 SYM_TYPED_FUNC_START(aria_aesni_avx2_gfni_ctr_crypt_32way)
+	HDN_ASM_FUNCTION aria_aesni_avx2_gfni_ctr_crypt_32way, 1
 	/* input:
 	 *      %rdi: ctx
 	 *      %rsi: dst
@@ -1398,7 +1416,7 @@ SYM_TYPED_FUNC_START(aria_aesni_avx2_gfni_ctr_crypt_32way)
 	 */
 	FRAME_BEGIN
 
-	call __aria_aesni_avx2_ctr_gen_keystream_32way
+	HDN_REGS_CALL __aria_aesni_avx2_ctr_gen_keystream_32way
 
 	leaq (%rsi), %r10;
 	leaq (%rdx), %r11;
@@ -1406,7 +1424,7 @@ SYM_TYPED_FUNC_START(aria_aesni_avx2_gfni_ctr_crypt_32way)
 	leaq (%rcx), %rdx;
 	leaq ARIA_CTX_enc_key(CTX), %r9;
 
-	call __aria_aesni_avx2_gfni_crypt_32way;
+	HDN_REGS_CALL __aria_aesni_avx2_gfni_crypt_32way;
 
 	vpxor (0 * 32)(%r11), %ymm1, %ymm1;
 	vpxor (1 * 32)(%r11), %ymm0, %ymm0;
@@ -1429,5 +1447,6 @@ SYM_TYPED_FUNC_START(aria_aesni_avx2_gfni_ctr_crypt_32way)
 		     %ymm15, %r10);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_aesni_avx2_gfni_ctr_crypt_32way
 SYM_FUNC_END(aria_aesni_avx2_gfni_ctr_crypt_32way)

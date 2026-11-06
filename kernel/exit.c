@@ -800,6 +800,18 @@ unsigned long stack_not_used(struct task_struct *p)
 {
 	unsigned long *n = end_of_stack(p);
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (hdn_stack_address((unsigned long)n)) {
+		unsigned long begin = (unsigned long)n, word;
+
+		/* Include a bound even when every usable word has been zeroed. */
+		for (unsigned long offset = sizeof(word); offset < THREAD_SIZE; offset += sizeof(word))
+			if (hdn_stack_read(p, begin + offset, &word, sizeof(word)) || word)
+				return offset;
+		return THREAD_SIZE;
+	}
+#endif
+
 	do {	/* Skip over canary */
 		n++;
 	} while (!*n);

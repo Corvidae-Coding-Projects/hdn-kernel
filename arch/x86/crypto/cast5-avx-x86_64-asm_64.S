@@ -9,6 +9,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <asm/frame.h>
 
 .file "cast5-avx-x86_64-asm_64.S"
@@ -213,6 +214,7 @@
 .text
 
 SYM_FUNC_START_LOCAL(__cast5_enc_blk16)
+	HDN_REGS_FUNC __cast5_enc_blk16
 	/* input:
 	 *	%rdi: ctx
 	 *	RL1: blocks 1 and 2
@@ -282,10 +284,12 @@ SYM_FUNC_START_LOCAL(__cast5_enc_blk16)
 	outunpack_blocks(RR3, RL3, RTMP, RX, RKM);
 	outunpack_blocks(RR4, RL4, RTMP, RX, RKM);
 
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __cast5_enc_blk16
 SYM_FUNC_END(__cast5_enc_blk16)
 
 SYM_FUNC_START_LOCAL(__cast5_dec_blk16)
+	HDN_REGS_FUNC __cast5_dec_blk16
 	/* input:
 	 *	%rdi: ctx
 	 *	RL1: encrypted blocks 1 and 2
@@ -354,14 +358,16 @@ SYM_FUNC_START_LOCAL(__cast5_dec_blk16)
 	outunpack_blocks(RR3, RL3, RTMP, RX, RKM);
 	outunpack_blocks(RR4, RL4, RTMP, RX, RKM);
 
-	RET;
+	HDN_REGS_RETURN;
 
 .L__skip_dec:
 	vpsrldq $4, RKR, RKR;
 	jmp .L__dec_tail;
+	HDN_ASM_FUNCTION_END __cast5_dec_blk16
 SYM_FUNC_END(__cast5_dec_blk16)
 
 SYM_FUNC_START(cast5_ecb_enc_16way)
+	HDN_ASM_FUNCTION cast5_ecb_enc_16way
 	/* input:
 	 *	%rdi: ctx
 	 *	%rsi: dst
@@ -382,7 +388,7 @@ SYM_FUNC_START(cast5_ecb_enc_16way)
 	vmovdqu (6*4*4)(%rdx), RL4;
 	vmovdqu (7*4*4)(%rdx), RR4;
 
-	call __cast5_enc_blk16;
+	HDN_REGS_CALL __cast5_enc_blk16;
 
 	vmovdqu RR1, (0*4*4)(%r11);
 	vmovdqu RL1, (1*4*4)(%r11);
@@ -395,10 +401,12 @@ SYM_FUNC_START(cast5_ecb_enc_16way)
 
 	popq %r15;
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END cast5_ecb_enc_16way
 SYM_FUNC_END(cast5_ecb_enc_16way)
 
 SYM_FUNC_START(cast5_ecb_dec_16way)
+	HDN_ASM_FUNCTION cast5_ecb_dec_16way
 	/* input:
 	 *	%rdi: ctx
 	 *	%rsi: dst
@@ -420,7 +428,7 @@ SYM_FUNC_START(cast5_ecb_dec_16way)
 	vmovdqu (6*4*4)(%rdx), RL4;
 	vmovdqu (7*4*4)(%rdx), RR4;
 
-	call __cast5_dec_blk16;
+	HDN_REGS_CALL __cast5_dec_blk16;
 
 	vmovdqu RR1, (0*4*4)(%r11);
 	vmovdqu RL1, (1*4*4)(%r11);
@@ -433,10 +441,12 @@ SYM_FUNC_START(cast5_ecb_dec_16way)
 
 	popq %r15;
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END cast5_ecb_dec_16way
 SYM_FUNC_END(cast5_ecb_dec_16way)
 
 SYM_FUNC_START(cast5_cbc_dec_16way)
+	HDN_ASM_FUNCTION cast5_cbc_dec_16way
 	/* input:
 	 *	%rdi: ctx
 	 *	%rsi: dst
@@ -459,7 +469,7 @@ SYM_FUNC_START(cast5_cbc_dec_16way)
 	vmovdqu (6*16)(%rdx), RL4;
 	vmovdqu (7*16)(%rdx), RR4;
 
-	call __cast5_dec_blk16;
+	HDN_REGS_CALL __cast5_dec_blk16;
 
 	/* xor with src */
 	vmovq (%r12), RX;
@@ -485,5 +495,6 @@ SYM_FUNC_START(cast5_cbc_dec_16way)
 	popq %r15;
 	popq %r12;
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END cast5_cbc_dec_16way
 SYM_FUNC_END(cast5_cbc_dec_16way)

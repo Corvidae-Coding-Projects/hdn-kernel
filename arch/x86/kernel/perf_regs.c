@@ -4,6 +4,7 @@
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>
 #include <linux/perf_event.h>
+#include <asm/hdn_stack.h>
 #include <linux/bug.h>
 #include <linux/stddef.h>
 #include <asm/perf_regs.h>
@@ -122,7 +123,7 @@ int perf_reg_validate(u64 mask)
 
 u64 perf_reg_abi(struct task_struct *task)
 {
-	if (!user_64bit_mode(task_pt_regs(task)))
+	if (!hdn_task_user_64bit_mode(task))
 		return PERF_SAMPLE_REGS_ABI_32;
 	else
 		return PERF_SAMPLE_REGS_ABI_64;

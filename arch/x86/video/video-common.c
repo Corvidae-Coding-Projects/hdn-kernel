@@ -48,6 +48,9 @@ bool video_is_primary_device(struct device *dev)
 
 #ifdef CONFIG_SCREEN_INFO
 	numres = screen_info_resources(si, res, ARRAY_SIZE(res));
+	if (numres < 0 || numres > (ssize_t)ARRAY_SIZE(res))
+		return false;
+
 	for (i = 0; i < numres; ++i) {
 		if (!(res[i].flags & IORESOURCE_MEM))
 			continue;

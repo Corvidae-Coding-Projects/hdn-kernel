@@ -23,11 +23,15 @@ void cr4_update_pce(void *ignored);
 #endif
 
 #ifdef CONFIG_MODIFY_LDT_SYSCALL
+#include <linux/workqueue.h>
 /*
  * ldt_structs can be allocated, used, and freed, but they are never
  * modified while live.
  */
 struct ldt_struct {
+#ifdef CONFIG_SECURITY_HARDENING_LDT
+	struct work_struct destroy_work;
+#endif
 	/*
 	 * Xen requires page-aligned LDTs with special permissions.  This is
 	 * needed to prevent us from installing evil descriptors such as

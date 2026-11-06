@@ -105,6 +105,7 @@ struct dma_buf *dma_buf_iter_begin(void)
 	mutex_lock(&dmabuf_list_mutex);
 	list_for_each_entry(dmabuf, &dmabuf_list, list_node) {
 		if (file_ref_get(&dmabuf->file->f_ref)) {
+			hdn_jitter_check_file(dmabuf->file);
 			ret = dmabuf;
 			break;
 		}
@@ -139,6 +140,7 @@ struct dma_buf *dma_buf_iter_next(struct dma_buf *dmabuf)
 	dma_buf_put(dmabuf);
 	list_for_each_entry_continue(dmabuf, &dmabuf_list, list_node) {
 		if (file_ref_get(&dmabuf->file->f_ref)) {
+			hdn_jitter_check_file(dmabuf->file);
 			ret = dmabuf;
 			break;
 		}

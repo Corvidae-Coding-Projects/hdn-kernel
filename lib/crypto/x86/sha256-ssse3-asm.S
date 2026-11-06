@@ -47,6 +47,7 @@
 ########################################################################
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 ## assume buffers not aligned
 #define    MOVDQ movdqu
@@ -352,6 +353,7 @@ a = TMP_
 ########################################################################
 .text
 SYM_FUNC_START(sha256_transform_ssse3)
+	HDN_ASM_FUNCTION sha256_transform_ssse3
 	pushq   %rbx
 	pushq   %r12
 	pushq   %r13
@@ -464,7 +466,8 @@ SYM_FUNC_START(sha256_transform_ssse3)
 	popq    %r12
 	popq    %rbx
 
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END sha256_transform_ssse3
 SYM_FUNC_END(sha256_transform_ssse3)
 
 .section	.rodata.cst256.K256, "aM", @progbits, 256

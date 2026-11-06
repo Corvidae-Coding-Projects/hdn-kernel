@@ -281,6 +281,8 @@ ftrace_regs_get_kernel_stack_nth(struct ftrace_regs *fregs, unsigned int nth)
 typedef void (*ftrace_func_t)(unsigned long ip, unsigned long parent_ip,
 			      struct ftrace_ops *op, struct ftrace_regs *fregs);
 
+extern ftrace_func_t ftrace_trace_function;
+
 ftrace_func_t ftrace_ops_get_func(struct ftrace_ops *ops);
 
 /*
@@ -855,8 +857,6 @@ unsigned long ftrace_location(unsigned long ip);
 unsigned long ftrace_location_range(unsigned long start, unsigned long end);
 unsigned long ftrace_get_addr_new(struct dyn_ftrace *rec);
 unsigned long ftrace_get_addr_curr(struct dyn_ftrace *rec);
-
-extern ftrace_func_t ftrace_trace_function;
 
 int ftrace_regex_open(struct ftrace_ops *ops, int flag,
 		  struct inode *inode, struct file *file);

@@ -8,7 +8,8 @@
  * Code that only formats symbols should include <linux/kallsyms.h>; those
  * formatters apply HDN disclosure policy themselves.
  */
-#include <linux/kallsyms-lookup.h>
+#include <linux/errno.h>
+#include <linux/stddef.h>
 
 #ifdef CONFIG_KALLSYMS
 unsigned long kallsyms_sym_address(int idx);

@@ -13,7 +13,7 @@ unsigned long unwind_get_return_address(struct unwind_state *state)
 	if (unwind_done(state))
 		return 0;
 
-	addr = READ_ONCE_NOCHECK(*state->sp);
+	addr = READ_ONCE_TASK_STACK(state->task, *state->sp);
 
 	return unwind_recover_ret_addr(state, addr, state->sp);
 }
@@ -33,7 +33,7 @@ bool unwind_next_frame(struct unwind_state *state)
 
 	do {
 		for (state->sp++; state->sp < info->end; state->sp++) {
-			unsigned long addr = READ_ONCE_NOCHECK(*state->sp);
+			unsigned long addr = READ_ONCE_TASK_STACK(state->task, *state->sp);
 
 			if (__kernel_text_address(addr))
 				return true;
@@ -66,7 +66,7 @@ void __unwind_start(struct unwind_state *state, struct task_struct *task,
 	 */
 	if (!unwind_done(state) &&
 	    (!on_stack(&state->stack_info, first_frame, sizeof(long)) ||
-	    !__kernel_text_address(*first_frame)))
+	    !__kernel_text_address(READ_ONCE_TASK_STACK(state->task, *first_frame))))
 		unwind_next_frame(state);
 }
 EXPORT_SYMBOL_GPL(__unwind_start);

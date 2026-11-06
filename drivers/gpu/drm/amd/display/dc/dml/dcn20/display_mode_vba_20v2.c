@@ -254,6 +254,18 @@ static double CalculateWriteBackDelay(
 static void dml20v2_DisplayPipeConfiguration(struct display_mode_lib *mode_lib);
 static void dml20v2_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPerformanceCalculation(
 		struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml20v2_ModeSupportAndSystemConfigurationPart2(
+		struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml20v2_ModeSupportAndSystemConfigurationPart3(
+		struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml20v2_ModeSupportAndSystemConfigurationPart4(
+		struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml20v2_ModeSupportAndSystemConfigurationPart3Setup(
+		struct display_mode_lib *mode_lib, int i, unsigned int j);
+static noinline_for_stack void dml20v2_ModeSupportAndSystemConfigurationPart3Prefetch(
+		struct display_mode_lib *mode_lib, int i, unsigned int j);
+static noinline_for_stack void dml20v2_ModeSupportAndSystemConfigurationPart3Flip(
+		struct display_mode_lib *mode_lib, int i, unsigned int j);
 
 void dml20v2_recalculate(struct display_mode_lib *mode_lib)
 {
@@ -3392,7 +3404,7 @@ void dml20v2_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode
 	struct vba_vars_st *locals = &mode_lib->vba;
 
 	int i;
-	unsigned int j, k, m;
+	unsigned int k;
 
 	/*MODE SUPPORT, VOLTAGE STATE AND SOC CONFIGURATION*/
 
@@ -3747,6 +3759,16 @@ void dml20v2_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode
 			}
 		}
 	}
+	dml20v2_ModeSupportAndSystemConfigurationPart2(mode_lib);
+}
+
+static noinline_for_stack void dml20v2_ModeSupportAndSystemConfigurationPart2(
+		struct display_mode_lib *mode_lib)
+{
+	struct vba_vars_st *locals = &mode_lib->vba;
+	int i;
+	unsigned int j, k, m;
+
 	/*Maximum DISPCLK/DPPCLK Support check*/
 
 	mode_lib->vba.WritebackRequiredDISPCLK = 0.0;
@@ -4509,6 +4531,16 @@ void dml20v2_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode
 	}
 
 
+	dml20v2_ModeSupportAndSystemConfigurationPart3(mode_lib);
+}
+
+static noinline_for_stack void dml20v2_ModeSupportAndSystemConfigurationPart3(
+		struct display_mode_lib *mode_lib)
+{
+	struct vba_vars_st *locals = &mode_lib->vba;
+	int i;
+	unsigned int j, k;
+
 	/*Prefetch Check*/
 	for (i = 0; i <= locals->soc.num_states; i++) {
 		for (j = 0; j < 2; j++) {
@@ -4531,6 +4563,21 @@ void dml20v2_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode
 
 	for (i = 0; i <= locals->soc.num_states; i++) {
 		for (j = 0; j < 2; j++) {
+			dml20v2_ModeSupportAndSystemConfigurationPart3Setup(mode_lib, i, j);
+			dml20v2_ModeSupportAndSystemConfigurationPart3Prefetch(mode_lib, i, j);
+			dml20v2_ModeSupportAndSystemConfigurationPart3Flip(mode_lib, i, j);
+		}
+	}
+
+	dml20v2_ModeSupportAndSystemConfigurationPart4(mode_lib);
+}
+
+static noinline_for_stack void dml20v2_ModeSupportAndSystemConfigurationPart3Setup(
+		struct display_mode_lib *mode_lib, int i, unsigned int j)
+{
+	struct vba_vars_st *locals = &mode_lib->vba;
+	unsigned int k, m;
+
 			for (k = 0; k < locals->NumberOfActivePlanes; k++) {
 				locals->NoOfDPPThisState[k] = locals->NoOfDPP[i][j][k];
 				locals->RequiredDPPCLKThisState[k] = locals->RequiredDPPCLK[i][j][k];
@@ -4790,6 +4837,14 @@ void dml20v2_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode
 					- dml_max(1.0, dml_ceil(locals->WritebackDelay[i][k] / (mode_lib->vba.HTotal[k] / mode_lib->vba.PixelClock[k]), 1.0));
 			}
 
+		}
+
+static noinline_for_stack void dml20v2_ModeSupportAndSystemConfigurationPart3Prefetch(
+		struct display_mode_lib *mode_lib, int i, unsigned int j)
+{
+	struct vba_vars_st *locals = &mode_lib->vba;
+	unsigned int k;
+
 			mode_lib->vba.NextPrefetchMode = mode_lib->vba.MinPrefetchMode;
 			do {
 				mode_lib->vba.PrefetchMode[i][j] = mode_lib->vba.NextPrefetchMode;
@@ -4953,6 +5008,12 @@ void dml20v2_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode
 				}
 			} while ((locals->PrefetchSupported[i][j] != true || locals->VRatioInPrefetchSupported[i][j] != true)
 					&& mode_lib->vba.NextPrefetchMode < mode_lib->vba.MaxPrefetchMode);
+		}
+
+static noinline_for_stack void dml20v2_ModeSupportAndSystemConfigurationPart3Flip(
+		struct display_mode_lib *mode_lib, int i, unsigned int j)
+{
+	unsigned int k;
 
 			if (mode_lib->vba.PrefetchSupported[i][j] == true
 					&& mode_lib->vba.VRatioInPrefetchSupported[i][j] == true) {
@@ -5039,8 +5100,14 @@ void dml20v2_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode
 			} else {
 				mode_lib->vba.ImmediateFlipSupportedForState[i][j] = false;
 			}
-		}
-	}
+}
+
+static noinline_for_stack void dml20v2_ModeSupportAndSystemConfigurationPart4(
+		struct display_mode_lib *mode_lib)
+{
+	struct vba_vars_st *locals = &mode_lib->vba;
+	int i;
+	unsigned int j, k;
 
 	/*Vertical Active BW support*/
 	for (i = 0; i <= mode_lib->vba.soc.num_states; i++) {

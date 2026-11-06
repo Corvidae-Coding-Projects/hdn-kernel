@@ -87,6 +87,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <linux/cfi_types.h>
 
 .section .rodata
@@ -729,7 +730,7 @@
 .if VL > 16
 	vzeroupper
 .endif
-	RET
+	HDN_ASM_RETURN
 
 .Lhandle_remainder\@:
 
@@ -838,6 +839,7 @@
 // Encrypt |iv| using the AES key |tweak_key| to get the first tweak.  Assumes
 // that the CPU supports AES-NI and AVX, but not necessarily VAES or AVX512.
 SYM_TYPED_FUNC_START(aes_xts_encrypt_iv)
+	HDN_ASM_FUNCTION aes_xts_encrypt_iv, 1
 	.set	TWEAK_KEY,	%rdi
 	.set	IV,		%rsi
 	.set	KEYLEN,		%eax
@@ -861,7 +863,8 @@ SYM_TYPED_FUNC_START(aes_xts_encrypt_iv)
 .endr
 	vaesenclast	7*16(TWEAK_KEY), %xmm0, %xmm0
 	vmovdqu		%xmm0, (IV)
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END aes_xts_encrypt_iv
 SYM_FUNC_END(aes_xts_encrypt_iv)
 
 // Below are the actual AES-XTS encryption and decryption functions,
@@ -880,26 +883,38 @@ SYM_FUNC_END(aes_xts_encrypt_iv)
 .set	VL, 16
 .set	USE_AVX512, 0
 SYM_TYPED_FUNC_START(aes_xts_encrypt_aesni_avx)
+	HDN_ASM_FUNCTION aes_xts_encrypt_aesni_avx, 1
 	_aes_xts_crypt	1
+	HDN_ASM_FUNCTION_END aes_xts_encrypt_aesni_avx
 SYM_FUNC_END(aes_xts_encrypt_aesni_avx)
 SYM_TYPED_FUNC_START(aes_xts_decrypt_aesni_avx)
+	HDN_ASM_FUNCTION aes_xts_decrypt_aesni_avx, 1
 	_aes_xts_crypt	0
+	HDN_ASM_FUNCTION_END aes_xts_decrypt_aesni_avx
 SYM_FUNC_END(aes_xts_decrypt_aesni_avx)
 
 .set	VL, 32
 .set	USE_AVX512, 0
 SYM_TYPED_FUNC_START(aes_xts_encrypt_vaes_avx2)
+	HDN_ASM_FUNCTION aes_xts_encrypt_vaes_avx2, 1
 	_aes_xts_crypt	1
+	HDN_ASM_FUNCTION_END aes_xts_encrypt_vaes_avx2
 SYM_FUNC_END(aes_xts_encrypt_vaes_avx2)
 SYM_TYPED_FUNC_START(aes_xts_decrypt_vaes_avx2)
+	HDN_ASM_FUNCTION aes_xts_decrypt_vaes_avx2, 1
 	_aes_xts_crypt	0
+	HDN_ASM_FUNCTION_END aes_xts_decrypt_vaes_avx2
 SYM_FUNC_END(aes_xts_decrypt_vaes_avx2)
 
 .set	VL, 64
 .set	USE_AVX512, 1
 SYM_TYPED_FUNC_START(aes_xts_encrypt_vaes_avx512)
+	HDN_ASM_FUNCTION aes_xts_encrypt_vaes_avx512, 1
 	_aes_xts_crypt	1
+	HDN_ASM_FUNCTION_END aes_xts_encrypt_vaes_avx512
 SYM_FUNC_END(aes_xts_encrypt_vaes_avx512)
 SYM_TYPED_FUNC_START(aes_xts_decrypt_vaes_avx512)
+	HDN_ASM_FUNCTION aes_xts_decrypt_vaes_avx512, 1
 	_aes_xts_crypt	0
+	HDN_ASM_FUNCTION_END aes_xts_decrypt_vaes_avx512
 SYM_FUNC_END(aes_xts_decrypt_vaes_avx512)

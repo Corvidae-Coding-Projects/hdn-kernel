@@ -60,6 +60,7 @@ struct saved_context {
 
 /* routines for saving/restoring kernel state */
 extern char core_restore_code[];
+extern char core_restore_code_end[];
 extern char restore_registers[];
 
 #endif /* _ASM_X86_SUSPEND_64_H */

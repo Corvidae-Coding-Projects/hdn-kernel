@@ -43,6 +43,7 @@
 #include <linux/cred.h>
 #include <linux/mnt_idmapping.h>
 #include <linux/slab.h>
+#include <linux/hdn_jitter.h>
 #include <linux/maple_tree.h>
 #include <linux/rw_hint.h>
 #include <linux/file_ref.h>
@@ -1308,6 +1309,7 @@ struct file_handle {
 
 static inline struct file *get_file(struct file *f)
 {
+	hdn_jitter_check_file(f);
 	file_ref_inc(&f->f_ref);
 	return f;
 }

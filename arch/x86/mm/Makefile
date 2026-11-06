@@ -17,6 +17,19 @@ KCSAN_SANITIZE := n
 # Avoid recursion by not calling KMSAN hooks for CEA code.
 KMSAN_SANITIZE_cpu_entry_area.o := n
 
+# The private CR3 interval must not acquire tracing/sanitizer/compiler hooks.
+# Objtool remains enabled; source-bound hardening gates review this exclusion.
+KASAN_SANITIZE_hdn_pgtable_window.o := n
+KMSAN_SANITIZE_hdn_pgtable_window.o := n
+KCSAN_SANITIZE_hdn_pgtable_window.o := n
+KCOV_INSTRUMENT_hdn_pgtable_window.o := n
+UBSAN_SANITIZE_hdn_pgtable_window.o := n
+CFLAGS_REMOVE_hdn_pgtable_window.o = $(CC_FLAGS_FTRACE) $(GCC_PLUGINS_CFLAGS)
+CFLAGS_hdn_pgtable_window.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
+ifdef CONFIG_SECURITY_HARDENING_RAP
+CFLAGS_hdn_pgtable_window.o += $(filter -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS)) -fplugin-arg-hdn_rap_plugin-runtime=1
+endif
+
 ifdef CONFIG_FUNCTION_TRACER
 CFLAGS_REMOVE_mem_encrypt.o		= -pg
 CFLAGS_REMOVE_mem_encrypt_amd.o		= -pg
@@ -25,6 +38,21 @@ endif
 
 obj-y				:=  init.o init_$(BITS).o fault.o ioremap.o extable.o mmap.o \
 				    pgtable.o physaddr.o tlb.o cpu_entry_area.o maccess.o pgprot.o
+
+obj-$(CONFIG_SECURITY_HARDENING_PGTABLE) += hdn_pgtable.o hdn_pgtable_window.o hdn_pgtable_window_init.o
+obj-$(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS) += hdn_stack_mm.o hdn_stack_mm_init.o
+
+KASAN_SANITIZE_hdn_stack_mm.o := n
+KMSAN_SANITIZE_hdn_stack_mm.o := n
+KCSAN_SANITIZE_hdn_stack_mm.o := n
+KCOV_INSTRUMENT_hdn_stack_mm.o := n
+UBSAN_SANITIZE_hdn_stack_mm.o := n
+GCOV_PROFILE_hdn_stack_mm.o := n
+CFLAGS_REMOVE_hdn_stack_mm.o = $(CC_FLAGS_FTRACE) $(GCC_PLUGINS_CFLAGS)
+CFLAGS_hdn_stack_mm.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
+ifdef CONFIG_SECURITY_HARDENING_RAP
+CFLAGS_hdn_stack_mm.o += $(filter -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS)) -fplugin-arg-hdn_rap_plugin-runtime=1
+endif
 
 obj-y				+= pat/
 
@@ -59,3 +87,4 @@ obj-$(CONFIG_X86_MEM_ENCRYPT)	+= mem_encrypt.o
 obj-$(CONFIG_AMD_MEM_ENCRYPT)	+= mem_encrypt_amd.o
 
 obj-$(CONFIG_AMD_MEM_ENCRYPT)	+= mem_encrypt_boot.o
+obj-$(CONFIG_SECURITY_HARDENING_UDEREF) += hdn_uaccess.o

@@ -12,6 +12,7 @@
 
 #include <linux/timer.h>
 #include <linux/ktime.h>
+#include <linux/refcount.h>
 #include <linux/sunrpc/types.h>
 #include <linux/spinlock.h>
 #include <linux/wait_bit.h>
@@ -52,7 +53,7 @@ struct rpc_timeout {
  * This is the RPC task struct
  */
 struct rpc_task {
-	atomic_t		tk_count;	/* Reference count */
+	refcount_t		tk_count;	/* Task ownership; zero is terminal. */
 	int			tk_status;	/* result of last operation */
 	struct list_head	tk_task;	/* global list of tasks */
 

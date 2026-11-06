@@ -331,11 +331,23 @@
 
 #ifdef CONFIG_X86_64
 .macro CLEAR_BRANCH_HISTORY
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	ALTERNATIVE "jmp .Lhdn_bhb_skip_\@", "", X86_FEATURE_CLEAR_BHB_LOOP
+	HDN_C_CALL clear_bhb_loop
+.Lhdn_bhb_skip_\@:
+#else
 	ALTERNATIVE "", "call clear_bhb_loop", X86_FEATURE_CLEAR_BHB_LOOP
+#endif
 .endm
 
 .macro CLEAR_BRANCH_HISTORY_VMEXIT
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	ALTERNATIVE "jmp .Lhdn_bhb_vmexit_skip_\@", "", X86_FEATURE_CLEAR_BHB_VMEXIT
+	HDN_C_CALL clear_bhb_loop
+.Lhdn_bhb_vmexit_skip_\@:
+#else
 	ALTERNATIVE "", "call clear_bhb_loop", X86_FEATURE_CLEAR_BHB_VMEXIT
+#endif
 .endm
 #else
 #define CLEAR_BRANCH_HISTORY

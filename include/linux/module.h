@@ -395,6 +395,13 @@ struct klp_modinfo {
 #endif
 
 struct module {
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_JITTER
+	const struct cred *const *hdn_static_creds;
+	unsigned int hdn_static_creds_count;
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	const struct hdn_rap_module *hdn_rap;
+#endif
 	enum module_state state;
 
 	/* Member of list of modules */

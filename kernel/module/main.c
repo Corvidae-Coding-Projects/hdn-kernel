@@ -17,6 +17,12 @@
 #include <linux/buildid.h>
 #include <linux/fs.h>
 #include <linux/hardening.h>
+#include <linux/hdn_alloc.h>
+#include <linux/hdn_rap.h>
+#include <linux/hdn_livepatch.h>
+#include <linux/hdn_execmem.h>
+#include <linux/cred.h>
+#include <linux/sizes.h>
 #include <linux/kernel.h>
 #include <linux/kernel_read_file.h>
 #include <linux/kstrtox.h>
@@ -1448,6 +1454,18 @@ static int module_memory_alloc(struct module *mod, enum mod_mem_type type)
 	if (!ptr)
 		return -ENOMEM;
 
+	/* The native private-window profile also owns immutable module data.
+	 * Claim before relocation, so no direct alias survives publication. */
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE) &&
+	    (type == MOD_RODATA || type == MOD_INIT_RODATA || type == MOD_RO_AFTER_INIT)) {
+		int error = hdn_execmem_claim_data(ptr);
+
+		if (error) {
+			execmem_free(ptr);
+			return error;
+		}
+	}
+
 	mod->mem[type].is_rox = execmem_is_rox(execmem_type);
 
 	/*
@@ -1470,16 +1488,6 @@ static int module_memory_alloc(struct module *mod, enum mod_mem_type type)
 	return 0;
 }
 
-static void module_memory_restore_rox(struct module *mod)
-{
-	for_class_mod_mem_type(type, text) {
-		struct module_memory *mem = &mod->mem[type];
-
-		if (mem->is_rox)
-			execmem_restore_rox(mem->base, mem->size);
-	}
-}
-
 static void module_memory_free(struct module *mod, enum mod_mem_type type)
 {
 	struct module_memory *mem = &mod->mem[type];
@@ -1489,6 +1497,8 @@ static void module_memory_free(struct module *mod, enum mod_mem_type type)
 
 static void free_mod_mem(struct module *mod)
 {
+	hdn_klp_release(mod);
+	hdn_rap_module_release(mod);
 	for_each_mod_mem_type(type) {
 		struct module_memory *mod_mem = &mod->mem[type];
 
@@ -2930,7 +2940,6 @@ static int move_module(struct module *mod, struct load_info *info)
 
 	return 0;
 out_err:
-	module_memory_restore_rox(mod);
 	while (t--)
 		module_memory_free(mod, t);
 	if (codetag_section_found)
@@ -3207,12 +3216,15 @@ static noinline int do_init_module(struct module *mod)
 	rcu_assign_pointer(mod->kallsyms, &mod->core_kallsyms);
 #endif
 	ret = module_enable_rodata_ro_after_init(mod);
+	if (ret && IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE))
+		panic("HDN module immutable-data finalization failed");
 	if (ret)
 		pr_warn("%s: module_enable_rodata_ro_after_init() returned %d, "
 			"ro_after_init data might still be writable\n",
 			mod->name, ret);
 
 	mod_tree_remove_init(mod);
+	hdn_rap_module_init_retire(mod);
 	module_arch_freeing_init(mod);
 	for_class_mod_mem_type(type, init) {
 		mod->mem[type].base = NULL;
@@ -3362,9 +3374,143 @@ out:
 	return err;
 }
 
+static int hdn_module_alloc_metadata(const struct load_info *info)
+{
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	struct hdn_alloc_record { u64 identity, domain, version; };
+	unsigned int section = find_sec(info, ".hdn.alloc");
+	const struct hdn_alloc_record *records;
+	size_t count, i;
+	bool sentinel = false;
+
+	if (!section || !info->sechdrs[section].sh_size ||
+	    info->sechdrs[section].sh_type != SHT_PROGBITS ||
+	    info->sechdrs[section].sh_size % sizeof(*records) ||
+	    info->sechdrs[section].sh_size > SZ_1M ||
+	    !(info->sechdrs[section].sh_flags & SHF_ALLOC) ||
+	    (info->sechdrs[section].sh_flags &
+	     (SHF_WRITE | SHF_EXECINSTR | SHF_RO_AFTER_INIT)) ||
+	    info->sechdrs[section].sh_addralign != __alignof__(*records) ||
+	    !IS_ALIGNED(info->sechdrs[section].sh_addr, __alignof__(*records)))
+		return -ENOEXEC;
+	records = (const void *)info->sechdrs[section].sh_addr;
+	count = info->sechdrs[section].sh_size / sizeof(*records);
+	for (i = 0; i < count; i++) {
+		if (records[i].version != 1 || records[i].domain != HDN_ALLOC_MODULE)
+			return -ENOEXEC;
+		sentinel |= !records[i].identity;
+	}
+	if (!sentinel)
+		return -ENOEXEC;
+	/* Registration resolves exclusively to the permanent module pool. No
+	 * metadata pointer or per-module cache survives module removal. */
+#endif
+	return 0;
+}
+
+static int hdn_module_rap_section(const struct load_info *info, const char *name,
+		struct hdn_rap_section *result)
+{
+	unsigned int index = find_sec(info, name);
+	const Elf_Shdr *section = &info->sechdrs[index];
+
+	if (!index || !section->sh_size || section->sh_size > HDN_RAP_METADATA_MAX ||
+	    section->sh_type != SHT_PROGBITS ||
+	    !(section->sh_flags & SHF_ALLOC) ||
+	    (section->sh_flags & (SHF_WRITE | SHF_EXECINSTR | SHF_RO_AFTER_INIT)) ||
+	    section->sh_addralign != 8 || !IS_ALIGNED(section->sh_addr, 8))
+		return -ENOEXEC;
+	*result = (struct hdn_rap_section) { (const void *)section->sh_addr, section->sh_size };
+	return 0;
+}
+
+static int hdn_module_rap_build(const struct load_info *info)
+{
+	struct hdn_rap_section build;
+	int error;
+
+	if (!IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP))
+		return 0;
+	error = hdn_module_rap_section(info, ".hdn.rap.build", &build);
+	return error ?: hdn_rap_check_build(build);
+}
+
+static int hdn_module_rap_prepare(struct module *mod, const struct load_info *info)
+{
+	struct hdn_rap_section targets, types, sites, functions, static_calls, static_sites;
+	int error;
+
+	if (!IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP))
+		return 0;
+	error = hdn_module_rap_section(info, ".hdn.rap.targets", &targets);
+	if (!error)
+		error = hdn_module_rap_section(info, ".hdn.rap.types", &types);
+	if (!error)
+		error = hdn_module_rap_section(info, ".hdn.rap.sites", &sites);
+	if (!error)
+		error = hdn_module_rap_section(info, ".hdn.rap.entries", &functions);
+	if (!error)
+		error = hdn_module_rap_section(info, ".hdn.rap.static_calls", &static_calls);
+	if (!error)
+		error = hdn_module_rap_section(info, ".hdn.rap.static_sites", &static_sites);
+	if (!error)
+		error = hdn_rap_module_prepare(mod, targets, types, sites, functions,
+					       static_calls, static_sites);
+	return error;
+}
+
+static int hdn_module_static_creds(struct module *mod, const struct load_info *info)
+{
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_JITTER
+	unsigned int section = find_sec(info, "__hdn_static_creds");
+	const Elf_Shdr *header;
+	const struct cred *const *entries;
+	unsigned long section_end;
+	size_t count, i;
+
+	if (!section)
+		return 0;
+	header = &info->sechdrs[section];
+	if (!header->sh_size || header->sh_size % sizeof(*entries) ||
+	    header->sh_size > 64 * sizeof(*entries) ||
+	    header->sh_type != SHT_PROGBITS || !(header->sh_flags & SHF_ALLOC) ||
+	    (header->sh_flags & (SHF_WRITE | SHF_EXECINSTR | SHF_RO_AFTER_INIT)) ||
+	    header->sh_addralign != sizeof(*entries) ||
+	    !IS_ALIGNED(header->sh_addr, sizeof(*entries)) ||
+	    check_add_overflow(header->sh_addr, header->sh_size - 1, &section_end) ||
+	    !within_module_mem_type(header->sh_addr, mod, MOD_RODATA) ||
+	    !within_module_mem_type(section_end, mod, MOD_RODATA))
+		return -ENOEXEC;
+	entries = (const void *)header->sh_addr;
+	count = header->sh_size / sizeof(*entries);
+	for (i = 0; i < count; i++) {
+		unsigned long start = (unsigned long)entries[i], end;
+
+		if (check_add_overflow(start, sizeof(struct cred) - 1, &end) ||
+		    !IS_ALIGNED(start, __alignof__(struct cred)) ||
+		    !within_module_mem_type(start, mod, MOD_DATA) ||
+		    !within_module_mem_type(end, mod, MOD_DATA))
+			return -ENOEXEC;
+	}
+	mod->hdn_static_creds = entries;
+	mod->hdn_static_creds_count = count;
+#endif
+	return 0;
+}
+
 static int complete_formation(struct module *mod, struct load_info *info)
 {
 	int err;
+
+	err = hdn_module_alloc_metadata(info);
+	if (err)
+		return err;
+	err = hdn_module_static_creds(mod, info);
+	if (err)
+		return err;
+	err = hdn_klp_symbols_prepare(mod, info->core_typeoffs - info->stroffs);
+	if (err)
+		return err;
 
 	mutex_lock(&module_mutex);
 
@@ -3461,6 +3607,14 @@ static int early_mod_check(struct load_info *info, int flags)
 	/* Check module struct version now, before we try to use module. */
 	if (!check_modstruct_version(info, info->mod))
 		return -ENOEXEC;
+
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* This is loader state, never a value supplied by the ELF image. */
+	info->mod->hdn_rap = NULL;
+#endif
+	err = hdn_module_rap_build(info);
+	if (err)
+		return err;
 
 	err = check_modinfo(info->mod, info, flags);
 	if (err)
@@ -3571,7 +3725,14 @@ static int load_module(struct load_info *info, const char __user *uargs,
 		goto free_modinfo;
 
 	err = apply_relocations(mod, info);
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	mod->hdn_rap = NULL;
+#endif
 	if (err < 0)
+		goto free_modinfo;
+
+	err = hdn_module_rap_prepare(mod, info);
+	if (err)
 		goto free_modinfo;
 
 	err = post_relocation(mod, info);
@@ -3626,8 +3787,11 @@ static int load_module(struct load_info *info, const char __user *uargs,
 			goto sysfs_cleanup;
 	}
 
-	if (codetag_load_module(mod))
+	if (codetag_load_module(mod)) {
+		if (is_livepatch_module(mod))
+			free_module_elf(mod);
 		goto sysfs_cleanup;
+	}
 
 	/* Get rid of temporary copy. */
 	free_copy(info, flags);
@@ -3673,7 +3837,6 @@ static int load_module(struct load_info *info, const char __user *uargs,
 	mutex_unlock(&module_mutex);
  free_module:
 	mod_stat_bump_invalid(info, flags);
-	module_memory_restore_rox(mod);
 	module_deallocate(mod, info);
  free_copy:
 	/*

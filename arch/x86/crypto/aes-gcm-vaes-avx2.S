@@ -66,6 +66,7 @@
 // vpternlogd instruction (which helped schoolbook a bit more than Karatsuba).
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 .section .rodata
 .p2align 4
@@ -218,6 +219,7 @@
 // store the 64-bit halves of the key powers XOR'd together (for Karatsuba
 // multiplication) in the order 8,6,7,5,4,2,3,1.
 SYM_FUNC_START(aes_gcm_precompute_vaes_avx2)
+	HDN_ASM_FUNCTION aes_gcm_precompute_vaes_avx2
 
 	// Function arguments
 	.set	KEY,		%rdi
@@ -302,7 +304,8 @@ SYM_FUNC_START(aes_gcm_precompute_vaes_avx2)
 	vmovdqu		TMP0, OFFSETOF_H_POWERS_XORED(KEY)
 
 	vzeroupper
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END aes_gcm_precompute_vaes_avx2
 SYM_FUNC_END(aes_gcm_precompute_vaes_avx2)
 
 // Do one step of the GHASH update of four vectors of data blocks.
@@ -494,6 +497,7 @@ SYM_FUNC_END(aes_gcm_precompute_vaes_avx2)
 // low for small amounts which is the common case.  TLS and IPsec use less than
 // one block of AAD, but (uncommonly) other use cases may use much more.
 SYM_FUNC_START(aes_gcm_aad_update_vaes_avx2)
+	HDN_ASM_FUNCTION aes_gcm_aad_update_vaes_avx2
 
 	// Function arguments
 	.set	KEY,		%rdi
@@ -607,7 +611,8 @@ SYM_FUNC_START(aes_gcm_aad_update_vaes_avx2)
 	vmovdqu		GHASH_ACC_XMM, (GHASH_ACC_PTR)
 
 	vzeroupper
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END aes_gcm_aad_update_vaes_avx2
 SYM_FUNC_END(aes_gcm_aad_update_vaes_avx2)
 
 // Do one non-last round of AES encryption on the blocks in the given AESDATA
@@ -994,7 +999,7 @@ SYM_FUNC_END(aes_gcm_aad_update_vaes_avx2)
 	vmovdqu		GHASH_ACC_XMM, (GHASH_ACC_PTR)
 
 	vzeroupper
-	RET
+	HDN_ASM_RETURN
 .endm
 
 // void aes_gcm_enc_final_vaes_avx2(const struct aes_gcm_key_vaes_avx2 *key,
@@ -1129,19 +1134,27 @@ SYM_FUNC_END(aes_gcm_aad_update_vaes_avx2)
 	sete		%al
 .endif
 	// No need for vzeroupper here, since only used xmm registers were used.
-	RET
+	HDN_ASM_RETURN
 .endm
 
 SYM_FUNC_START(aes_gcm_enc_update_vaes_avx2)
+	HDN_ASM_FUNCTION aes_gcm_enc_update_vaes_avx2
 	_aes_gcm_update	1
+	HDN_ASM_FUNCTION_END aes_gcm_enc_update_vaes_avx2
 SYM_FUNC_END(aes_gcm_enc_update_vaes_avx2)
 SYM_FUNC_START(aes_gcm_dec_update_vaes_avx2)
+	HDN_ASM_FUNCTION aes_gcm_dec_update_vaes_avx2
 	_aes_gcm_update	0
+	HDN_ASM_FUNCTION_END aes_gcm_dec_update_vaes_avx2
 SYM_FUNC_END(aes_gcm_dec_update_vaes_avx2)
 
 SYM_FUNC_START(aes_gcm_enc_final_vaes_avx2)
+	HDN_ASM_FUNCTION aes_gcm_enc_final_vaes_avx2
 	_aes_gcm_final	1
+	HDN_ASM_FUNCTION_END aes_gcm_enc_final_vaes_avx2
 SYM_FUNC_END(aes_gcm_enc_final_vaes_avx2)
 SYM_FUNC_START(aes_gcm_dec_final_vaes_avx2)
+	HDN_ASM_FUNCTION aes_gcm_dec_final_vaes_avx2
 	_aes_gcm_final	0
+	HDN_ASM_FUNCTION_END aes_gcm_dec_final_vaes_avx2
 SYM_FUNC_END(aes_gcm_dec_final_vaes_avx2)

@@ -157,7 +157,7 @@ static bool is_jump_table_jump(struct instruction *insn)
 {
 	struct alt_group *alt_group = insn->alt_group;
 
-	if (insn_jump_table(insn))
+	if (insn->rap_jump || insn_jump_table(insn))
 		return true;
 
 	/* Retpoline alternative for a jump table? */
@@ -1123,6 +1123,21 @@ static int add_ignores(struct objtool_file *file)
  * These functions must not directly change AC, but may PUSHF/POPF.
  */
 static const char *uaccess_safe_builtin[] = {
+	/* RAP's compiler entry/return and local-jump adapters preserve AC.
+	 * The indirect-call adapter deliberately is not safe: an opaque target
+	 * is subject to the same UACCESS restriction as an ordinary indirect call.
+	 */
+	"__hdn_rap_enter",
+	"__hdn_rap_enter_flags",
+	"__hdn_rap_return",
+	"__hdn_rap_jump",
+	"__hdn_rap_graph_return",
+	"__hdn_rap_rethook_return",
+	"__hdn_rap_transfer",
+	"__hdn_rap_static_null",
+	"__hdn_rap_bpf_jump",
+	"__hdn_rap_bpf_boundary",
+	"__hdn_rap_bpf_exception",
 	/* KASAN */
 	"kasan_report",
 	"kasan_check_range",
@@ -1283,7 +1298,6 @@ static const char *uaccess_safe_builtin[] = {
 	"__msan_poison_alloca",
 	"__msan_warning",
 	/* UBSAN */
-	"ubsan_type_mismatch_common",
 	"__ubsan_handle_type_mismatch",
 	"__ubsan_handle_type_mismatch_v1",
 	"__ubsan_handle_shift_out_of_bounds",
@@ -1583,6 +1597,11 @@ static int add_jump_destinations(struct objtool_file *file)
 		} else {
 			dest_sym = reloc->sym;
 			if (is_undef_sym(dest_sym)) {
+				if (!strcmp(dest_sym->name, "__hdn_rap_return")) {
+					add_return_call(file, insn, false);
+					insn->rap_return = true;
+					continue;
+				}
 				if (dest_sym->retpoline_thunk) {
 					if (add_retpoline_call(file, insn))
 						return -1;
@@ -1655,6 +1674,11 @@ static int add_jump_destinations(struct objtool_file *file)
 
 		if (dest_sym->return_thunk && dest_insn->offset == dest_sym->offset) {
 			add_return_call(file, insn, true);
+			continue;
+		}
+		if (!strcmp(dest_sym->name, "__hdn_rap_return") && dest_insn->offset == dest_sym->offset) {
+			add_return_call(file, insn, false);
+			insn->rap_return = true;
 			continue;
 		}
 
@@ -2631,9 +2655,2058 @@ static void mark_holes(struct objtool_file *file)
 static bool validate_branch_enabled(void)
 {
 	return opts.stackval ||
+	       opts.rap ||
 	       opts.orc ||
 	       opts.uaccess ||
 	       opts.checksum;
+}
+
+/* The RAP local-jump adapter consumes its CALL return slot before transferring
+ * to a checked label in the same function. Model the net operation as a jump,
+ * retaining every destination so ordinary stack/UACCESS validation follows it.
+ * This section is compiler evidence, not a function-wide validation exemption.
+ */
+/* RAP covers explicitly sized special assembly entries as well as C
+ * functions. Keep that interpretation separate from ORC's STT_FUNC rules. */
+static struct symbol *rap_insn_owner(struct instruction *insn)
+{
+	struct symbol *sym = insn ? insn->sym : NULL;
+
+	if (sym && sym->len && (is_func_sym(sym) || is_notype_sym(sym)))
+		return sym;
+	return NULL;
+}
+
+static struct instruction *rap_next_insn(struct objtool_file *file,
+		struct symbol *func, struct instruction *insn)
+{
+	if (is_func_sym(func))
+		return next_insn_same_func(file, insn);
+	insn = next_insn_same_sec(file, insn);
+	return insn && insn->sec == func->sec && insn->offset < func->offset + func->len ? insn : NULL;
+}
+#define rap_for_each_insn(file, func, insn) \
+	for (insn = find_insn(file, func->sec, func->offset); insn; \
+	     insn = rap_next_insn(file, func, insn))
+
+static int read_rap_jumps(struct objtool_file *file)
+{
+	struct section *sec = find_section_by_name(file->elf, ".discard.hdn_rap_jumps");
+	struct instruction *insn;
+	unsigned long off;
+
+	if (sec && (sec_size(sec) % 16 || !sec->rsec)) {
+		ERROR("invalid RAP jump metadata");
+		return -1;
+	}
+	for (off = 0; sec && off < sec_size(sec); off += 16) {
+		struct reloc *from = find_reloc_by_dest(file->elf, sec, off);
+		struct reloc *to = find_reloc_by_dest(file->elf, sec, off + 8);
+		struct instruction *dest;
+		struct alternative *alt;
+		struct symbol *callee;
+
+		if (!from || !to || arch_reloc_size(from) != 8 || arch_reloc_size(to) != 8) {
+			ERROR("missing RAP jump relocation");
+			return -1;
+		}
+		insn = find_insn(file, from->sym->sec, from->sym->offset + reloc_addend(from));
+		dest = find_insn(file, to->sym->sec, to->sym->offset + reloc_addend(to));
+		callee = insn && insn->type == INSN_CALL ? insn_call_dest(insn) : NULL;
+		if (!callee || strcmp(callee->name, "__hdn_rap_jump") || !dest ||
+		    !rap_insn_owner(insn) || !rap_insn_owner(dest) ||
+		    rap_insn_owner(insn)->pfunc != rap_insn_owner(dest)->pfunc) {
+			ERROR("RAP jump metadata does not describe a local checked transfer");
+			return -1;
+		}
+		for (alt = insn->alts; alt; alt = alt->next)
+			if (alt->insn == dest) {
+				ERROR_INSN(insn, "duplicate RAP jump edge");
+				return -1;
+			}
+		alt = calloc(1, sizeof(*alt));
+		if (!alt) {
+			ERROR_GLIBC("calloc");
+			return -1;
+		}
+		alt->insn = dest;
+		alt->type = ALT_TYPE_JUMP_TABLE;
+		alt->next = insn->alts;
+		insn->alts = alt;
+	}
+	for_each_insn(file, insn) {
+		struct symbol *callee = insn->type == INSN_CALL ? insn_call_dest(insn) : NULL;
+		struct instruction *after;
+
+		if (!callee || strcmp(callee->name, "__hdn_rap_jump"))
+			continue;
+		if (!insn->alts) {
+			ERROR_INSN(insn, "RAP jump has no destination metadata");
+			return -1;
+		}
+		after = next_insn_same_sec(file, insn);
+		if (!after || after->type != INSN_BUG) {
+			ERROR_INSN(insn, "RAP local transfer lacks its nonreturn trap");
+			return -1;
+		}
+		if (!insn->sec->init)
+			list_del(&insn->call_node);
+		insn->_call_dest = NULL;
+		insn->type = INSN_JUMP_DYNAMIC;
+		insn->retpoline_safe = true;
+		insn->dead_end = true;
+		insn->rap_jump = true;
+	}
+	return 0;
+}
+
+static bool rap_binding_matches(struct objtool_file *file, struct instruction *binding,
+		struct instruction *call, bool entry)
+{
+	const unsigned char *bytes;
+	struct reloc *reloc;
+	unsigned long target;
+
+	if (!binding || file->elf->ehdr.e_machine != EM_X86_64 ||
+	    binding->sec != call->sec || binding->offset + binding->len != call->offset)
+		return false;
+	bytes = binding->sec->data->d_buf + binding->offset;
+	/* Exact post-CALL constant in R10 (caller) or R11 (entry adapter). */
+	if (!((binding->len == 7 && bytes[0] == 0x49 && bytes[1] == 0xc7 &&
+	       bytes[2] == (entry ? 0xc3 : 0xc2)) ||
+	      (binding->len == 10 && bytes[0] == 0x49 && bytes[1] == (entry ? 0xbb : 0xba)) ||
+	      (binding->len == 7 && bytes[0] == 0x4c && bytes[1] == 0x8d &&
+	       bytes[2] == (entry ? 0x1d : 0x15))))
+		return false;
+	reloc = insn_reloc(file, binding);
+	if (reloc) {
+		if (reloc->sym->sec != call->sec)
+			return false;
+		target = reloc->sym->offset + arch_insn_adjusted_addend(binding, reloc);
+	} else if (binding->type == INSN_LEA_RIP) {
+		target = arch_jump_destination(binding);
+	} else {
+		return false;
+	}
+	return target == call->offset + call->len;
+}
+
+static int read_rap_sites(struct objtool_file *file)
+{
+	struct section *sec = find_section_by_name(file->elf, ".hdn.rap.sites");
+	unsigned long off;
+
+	if (!sec)
+		return 0;
+	if (sec_size(sec) % 16) {
+		ERROR("invalid RAP return-site metadata size");
+		return -1;
+	}
+	for (off = 0; off < sec_size(sec); off += 16) {
+		struct reloc *site = find_reloc_by_dest(file->elf, sec, off);
+		struct reloc *type = find_reloc_by_dest(file->elf, sec, off + 8);
+		struct instruction *call = NULL, *binding;
+		struct symbol *callee;
+		unsigned long address, length;
+
+		/* Empty units carry a zero/zero sentinel, never a numeric address. */
+		if (memcmp(sec->data->d_buf + off, (char[16]){}, 16) || (!site && type)) {
+			ERROR("invalid RAP return-site data");
+			return -1;
+		}
+		if (!site)
+			continue;
+		if (arch_reloc_size(site) != 8 || (type &&
+		    (arch_reloc_size(type) != 8 || strcmp(type->sym->sec->name, ".hdn.rap.types")))) {
+			ERROR("invalid RAP return-site relocation");
+			return -1;
+		}
+		address = site->sym->offset + reloc_addend(site);
+		for (length = 1; length <= 15 && length <= address; length++) {
+			call = find_insn(file, site->sym->sec, address - length);
+			if (call && call->len == length)
+				break;
+			call = NULL;
+		}
+		callee = call ? insn_call_dest(call) : NULL;
+		if (call && call->type != INSN_CALL &&
+		    !(opts.mnop && call->type == INSN_NOP && callee && callee->fentry))
+			callee = NULL;
+		if (!callee || call->rap_site ||
+		    (!!type != !strcmp(callee->name, "__hdn_rap_call"))) {
+			ERROR("RAP return site does not follow a unique matching call");
+			return -1;
+		}
+		binding = prev_insn_same_sec(file, call);
+		if (!rap_binding_matches(file, binding, call, false)) {
+			ERROR_INSN(call, "RAP call lacks its exact R10 return-site binding");
+			return -1;
+		}
+		call->rap_site = true;
+		binding->rap_binding = true;
+	}
+	return 0;
+}
+
+static int read_rap_entries(struct objtool_file *file)
+{
+	struct instruction *insn;
+	struct section *roots = find_section_by_name(file->elf, ".discard.hdn_rap.roots");
+	unsigned long off;
+
+	for_each_insn(file, insn) {
+		struct symbol *callee = insn->type == INSN_CALL ? insn_call_dest(insn) : NULL;
+		struct instruction *binding;
+
+		if (!callee || (strcmp(callee->name, "__hdn_rap_enter") &&
+			       strcmp(callee->name, "__hdn_rap_enter_flags")))
+			continue;
+		binding = prev_insn_same_sec(file, insn);
+		if (!rap_binding_matches(file, binding, insn, true)) {
+			ERROR_INSN(insn, "RAP entry lacks its exact R11 continuation binding");
+			return -1;
+		}
+		/* The adapter transfers to that checked continuation via its fixed
+		 * retpoline. Keep following the caller, even with its body linked in.
+		 * Its own instructions still undergo the normal branch validation. */
+		insn->dead_end = false;
+		insn->rap_entry = true;
+		binding->rap_binding = true;
+	}
+	for_each_insn(file, insn) {
+		struct symbol *callee = insn->rap_site ? insn_call_dest(insn) : NULL;
+		struct symbol *func = rap_insn_owner(insn);
+		struct instruction *binding, *entry, *first;
+
+		if (!callee || !callee->fentry)
+			continue;
+		binding = prev_insn_same_sec(file, insn);
+		entry = binding ? prev_insn_same_sec(file, binding) : NULL;
+		first = func ? find_insn(file, func->sec, func->offset) : NULL;
+		if (first && first->type == INSN_ENDBR)
+			first = next_insn_same_sec(file, first);
+		if (!entry || !entry->rap_entry || !first ||
+		    prev_insn_same_sec(file, entry) != first || binding->len != 7 ||
+		    insn->offset != first->offset + 19) {
+			ERROR_INSN(insn, "RAP fentry does not follow the protected prologue");
+			return -1;
+		}
+	}
+	if (roots && sec_size(roots) % 16) {
+		ERROR("invalid RAP entry-root metadata size");
+		return -1;
+	}
+	for (off = 0; roots && off < sec_size(roots); off += 16) {
+		struct reloc *start = find_reloc_by_dest(file->elf, roots, off);
+		struct reloc *end = find_reloc_by_dest(file->elf, roots, off + 8);
+		struct instruction *capture, *binding, *call;
+		struct symbol *owner;
+
+		if (memcmp(roots->data->d_buf + off, (char[16]){}, 16) ||
+		    !start || !end || arch_reloc_size(start) != 8 || arch_reloc_size(end) != 8) {
+			ERROR("invalid RAP entry-root relocations");
+			return -1;
+		}
+		capture = find_insn(file, start->sym->sec, start->sym->offset + reloc_addend(start));
+		binding = capture ? next_insn_same_sec(file, capture) : NULL;
+		call = binding ? next_insn_same_sec(file, binding) : NULL;
+		owner = capture ? capture->sym : NULL;
+		/* Only the reviewed IDT assembly root may capture an unbound CALL
+		 * slot. Other assembly must carry the caller's immutable R10 binding. */
+		if (!capture || !owner || strcmp(owner->name, "error_entry") ||
+		    !capture->sec->noinstr || capture->len != 4 ||
+		    memcmp(capture->sec->data->d_buf + capture->offset, "\x4c\x8b\x14\x24", 4) ||
+		    !call || !call->rap_entry || call->rap_root ||
+		    end->sym->sec != call->sec ||
+		    end->sym->offset + reloc_addend(end) != call->offset + call->len) {
+			ERROR("RAP entry root does not match the reviewed capture sequence");
+			return -1;
+		}
+		call->rap_root = true;
+	}
+	return 0;
+}
+
+/* Kind 3 is one exact, terminal assembly protocol, not an instrumentation
+ * exemption. Verify every byte, relocation, alternative and branch before
+ * permitting a closed runtime to leave through it. The entry has no stack
+ * access until LGDT/CR3/RSP select the sealed hardware-identity failure row. */
+static int verify_rap_terminal(struct objtool_file *file, struct symbol *func)
+{
+	static const unsigned char body[] =
+		"\xfa\x90\x90\x90\xfc\x49\x89\xfc\xb9\x01\x01\x00\xc0"
+		"\x0f\x32\x48\xc1\xe2\x20\x48\x09\xd0\x48\x8d\x1d\0\0\0\0"
+		"\xb9\0\0\0\0\x48\x3b\x03\x75\0\x48\x8b\x53\x10\x48\x85\xd2"
+		"\x74\0\x48\x83\x7b\x30\0\x75\0"
+		"\x48\x8b\x43\x08\x48\x39\xc4\x73\0\x48\x3b\x63\x38\x73\0"
+		"\x0f\x01\x53\x18\x0f\x22\xda"
+		"\x48\x8b\x63\x08\x31\xed\x4c\x8d\x15\x05\0\0\0\xe8\0\0\0\0"
+		"\x4c\x89\xe7\x4c\x8d\x15\x05\0\0\0\xe8\0\0\0\0\xeb\0"
+		"\x48\x83\xc3\x40\xff\xc9\x75\0\xeb\0";
+	const unsigned char *bytes = func->sec->data->d_buf + func->offset;
+	struct symbol *halt = find_symbol_by_name(file->elf, "__hdn_rap_halt");
+	struct symbol *rows = find_symbol_by_name(file->elf, "hdn_rap_failure_cpus");
+	struct instruction *insn;
+	unsigned int i, alternatives = 0;
+	uint32_t cpus;
+
+	if (strcmp(func->name, "__hdn_rap_fail") || is_weak_sym(func) ||
+	    !func->sec->noinstr || func->len != sizeof(body) - 1 || !halt ||
+	    !halt->sec->noinstr || is_weak_sym(halt) || halt->rap_kind != 2 || halt->len != 4 ||
+	    memcmp(halt->sec->data->d_buf + halt->offset, "\xfa\xf4\xeb\xfd", 4) ||
+	    find_reloc_by_dest_range(file->elf, halt->sec, halt->offset, halt->len))
+		goto bad;
+	for (i = 0; i < sizeof(body) - 1; i++) {
+		if ((i >= 25 && i < 29) || (i >= 30 && i < 34) ||
+		    (i >= 91 && i < 95) || (i >= 106 && i < 110) ||
+		    i == 38 || i == 47 || i == 54 || i == 63 || i == 69 ||
+		    i == 111 || i == 119 || i == 121)
+			continue;
+		if (bytes[i] != body[i])
+			goto bad;
+	}
+	memcpy(&cpus, bytes + 30, sizeof(cpus));
+	if (!cpus || cpus > 1U << 20 || !rows || is_undef_sym(rows) ||
+	    is_weak_sym(rows) || rows->len != (unsigned long)cpus * 64 ||
+	    strcmp(rows->sec->name, ".data..ro_after_init"))
+		goto bad;
+	rap_for_each_insn(file, func, insn) {
+		unsigned long offset = insn->offset - func->offset;
+		struct reloc *reloc = insn_reloc(file, insn);
+		struct alternative *alt;
+		struct symbol *callee = insn_call_dest(insn);
+
+		if (offset == 22) {
+			if (!reloc || reloc->sym != rows ||
+			    arch_reloc_size(reloc) != 4 || arch_insn_adjusted_addend(insn, reloc))
+				goto bad;
+		} else if (offset == 90 || offset == 105) {
+			const char *name = offset == 90 ? "hdn_rap_failure_prepare" : "hdn_rap_failure_report";
+
+			if (insn->type != INSN_CALL || !insn->rap_site || !callee || strcmp(callee->name, name))
+				goto bad;
+		} else if (reloc) {
+			goto bad;
+		}
+		if (is_static_jump(insn)) {
+			struct instruction *dest = insn->jump_dest;
+
+			/* Objtool represents a branch to another function's entry
+			 * as a sibling call, including conditional failure branches. */
+			if (offset == 37 || offset == 62 || offset == 118) {
+				unsigned long target = func->offset +
+					(offset == 37 ? 112 : offset == 62 ? 70 : 34);
+
+				if (!dest || dest->sec != func->sec || dest->offset != target)
+					goto bad;
+			} else if (callee != halt || dest) {
+				goto bad;
+			}
+		}
+		for (alt = insn->alts; alt; alt = alt->next) {
+			struct alt_group *group = alt->insn->alt_group;
+			const char *feature = group ? arch_cpu_feature_name(group->feature) : NULL;
+
+			if (offset != 1 || alt->type != ALT_TYPE_INSTRUCTIONS ||
+			    alt->insn->len != 3 || alt->insn->type != INSN_CLAC ||
+			    !group || group->first_insn != alt->insn || group->last_insn != alt->insn ||
+			    !group->orig_group || group->nop || !feature || alternatives >= 2 ||
+			    strcmp(feature, alternatives ? "X86_FEATURE_LASS" : "X86_FEATURE_SMAP") ||
+			    find_reloc_by_dest_range(file->elf, alt->insn->sec, alt->insn->offset, 3) ||
+			    memcmp(alt->insn->sec->data->d_buf + alt->insn->offset, "\x0f\x01\xca", 3))
+				goto bad;
+			alternatives++;
+		}
+	}
+	if (alternatives != 2)
+		goto bad;
+	func->rap_terminal = true;
+	return 0;
+bad:
+	ERROR_FUNC(func->sec, func->offset, "RAP terminal entry does not match its closed stack-switch protocol");
+	return -1;
+}
+
+struct rap_sequence {
+	struct objtool_file *file;
+	struct symbol *func;
+	unsigned long pos;
+};
+
+static bool rap_adapter_name(const char *name)
+{
+	static const char * const adapters[] = {
+		"__hdn_rap_call", "__hdn_rap_jump", "__hdn_rap_enter",
+		"__hdn_rap_enter_flags", "__hdn_rap_return", "__hdn_rap_graph_return",
+		"__hdn_rap_rethook_return", "__hdn_rap_transfer",
+		"__hdn_rap_static_null", "__hdn_rap_bpf_jump",
+		"__hdn_rap_bpf_boundary", "__hdn_rap_bpf_exception",
+		"__hdn_rap_bpf_dispatch",
+		"__hdn_rap_bpf_tramp_enter", "__hdn_rap_bpf_original", "__hdn_rap_bpf_skip",
+		"return_to_handler", "arch_rethook_trampoline",
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(adapters); i++)
+		if (!strcmp(name, adapters[i]))
+			return true;
+	return false;
+}
+
+#include "hdn-crypto.h"
+
+static bool rap_private_name(const char *name)
+{
+	static const char * const uaccess[] = {
+		"__get_user_1", "__get_user_2", "__get_user_4", "__get_user_8",
+		"__get_user_nocheck_1", "__get_user_nocheck_2", "__get_user_nocheck_4", "__get_user_nocheck_8",
+		"__put_user_1", "__put_user_2", "__put_user_4", "__put_user_8",
+		"__put_user_nocheck_1", "__put_user_nocheck_2", "__put_user_nocheck_4", "__put_user_nocheck_8",
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(uaccess); i++)
+		if (!strcmp(name, uaccess[i]))
+			return true;
+	return rap_crypto_private_name(name) || !strcmp(name, "this_cpu_cmpxchg16b_emu") ||
+		!strcmp(name, "check_events") ||
+		!strcmp(name, "__fentry__") || !strcmp(name, "ftrace_caller") ||
+		!strcmp(name, "ftrace_regs_caller") ||
+		!strcmp(name, "clear_bhb_loop") || !strcmp(name, "__hdn_bhb_outer") ||
+		!strcmp(name, "__hdn_bhb_inner") ||
+		!strcmp(name, "__clear_pages_unrolled") ||
+		!strcmp(name, "rep_movs_alternative") || !strcmp(name, "rep_stos_alternative") ||
+		!strcmp(name, "__sw_hweight32") || !strcmp(name, "__sw_hweight64") ||
+		!strcmp(name, "ftrace_stub_direct_tramp");
+}
+
+static bool rap_hook_name(const char *name)
+{
+	return !strcmp(name, "return_to_handler") || !strcmp(name, "arch_rethook_trampoline");
+}
+
+static bool rap_sequence_bytes(struct rap_sequence *s, const char *bytes, size_t len)
+{
+	struct symbol *func = s->func;
+
+	if (s->pos > func->len || len > func->len - s->pos ||
+	    memcmp(func->sec->data->d_buf + func->offset + s->pos, bytes, len) ||
+	    find_reloc_by_dest_range(s->file->elf, func->sec, func->offset + s->pos, len))
+		return false;
+	s->pos += len;
+	return true;
+}
+
+/* Match the actual PC-relative operand, including relocations to section
+ * symbols. A matching name with a nonzero addend is not the same target. */
+static bool rap_sequence_edge_match(struct rap_sequence *s, const char *name,
+				    bool call, bool bound)
+{
+	struct symbol *func = s->func, *target = find_symbol_by_name(s->file->elf, name);
+	unsigned long offset = func->offset + s->pos;
+	struct instruction *insn = find_insn(s->file, func->sec, offset);
+	struct reloc *reloc;
+	const unsigned char *bytes = func->sec->data->d_buf + offset;
+
+	if (!target || is_weak_sym(target) || !insn || s->pos >= func->len ||
+	    insn->len > func->len - s->pos ||
+	    !((insn->len == 5 && bytes[0] == (call ? 0xe8 : 0xe9)) ||
+	      (!call && insn->len == 2 && bytes[0] == 0xeb)) ||
+	    (call && (insn->type != INSN_CALL || (bound && !insn->rap_site))))
+		return false;
+	reloc = find_reloc_by_dest_range(s->file->elf, func->sec, offset, insn->len);
+	if (reloc) {
+		if (insn->len != 5 || reloc_offset(reloc) != offset + 1 ||
+		    arch_reloc_size(reloc) != 4 || !arch_pc_relative_reloc(reloc) ||
+		    reloc->sym->sec != target->sec ||
+		    (is_undef_sym(target) && reloc->sym != target) ||
+		    reloc->sym->offset + arch_insn_adjusted_addend(insn, reloc) != target->offset ||
+		    find_reloc_by_dest_range(s->file->elf, func->sec, offset + 2, 3))
+			return false;
+	} else if (is_undef_sym(target) || func->sec != target->sec ||
+		   arch_jump_destination(insn) != target->offset) {
+		return false;
+	}
+	s->pos += insn->len;
+	return true;
+}
+
+static bool rap_sequence_edge(struct rap_sequence *s, const char *name, bool call)
+{
+	return rap_sequence_edge_match(s, name, call, true);
+}
+
+/* Both original and replacement bytes matter even when objtool's ordinary
+ * AC-state walker ignores the unpatched alternative. Only the two exact
+ * PUSHF/CLAC and POPF sequences may surround a runtime call. */
+static bool rap_sequence_flags(struct objtool_file *file, struct instruction *insn, bool save)
+{
+	struct alternative *alt;
+	unsigned int count = 0;
+	unsigned long len = save ? 4 : 1;
+
+	if (!insn->alt_group || insn->alt_group->orig_group ||
+	    insn->alt_group->first_insn != insn ||
+	    insn->alt_group->last_insn->offset + insn->alt_group->last_insn->len != insn->offset + len)
+		return false;
+	for (alt = insn->alts; alt; alt = alt->next) {
+		struct alt_group *group = alt->insn->alt_group;
+		const char *feature = group ? arch_cpu_feature_name(group->feature) : NULL;
+
+		if (count >= 2 || alt->type != ALT_TYPE_INSTRUCTIONS || !group ||
+		    group->orig_group != insn->alt_group || group->first_insn != alt->insn ||
+		    group->nop || !feature ||
+		    strcmp(feature, count ? "X86_FEATURE_LASS" : "X86_FEATURE_SMAP") ||
+		    group->last_insn->offset + group->last_insn->len != alt->insn->offset + len ||
+		    memcmp(alt->insn->sec->data->d_buf + alt->insn->offset,
+			   save ? "\x9c\x0f\x01\xca" : "\x9d", len) ||
+		    find_reloc_by_dest_range(file->elf, alt->insn->sec, alt->insn->offset, len))
+			return false;
+		count++;
+	}
+	return count == 2;
+}
+
+/* Kind 4 covers only the finite private-ABI adapters below. Verify their whole
+ * bodies, not just selected landmarks: save every non-reserved argument and
+ * flags, disable interrupts/AC, bind the closed runtime call, retain its checked
+ * result, and consume exactly the correct stack slot before the transfer. */
+static int verify_rap_adapter(struct objtool_file *file, struct symbol *func)
+{
+	struct rap_sequence s = { .file = file, .func = func };
+	struct instruction *insn, *reject = NULL;
+	unsigned long save, restore;
+	const char *root;
+	bool call = !strcmp(func->name, "__hdn_rap_call");
+	bool jump = !strcmp(func->name, "__hdn_rap_jump");
+	bool bpf_jump = !strcmp(func->name, "__hdn_rap_bpf_jump");
+	bool bpf_boundary = !strcmp(func->name, "__hdn_rap_bpf_boundary");
+	bool bpf_exception = !strcmp(func->name, "__hdn_rap_bpf_exception");
+	bool bpf_dispatch = !strcmp(func->name, "__hdn_rap_bpf_dispatch");
+	bool bpf_enter = !strcmp(func->name, "__hdn_rap_bpf_tramp_enter");
+	bool bpf_original = !strcmp(func->name, "__hdn_rap_bpf_original");
+	bool bpf_skip = !strcmp(func->name, "__hdn_rap_bpf_skip");
+	bool enter = !strcmp(func->name, "__hdn_rap_enter");
+	bool flags = !strcmp(func->name, "__hdn_rap_enter_flags");
+	bool ret = !strcmp(func->name, "__hdn_rap_return");
+	bool graph = !strcmp(func->name, "__hdn_rap_graph_return");
+	bool hook = !strcmp(func->name, "__hdn_rap_rethook_return");
+	bool hook_handler = rap_hook_name(func->name);
+
+#define RAP_BYTES(bytes) do { if (!rap_sequence_bytes(&s, bytes, sizeof(bytes) - 1)) goto bad; } while (0)
+#define RAP_EDGE(name, call) do { if (!rap_sequence_edge(&s, name, call)) goto bad; } while (0)
+	if (is_weak_sym(func) || !func->len ||
+	    (!call && !jump && !bpf_jump && !bpf_dispatch && !hook_handler && !func->sec->noinstr))
+		goto bad;
+	if (!strcmp(func->name, "__hdn_rap_static_null")) {
+		RAP_BYTES("\x4c\x39\x14\x24\x75\x0d\x4d\x89\xd3\x48\x8d\x64\x24\x08");
+		RAP_EDGE("__hdn_rap_transfer", false);
+		RAP_BYTES("\xbf\x02\0\0\0");
+		RAP_EDGE("__hdn_rap_fail", false);
+		rap_for_each_insn(file, func, insn)
+			if (insn->alts)
+				goto bad;
+		goto complete;
+	}
+	if (hook_handler) {
+		if (!strcmp(func->name, "return_to_handler")) {
+			RAP_BYTES("\x48\x89\xe7\x48\x83\xec\x08\x48\x81\xec\xa8\0\0\0"
+				  "\x48\x89\x44\x24\x50\x48\x89\x54\x24\x60\x48\x89\x6c\x24\x20"
+				  "\x48\x89\xbc\x24\x98\0\0\0\x48\x89\xe7\x4c\x8d\x15\x05\0\0\0");
+			RAP_EDGE("ftrace_return_to_handler", true);
+			RAP_BYTES("\x49\x89\xc3\x48\x8b\x54\x24\x60\x48\x8b\x44\x24\x50"
+				  "\x48\x81\xc4\xa8\0\0\0");
+			RAP_EDGE("__hdn_rap_graph_return", false);
+		} else {
+			struct reloc *reloc = find_reloc_by_dest(file->elf, func->sec, func->offset + 1);
+
+			/* The fake unwind slot is this exact trampoline's address. */
+			if (func->len < 5 || memcmp(func->sec->data->d_buf + func->offset, "\x68\0\0\0\0", 5) ||
+			    !reloc || reloc_type(reloc) != R_X86_64_32S || reloc->sym != func ||
+			    reloc_addend(reloc) ||
+			    find_reloc_by_dest_range(file->elf, func->sec, func->offset, 1) ||
+			    find_reloc_by_dest_range(file->elf, func->sec, func->offset + 2, 3))
+				goto bad;
+			s.pos = 5;
+			RAP_BYTES("\x6a\x18\x54\x9c\x48\x83\xec\x18\x57\x56\x52\x51\x50"
+				  "\x41\x50\x41\x51\x41\x52\x41\x53\x53\x55\x41\x54\x41\x55\x41\x56\x41\x57");
+			/* CONFIG_FRAME_POINTER encodes the saved pt_regs pointer. */
+			if (s.pos + 5 <= func->len &&
+			    !memcmp(func->sec->data->d_buf + func->offset + s.pos, "\x48\x8d\x6c\x24\x01", 5))
+				RAP_BYTES("\x48\x8d\x6c\x24\x01");
+			RAP_BYTES("\x48\x89\xe7\x4c\x8d\x15\x05\0\0\0");
+			RAP_EDGE("arch_rethook_trampoline_callback", true);
+			RAP_BYTES("\x41\x5f\x41\x5e\x41\x5d\x41\x5c\x5d\x5b\x41\x5b\x41\x5a\x41\x59\x41\x58"
+				  "\x58\x59\x5a\x5e\x5f\x48\x83\xc4\x18\x48\x83\xc4\x10\x9d\x4c\x8b\x1c\x24");
+			RAP_EDGE("__hdn_rap_rethook_return", false);
+		}
+		rap_for_each_insn(file, func, insn)
+			if (insn->alts)
+				goto bad;
+		goto complete;
+	}
+	if (!strcmp(func->name, "__hdn_rap_transfer")) {
+		/* The local CALL must resolve inside this function before relocation,
+		 * and its fall-through must trap. Keep the final architecture RET:
+		 * return-site patching supplies the CPU's selected return mitigation. */
+		RAP_BYTES("\xe8\x01\0\0\0\xcc\x4c\x89\x1c\x24");
+		insn = find_insn(file, func->sec, func->offset);
+		if (!insn || insn->type != INSN_JUMP_UNCONDITIONAL || !insn->jump_dest ||
+		    insn->jump_dest->sec != func->sec || insn->jump_dest->offset != func->offset + 6)
+			goto bad;
+		if (s.pos < func->len && ((unsigned char *)func->sec->data->d_buf)[func->offset + s.pos] == 0xc3) {
+			RAP_BYTES("\xc3");
+			if (s.pos < func->len)
+				RAP_BYTES("\xcc");
+		} else {
+			RAP_EDGE("__x86_return_thunk", false);
+		}
+		rap_for_each_insn(file, func, insn)
+			if (insn->alts)
+				goto bad;
+		goto complete;
+	}
+	if (!call && !jump && !bpf_jump && !bpf_boundary && !bpf_exception && !bpf_dispatch &&
+	    !bpf_enter && !bpf_original && !bpf_skip &&
+	    !enter && !flags && !ret && !graph && !hook)
+		goto bad;
+	if (call || bpf_jump || bpf_boundary || bpf_exception || bpf_dispatch ||
+	    bpf_enter || bpf_original || bpf_skip || enter || flags) {
+		if (call || bpf_jump || bpf_boundary || bpf_dispatch || bpf_original || bpf_skip)
+			RAP_BYTES("\x4c\x39\x14\x24");
+		else
+			RAP_BYTES("\x4c\x39\x1c\x24");
+		reject = find_insn(file, func->sec, func->offset + s.pos);
+		if (!reject || reject->type != INSN_JUMP_CONDITIONAL || reject->len != 2 ||
+		    ((unsigned char *)func->sec->data->d_buf)[reject->offset] != 0x75 ||
+		    find_reloc_by_dest_range(file->elf, func->sec, reject->offset, 2))
+			goto bad;
+		s.pos += 2;
+	}
+	save = s.pos + 4;
+	RAP_BYTES("\x55\x48\x89\xe5\x9c\x90\x90\x90\xfa\x50\x51\x52\x56\x57"
+		  "\x41\x50\x41\x51\x41\x52\x41\x53\x48\x83\xe4\xf0");
+	if (call || jump || bpf_jump) {
+		RAP_BYTES("\x4c\x89\xdf\x4c\x89\xd6");
+		root = bpf_jump ? "hdn_rap_bpf_validate_jump" :
+			call ? "hdn_rap_validate_call" : "hdn_rap_validate";
+	} else if (bpf_dispatch) {
+		RAP_BYTES("\x4c\x89\xdf");
+		root = "hdn_rap_bpf_dispatch_target";
+	} else if (bpf_boundary) {
+		RAP_BYTES("\x48\x8d\x7d\x10\x48\x8b\x75\0\x4c\x89\xd2");
+		root = "hdn_rap_bpf_boundary_save";
+	} else if (bpf_exception) {
+		RAP_BYTES("\x4c\x89\xdf\x48\x8d\x75\x10");
+		root = "hdn_rap_bpf_exception_restore";
+	} else if (bpf_enter) {
+		RAP_BYTES("\x48\x8d\x7d\x10\x4c\x89\xde\x4c\x89\xd2");
+		root = "hdn_rap_bpf_tramp_enter";
+	} else if (bpf_original) {
+		RAP_BYTES("\x48\x8d\x7d\x08\x4c\x89\xd6\x48\x8b\x55\0");
+		root = "hdn_rap_bpf_original_enter";
+	} else if (bpf_skip) {
+		RAP_BYTES("\x48\x8d\x7d\x10\x4c\x89\xd6");
+		root = "hdn_rap_bpf_skip";
+	} else if (enter || flags) {
+		if (enter)
+			RAP_BYTES("\x48\x8d\x7d\x10");
+		else
+			RAP_BYTES("\x48\x8d\x7d\x18");
+		RAP_BYTES("\x4c\x89\xd6");
+		root = "hdn_rap_push";
+	} else {
+		RAP_BYTES("\x48\x8d\x7d\x08");
+		root = "hdn_rap_pop";
+		if (graph || hook) {
+			if (graph)
+				RAP_BYTES("\xbe\x01\0\0\0");
+			else
+				RAP_BYTES("\xbe\x02\0\0\0");
+			RAP_BYTES("\x48\x8b\x55\xb0");
+			root = "hdn_rap_hook_finish";
+		}
+	}
+	RAP_BYTES("\x4c\x8d\x15\x05\0\0\0");
+	RAP_EDGE(root, true);
+	if (bpf_exception) {
+		RAP_BYTES("\x48\x8b\x50\x10\x48\x89\x55\xd8"
+			  "\x48\x8b\x50\x18\x48\x89\x55\xe0");
+	}
+	if (bpf_boundary)
+		RAP_BYTES("\x4c\x8b\x5d\xb8");
+	else if (enter || flags || bpf_exception || bpf_enter)
+		RAP_BYTES("\x4c\x8b\x5d\xb0");
+	else
+		RAP_BYTES("\x49\x89\xc3");
+	restore = s.pos + 15;
+	RAP_BYTES("\x48\x8d\x65\xb8\x41\x5a\x41\x59\x41\x58\x5f\x5e\x5a\x59\x58\x9d\x5d");
+	if (call || bpf_dispatch) {
+		RAP_EDGE("__x86_indirect_thunk_r11", false);
+	} else {
+		if (bpf_skip)
+			RAP_BYTES("\x48\x8d\x64\x24\x18");
+		else if (!bpf_original)
+			RAP_BYTES("\x48\x8d\x64\x24\x08");
+		RAP_EDGE("__hdn_rap_transfer", false);
+	}
+	if (reject) {
+		if (!reject->jump_dest || reject->jump_dest->sec != func->sec ||
+		    reject->jump_dest->offset != func->offset + s.pos)
+			goto bad;
+		RAP_BYTES("\xbf\x02\0\0\0");
+		RAP_EDGE("__hdn_rap_fail", false);
+	}
+	rap_for_each_insn(file, func, insn) {
+		unsigned long off = insn->offset - func->offset;
+
+		if (off == save || off == restore) {
+			if (!rap_sequence_flags(file, insn, off == save))
+				goto bad;
+		} else if (insn->alts) {
+			goto bad;
+		}
+	}
+complete:
+	if (s.pos != func->len)
+		goto bad;
+	func->rap_adapter = true;
+	return 0;
+bad:
+	ERROR_FUNC(func->sec, func->offset + s.pos, "RAP adapter does not match its closed transfer protocol");
+	return -1;
+#undef RAP_BYTES
+#undef RAP_EDGE
+}
+
+/* The saved-register tracing path has two private transfers. Its closed root
+ * chooses both the destination and whether one fentry slot is consumed. Check
+ * the complete handoff so neither an ordinary saved register nor a branch into
+ * the middle can bypass that decision. Other body code stays under the normal
+ * protected-function coverage and stack checks. */
+static int verify_rap_ftrace_handoff(struct objtool_file *file, struct symbol *func)
+{
+	struct rap_sequence s = { .file = file, .func = func };
+	struct symbol *selector = find_symbol_by_name(file->elf, "ftrace_regs_caller_jmp");
+	struct instruction *entry, *branch, *insn, *choice, *transfer[2];
+	unsigned long start, call_path;
+	unsigned int frame = 168, i;
+	char coordinates[] = "\x48\x8d\xbc\x24\xb0\0\0\0";
+	char release[] = "\x48\x81\xc4\xa8\0\0\0\x9d";
+	const char restore[] = "\x48\x8b\x6c\x24\x20\x4c\x8b\x4c\x24\x40"
+		"\x4c\x8b\x44\x24\x48\x48\x8b\x7c\x24\x70\x48\x8b\x74\x24\x68"
+		"\x48\x8b\x54\x24\x60\x48\x8b\x4c\x24\x58\x48\x8b\x44\x24\x50";
+
+#define RAP_BYTES(bytes) do { if (!rap_sequence_bytes(&s, bytes, sizeof(bytes) - 1)) goto bad; } while (0)
+#define RAP_EDGE(name, call) do { if (!rap_sequence_edge(&s, name, call)) goto bad; } while (0)
+	RAP_BYTES("\x9c\x4c\x8d\x1d\x05\0\0\0");
+	entry = find_insn(file, func->sec, func->offset + s.pos);
+	if (!entry || !entry->rap_entry || !insn_call_dest(entry) ||
+	    strcmp(insn_call_dest(entry)->name, "__hdn_rap_enter_flags"))
+		goto bad;
+	s.pos += entry->len;
+	if (s.pos < func->len && *((u8 *)func->sec->data->d_buf + func->offset + s.pos) == 0x55) {
+		RAP_BYTES("\x55\xff\x74\x24\x18\x55\x48\x89\xe5"
+			  "\xff\x74\x24\x20\x55\x48\x89\xe5");
+		frame += 40;
+	}
+	RAP_BYTES("\x48\x81\xec\xa8\0\0\0");
+	coordinates[4] = frame + 8;
+	release[3] = frame;
+	branch = selector ? find_insn(file, selector->sec, selector->offset) : NULL;
+	if (!branch || rap_insn_owner(branch) != func || branch->len != 2 ||
+	    *((u8 *)branch->sec->data->d_buf + branch->offset) != 0x75 ||
+	    !branch->jump_dest || rap_insn_owner(branch->jump_dest) != func)
+		goto bad;
+	start = branch->jump_dest->offset;
+	s.pos = start - func->offset;
+	RAP_BYTES(coordinates);
+	RAP_BYTES("\x48\x8b\x74\x24\x78\x4c\x8d\x15\x05\0\0\0");
+	RAP_EDGE("hdn_rap_bpf_trace_handoff", true);
+	RAP_BYTES("\x49\x89\xc3\x48\x85\xd2");
+	choice = find_insn(file, func->sec, func->offset + s.pos);
+	RAP_BYTES("\x74\x3d\x49\x89\xd2");
+	for (i = 0; i < 2; i++) {
+		RAP_BYTES(restore);
+		RAP_BYTES(release);
+		if (!i)
+			RAP_BYTES("\x48\x8d\x64\x24\x08");
+		transfer[i] = find_insn(file, func->sec, func->offset + s.pos);
+		RAP_EDGE("__hdn_rap_transfer", false);
+		if (!i)
+			call_path = func->offset + s.pos;
+	}
+	if (s.pos != func->len || !choice || !choice->jump_dest ||
+	    choice->jump_dest->sec != func->sec || choice->jump_dest->offset != call_path)
+		goto bad;
+	for_each_insn(file, insn) {
+		if (insn->sec == func->sec && insn->offset >= start &&
+		    insn->offset < func->offset + func->len && insn->alts)
+			goto bad;
+		if (insn->jump_dest && insn->jump_dest->sec == func->sec &&
+		    insn->jump_dest->offset >= start && insn->jump_dest->offset < func->offset + func->len &&
+		    insn != branch && insn != choice)
+			goto bad;
+	}
+	transfer[0]->rap_handoff = true;
+	transfer[1]->rap_handoff = true;
+	return 0;
+bad:
+	ERROR_FUNC(func->sec, func->offset + s.pos, "RAP tracing handoff does not match its protected transfer protocol");
+	return -1;
+#undef RAP_BYTES
+#undef RAP_EDGE
+}
+
+/* Two finite bodies implement the outgoing image-copy boundary. The first
+ * consumes only the sealed admission result; the relocated body cannot call
+ * C, touch a stack, or reload an arbitrary transfer pointer. No ordinary
+ * function can acquire this coverage kind or indirect-target permission. */
+static int verify_rap_image_handoff(struct objtool_file *file, struct symbol *func)
+{
+	struct rap_sequence s = { .file = file, .func = func };
+	struct instruction *insn, *first = find_insn(file, func->sec, func->offset);
+	bool launch = !strcmp(func->name, "restore_image"), frame = false;
+	unsigned long loop = 0, done = 0;
+
+#define RAP_BYTES(bytes) do { if (!rap_sequence_bytes(&s, bytes, sizeof(bytes) - 1)) goto bad; } while (0)
+	if (is_weak_sym(func) || (!launch && strcmp(func->name, "core_restore_code")))
+		goto bad;
+	if (first && first->type == INSN_ENDBR)
+		RAP_BYTES("\xf3\x0f\x1e\xfa");
+	if (launch) {
+		if (s.pos < func->len &&
+		    *((u8 *)func->sec->data->d_buf + func->offset + s.pos) == 0x55) {
+			RAP_BYTES("\x55\x48\x89\xe5");
+			frame = true;
+		}
+		RAP_BYTES("\x4c\x8d\x15\x05\0\0\0");
+		if (!rap_sequence_edge(&s, "hdn_rap_hibernate_enter", true))
+			goto bad;
+		if (frame)
+			RAP_BYTES("\x5d");
+		RAP_BYTES("\x4c\x8b\x00\x4c\x8b\x48\x08\x48\x8b\x58\x28"
+			  "\x48\x8b\x50\x20\x48\x8b\x48\x18\x48\x8b\x40\x10\xff\xe1");
+	} else {
+		RAP_BYTES("\x0f\x22\xd8\x48\x89\xd9\x48\x81\xe1\x7f\xff\xff\xff"
+			  "\x0f\x22\xe1\x0f\x20\xd9\x0f\x22\xd9\x0f\x22\xe3");
+		loop = func->offset + s.pos;
+		RAP_BYTES("\x48\x85\xd2\x74\x17\x48\x8b\x32\x48\x8b\x7a\x08"
+			  "\x48\xc7\xc1\x00\x02\x00\x00\xf3\x48\xa5\x48\x8b\x52\x10\xeb\xe4");
+		done = func->offset + s.pos;
+		RAP_BYTES("\x41\xff\xe0");
+	}
+	if (s.pos != func->len)
+		goto bad;
+	rap_for_each_insn(file, func, insn) {
+		if (insn->alts)
+			goto bad;
+		if (is_static_jump(insn) && (!insn->jump_dest ||
+		    insn->jump_dest->sec != func->sec ||
+		    insn->jump_dest->offset !=
+			(insn->type == INSN_JUMP_CONDITIONAL ? done : loop)))
+			goto bad;
+	}
+	for_each_insn(file, insn) {
+		if (rap_insn_owner(insn) != func && insn->jump_dest &&
+		    insn->jump_dest->sec == func->sec &&
+		    insn->jump_dest->offset > func->offset &&
+		    insn->jump_dest->offset < func->offset + func->len)
+			goto bad;
+	}
+	func->rap_image_handoff = true;
+	return 0;
+bad:
+	ERROR_FUNC(func->sec, func->offset + s.pos,
+		   "RAP image handoff does not match its closed admission/copy protocol");
+	return -1;
+#undef RAP_BYTES
+}
+
+static bool rap_sequence_reference(struct rap_sequence *s, const char *opcode,
+				   size_t size, const char *name, bool relative)
+{
+	struct symbol *target = find_symbol_by_name(s->file->elf, name);
+	unsigned long offset = s->func->offset + s->pos;
+	struct instruction *insn = find_insn(s->file, s->func->sec, offset);
+	struct reloc *reloc;
+
+	if (!target || is_weak_sym(target) || !insn || insn->len != size + 4 ||
+	    s->pos > s->func->len || insn->len > s->func->len - s->pos ||
+	    memcmp(s->func->sec->data->d_buf + offset, opcode, size))
+		return false;
+	reloc = find_reloc_by_dest(s->file->elf, s->func->sec, offset + size);
+	if (!reloc) {
+		int32_t displacement;
+
+		/* GAS resolves same-section RIP references without a relocation. */
+		memcpy(&displacement, s->func->sec->data->d_buf + offset + size, 4);
+		if (!relative || is_undef_sym(target) || target->sec != s->func->sec ||
+		    offset + insn->len + displacement != target->offset ||
+		    find_reloc_by_dest_range(s->file->elf, s->func->sec, offset, insn->len))
+			return false;
+		s->pos += insn->len;
+		return true;
+	}
+	if (arch_reloc_size(reloc) != 4 ||
+	    (relative ? !arch_pc_relative_reloc(reloc) : reloc_type(reloc) != R_X86_64_32S) ||
+	    reloc->sym->sec != target->sec ||
+	    (is_undef_sym(target) && reloc->sym != target) ||
+	    reloc->sym->offset + (relative ? arch_insn_adjusted_addend(insn, reloc) :
+					     reloc_addend(reloc)) != target->offset ||
+	    find_reloc_by_dest_range(s->file->elf, s->func->sec, offset, size) ||
+	    find_reloc_by_dest_range(s->file->elf, s->func->sec, offset + size + 1, 3))
+		return false;
+	s->pos += insn->len;
+	return true;
+}
+
+/* The image kernel starts with an externally restored CR3 and no usable
+ * caller stack. Establish GS/SP and descriptors from its sealed checkpoint,
+ * authenticate that checkpoint, restore registers, and use the ordinary RAP
+ * return authenticator. This entry never obtains ordinary target permission. */
+static int verify_rap_image_resume(struct objtool_file *file, struct symbol *func)
+{
+	struct rap_sequence s = { .file = file, .func = func };
+	struct instruction *insn, *first = find_insn(file, func->sec, func->offset);
+
+#define RAP_BYTES(bytes) do { if (!rap_sequence_bytes(&s, bytes, sizeof(bytes) - 1)) goto bad; } while (0)
+#define RAP_REF(bytes, name, relative) do { \
+	if (!rap_sequence_reference(&s, bytes, sizeof(bytes) - 1, name, relative)) goto bad; \
+} while (0)
+	if (strcmp(func->name, "restore_registers") || is_weak_sym(func))
+		goto bad;
+	if (first && first->type == INSN_ENDBR)
+		RAP_BYTES("\xf3\x0f\x1e\xfa");
+	RAP_BYTES("\x41\x0f\x22\xd9");
+	RAP_REF("\x48\x8b\x05", "mmu_cr4_features", true);
+	RAP_BYTES("\x48\x89\xc2\x48\x81\xe2\x7f\xff\xff\xff\x0f\x22\xe2"
+		  "\x0f\x20\xd9\x0f\x22\xd9\x0f\x22\xe0");
+	RAP_REF("\x48\xc7\xc6", "hdn_rap_resume_state", false);
+	RAP_BYTES("\x48\x8b\x86\xb0\0\0\0\x48\x89\xc2\x48\xc1\xea\x20"
+		  "\xb9\x01\x01\x00\xc0\x0f\x30\x48\x8b\xa6\x98\0\0\0"
+		  "\x0f\x01\x96\x0a\x01\0\0\x0f\x01\x9e\x16\x01\0\0"
+		  "\xbf\x02\0\0\0\x4c\x8d\x15\x05\0\0\0");
+	if (!rap_sequence_edge(&s, "hdn_rap_resume_restore", true))
+		goto bad;
+	RAP_BYTES("\x48\x8b\xa0\x98\0\0\0\x48\x8b\x68\x20\x48\x8b\x70\x68"
+		  "\x48\x8b\x78\x70\x48\x8b\x58\x28\x48\x8b\x48\x58\x48\x8b\x50\x60"
+		  "\x4c\x8b\x40\x48\x4c\x8b\x48\x40\x4c\x8b\x50\x38\x4c\x8b\x58\x30"
+		  "\x4c\x8b\x60\x18\x4c\x8b\x68\x10\x4c\x8b\x70\x08\x4c\x8b\x38"
+		  "\xff\xb0\x90\0\0\0\x9d\x0f\x01\x90\x0a\x01\0\0\x31\xc0");
+	RAP_REF("\x48\x89\x05", "in_suspend", true);
+	if (!rap_sequence_edge(&s, "__hdn_rap_return", false) || s.pos != func->len)
+		goto bad;
+	rap_for_each_insn(file, func, insn)
+		if (insn->alts)
+			goto bad;
+	for_each_insn(file, insn)
+		if (rap_insn_owner(insn) != func && insn->jump_dest &&
+		    insn->jump_dest->sec == func->sec &&
+		    insn->jump_dest->offset > func->offset &&
+		    insn->jump_dest->offset < func->offset + func->len)
+			goto bad;
+	func->rap_resume_entry = true;
+	return 0;
+bad:
+	ERROR_FUNC(func->sec, func->offset + s.pos,
+		   "RAP image resume does not match its protected restoration protocol");
+	return -1;
+#undef RAP_REF
+#undef RAP_BYTES
+}
+
+/* The C caller performs CMOS/NMI preparation, then this no-return bridge
+ * consumes only the immutable real-mode launch descriptor. */
+static int verify_rap_realmode_restart(struct objtool_file *file, struct symbol *func)
+{
+	struct rap_sequence s = { .file = file, .func = func };
+	struct instruction *insn;
+
+	if (strcmp(func->name, "hdn_realmode_restart") || is_weak_sym(func) ||
+	    !rap_sequence_bytes(&s, "\x4c\x8d\x1d\x05\0\0\0", 7) ||
+	    !rap_sequence_edge_match(&s, "__hdn_rap_enter", true, false) ||
+	    !rap_sequence_bytes(&s, "\x0f\x20\xe0\x48\x25\x7f\xff\xfd\xff\x0f\x22\xe0", 12) ||
+	    !rap_sequence_reference(&s, "\x48\x8b\x05", 3, "hdn_realmode_reboot", true) ||
+	    !rap_sequence_bytes(&s, "\x0f\x22\xd8", 3))
+		goto bad;
+	/* The second operand is the six-byte far pointer at descriptor+8. */
+	{
+		struct reloc *reloc = find_reloc_by_dest(file->elf, func->sec, func->offset + s.pos + 2);
+		struct symbol *state = find_symbol_by_name(file->elf, "hdn_realmode_reboot");
+		const char *p = func->sec->data->d_buf + func->offset + s.pos;
+
+		if (s.pos + 6 > func->len || memcmp(p, "\xff\x2d", 2) || !state || !reloc ||
+		    arch_reloc_size(reloc) != 4 || !arch_pc_relative_reloc(reloc) ||
+		    reloc->sym->sec != state->sec ||
+		    (is_undef_sym(state) && reloc->sym != state) ||
+		    reloc->sym->offset + reloc_addend(reloc) + 4 != state->offset + 8 ||
+		    find_reloc_by_dest_range(file->elf, func->sec, func->offset + s.pos, 2) ||
+		    find_reloc_by_dest_range(file->elf, func->sec, func->offset + s.pos + 3, 3))
+			goto bad;
+		s.pos += 6;
+	}
+	if (!rap_sequence_bytes(&s, "\x0f\x0b", 2) || s.pos != func->len)
+		goto bad;
+	rap_for_each_insn(file, func, insn)
+		if (insn->alts)
+			goto bad;
+	for_each_insn(file, insn)
+		if (rap_insn_owner(insn) != func && insn->jump_dest && insn->jump_dest->sec == func->sec &&
+		    insn->jump_dest->offset > func->offset && insn->jump_dest->offset < func->offset + func->len)
+			goto bad;
+	func->rap_realmode_protocol = true;
+	return 0;
+bad:
+	ERROR_FUNC(func->sec, func->offset + s.pos, "RAP real-mode reboot has an invalid immutable launch protocol");
+	return -1;
+}
+
+#include "hdn-kexec.h"
+#include "hdn-efi.h"
+#include "hdn-hyperv.h"
+#include "hdn-hv-crash.h"
+#include "hdn-thunks.h"
+#include "hdn-entry.h"
+#include "hdn-idt.h"
+#include "hdn-entry-macros.h"
+#include "hdn-entry-roots.h"
+#include "hdn-entry-return.h"
+#include "hdn-nmi.h"
+#include "hdn-syscall.h"
+#include "hdn-compat.h"
+#include "hdn-rewind.h"
+#include "hdn-head.h"
+#include "hdn-pvh.h"
+
+/* An injectable function has already executed its protected prologue. Only
+ * the immutable breakpoint adapter may resume at this return-only gate; it
+ * retains the original record until the ordinary authenticated epilogue. */
+static int verify_rap_error_return(struct objtool_file *file, struct symbol *func)
+{
+	struct rap_sequence s = { .file = file, .func = func };
+	struct symbol *root = find_symbol_by_name(file->elf, "__hdn_rap_return");
+	struct instruction *insn;
+
+	if (func->rap_kind != 51 || strcmp(func->name, "just_return_func") ||
+	    is_weak_sym(func) || !rap_sequence_edge(&s, "__hdn_rap_return", false) ||
+	    s.pos != func->len || !root || (opts.link && root->rap_kind != 4))
+		goto bad;
+	rap_for_each_insn(file, func, insn)
+		if (insn->alts)
+			goto bad;
+	for_each_insn(file, insn) {
+		struct section *sec;
+		unsigned long offset;
+
+		if (rap_thunk_edge_target(file, insn, &sec, &offset) &&
+		    sec == func->sec && offset >= func->offset && offset < func->offset + func->len)
+			goto bad;
+	}
+	func->rap_error_return_protocol = true;
+	return 0;
+bad:
+	ERROR_FUNC(func->sec, func->offset, "RAP error-injection epilogue lacks its closed return protocol");
+	return -1;
+}
+
+/* These wrappers construct an architectural IRET frame. Their CALL is not an
+ * ordinary C transfer and must not invent a return record for the hardware IP
+ * slot. The entered IDT path owns the nested asynchronous record instead. */
+static int verify_rap_hardware_event(struct objtool_file *file, struct symbol *func)
+{
+	struct rap_sequence s = { .file = file, .func = func };
+	struct instruction *insn, *first = find_insn(file, func->sec, func->offset);
+	bool nmi = !strcmp(func->name, "vmx_do_nmi_irqoff");
+
+#define EVENT_BYTES(bytes) do { \
+	if (!rap_sequence_bytes(&s, bytes, sizeof(bytes) - 1)) goto bad; \
+} while (0)
+	if (is_weak_sym(func) || (!nmi && strcmp(func->name, "vmx_do_interrupt_irqoff")))
+		goto bad;
+	if (first && first->type == INSN_ENDBR)
+		EVENT_BYTES("\xf3\x0f\x1e\xfa");
+	EVENT_BYTES("\x4c\x8d\x1d\x05\0\0\0");
+	if (!rap_sequence_edge_match(&s, "__hdn_rap_enter", true, false))
+		goto bad;
+	if (!nmi) {
+		EVENT_BYTES("\x4c\x8d\x15\x05\0\0\0");
+		if (!rap_sequence_edge(&s, "hdn_rap_vmx_vector", true))
+			goto bad;
+		EVENT_BYTES("\x48\x89\xc7");
+	}
+	EVENT_BYTES("\x55\x48\x89\xe5\x48\x83\xe4\xf0\x6a\x18\x55\x9c\x6a\x10");
+	if (nmi) {
+		if (!rap_sequence_edge_match(&s, "asm_exc_nmi_kvm_vmx", true, false))
+			goto bad;
+	} else if (s.pos < func->len &&
+		   *((unsigned char *)func->sec->data->d_buf + func->offset + s.pos) == 0xe8) {
+		if (!rap_sequence_reference(&s, "\xe8", 1, "__x86_indirect_thunk_rdi", true))
+			goto bad;
+	} else {
+		EVENT_BYTES("\xff\xd7");
+	}
+	EVENT_BYTES("\xc9");
+	if (!rap_sequence_edge_match(&s, "__hdn_rap_return", false, false) || s.pos != func->len)
+		goto bad;
+	rap_for_each_insn(file, func, insn)
+		if (insn->alts)
+			goto bad;
+	for_each_insn(file, insn)
+		if (rap_insn_owner(insn) != func && insn->jump_dest && insn->jump_dest->sec == func->sec &&
+		    insn->jump_dest->offset > func->offset && insn->jump_dest->offset < func->offset + func->len)
+			goto bad;
+	func->rap_hardware_event = true;
+	return 0;
+bad:
+	ERROR_FUNC(func->sec, func->offset + s.pos, "RAP hardware event does not match its checked synthetic-frame protocol");
+	return -1;
+#undef EVENT_BYTES
+}
+
+/* The IBT selftest deliberately branches to a missing-ENDBR landing. Only
+ * its complete fixed-target sequence is exempt from dynamic target dispatch;
+ * its ordinary entry and return still use the standard RAP protocol. */
+static int verify_rap_ibt(struct objtool_file *file, struct symbol *func)
+{
+	struct rap_sequence s = { .file = file, .func = func };
+	struct symbol *landing = find_symbol_by_name(file->elf, "ibt_selftest_noendbr");
+	struct instruction *entry, *jump, *tail, *insn;
+
+	if (func->rap_kind != 1 || is_weak_sym(func) || !landing ||
+	    landing->sec != func->sec || is_weak_sym(landing))
+		goto bad;
+	if (!rap_sequence_bytes(&s, "\x4c\x8d\x1d\x05\0\0\0", 7))
+		goto bad;
+	entry = find_insn(file, func->sec, func->offset + s.pos);
+	if (!entry || !entry->rap_entry ||
+	    !rap_sequence_edge_match(&s, "__hdn_rap_enter", true, false) ||
+	    !rap_sequence_reference(&s, "\x48\x8d\x05", 3, "ibt_selftest_noendbr", true))
+		goto bad;
+	jump = find_insn(file, func->sec, func->offset + s.pos);
+	if (!rap_sequence_bytes(&s, "\xff\xe0", 2) ||
+	    landing->offset != func->offset + s.pos)
+		goto bad;
+	tail = find_insn(file, func->sec, func->offset + s.pos);
+	if (!jump || !tail || !tail->rap_return ||
+	    !rap_sequence_edge(&s, "__hdn_rap_return", false) || s.pos != func->len)
+		goto bad;
+	rap_for_each_insn(file, func, insn)
+		if (insn->alts)
+			goto bad;
+	for_each_insn(file, insn)
+		if (rap_insn_owner(insn) != func && insn->jump_dest &&
+		    insn->jump_dest->sec == func->sec &&
+		    insn->jump_dest->offset > func->offset &&
+		    insn->jump_dest->offset < func->offset + func->len)
+			goto bad;
+	/* Follow the independently verified local edge in the ordinary stack,
+	 * return and IBT walkers. No arbitrary dynamic edge acquires permission. */
+	jump->type = INSN_JUMP_UNCONDITIONAL;
+	jump->jump_dest = tail;
+	return 0;
+bad:
+	ERROR_FUNC(func->sec, func->offset + s.pos, "RAP IBT selftest has an invalid fixed-target protocol");
+	return -1;
+}
+
+/* Permanent boot-owned ACPI reset tables and launch state select the only
+ * foreign destination. There are no stack accesses after leaving the private
+ * kernel root, and no return into this kernel is accepted. */
+static int verify_rap_madt(struct objtool_file *file, struct symbol *func)
+{
+	struct rap_kexec_sequence k = { .seq = { .file = file, .func = func } };
+	struct rap_sequence *s = &k.seq;
+	struct instruction *insn;
+	unsigned int i;
+
+	if (strcmp(func->name, "asm_acpi_mp_play_dead") || is_weak_sym(func) ||
+	    !rap_sequence_reference(s, "\x48\x8d\x05", 3, "hdn_madt_launch", true) ||
+	    !rap_sequence_bytes(s, "\x48\x83\x38\x01", 4) ||
+	    !rap_kexec_branch(&k, 0x75, 0) ||
+	    !rap_sequence_bytes(s, "\x48\x8b\x70\x08\x48\x8b\x78\x10"
+		"\x0f\x20\xe2\x48\x81\xe2\x7f\xff\xff\xff\x0f\x22\xe2"
+		"\x0f\x22\xde\xff\xe7", 26) ||
+	    !rap_kexec_label(&k, 0) || !rap_sequence_bytes(s, "\xfa", 1) ||
+	    !rap_kexec_label(&k, 1) || !rap_sequence_bytes(s, "\xf4", 1) ||
+	    !rap_kexec_branch(&k, 0xeb, 1) || s->pos != func->len)
+		goto bad;
+	for (i = 0; i < k.count; i++)
+		if (!k.branches[i].insn->jump_dest ||
+		    k.branches[i].insn->jump_dest->sec != func->sec ||
+		    k.branches[i].insn->jump_dest->offset != k.labels[k.branches[i].label])
+			goto bad;
+	rap_for_each_insn(file, func, insn)
+		if (insn->alts)
+			goto bad;
+	for_each_insn(file, insn)
+		if (rap_insn_owner(insn) != func && insn->jump_dest &&
+		    insn->jump_dest->sec == func->sec &&
+		    insn->jump_dest->offset > func->offset &&
+		    insn->jump_dest->offset < func->offset + func->len)
+			goto bad;
+	func->rap_madt_protocol = true;
+	return 0;
+bad:
+	ERROR_FUNC(func->sec, func->offset + s->pos, "RAP ACPI CPU-reset handoff has an invalid frozen-launch protocol");
+	return -1;
+}
+
+static int read_rap_functions(struct objtool_file *file)
+{
+	struct section *sec = find_section_by_name(file->elf, ".discard.hdn_rap.functions");
+	unsigned long off;
+
+	if (!sec)
+		return 0;
+	if (file->elf->ehdr.e_machine != EM_X86_64 || sec_size(sec) % 24) {
+		ERROR("invalid RAP function coverage section");
+		return -1;
+	}
+	for (off = 0; off < sec_size(sec); off += 24) {
+		struct reloc *reloc = find_reloc_by_dest(file->elf, sec, off);
+		struct instruction *first;
+		struct symbol *func;
+		uint64_t kind, returns;
+
+		memcpy(&kind, sec->data->d_buf + off + 8, 8);
+		memcpy(&returns, sec->data->d_buf + off + 16, 8);
+		if (memcmp(sec->data->d_buf + off, (char[8]){}, 8) || !reloc ||
+		    arch_reloc_size(reloc) != 8 || (kind < 1 || kind > 54) ||
+		    (kind != 1 && kind != 5 && returns) ||
+		    find_reloc_by_dest_range(file->elf, sec, off + 8, 16)) {
+			ERROR("invalid RAP function coverage record");
+			return -1;
+		}
+		first = find_insn(file, reloc->sym->sec, reloc->sym->offset + reloc_addend(reloc));
+		func = first ? rap_insn_owner(first) : NULL;
+		if (!func || (!is_func_sym(func) && !is_notype_sym(func)) ||
+		    first->offset != func->offset || func->rap_kind || func->cold ||
+		    returns > func->len + (func->cfunc ? func->cfunc->len : 0)) {
+			ERROR("RAP coverage does not name a unique function start");
+			return -1;
+		}
+		if ((rap_adapter_name(func->name) && kind != 4) ||
+		    (((kind >= 52 && kind <= 54) || rap_pvh_kind(func->name)) &&
+		     kind != rap_pvh_kind(func->name)) ||
+		    ((kind == 51 || !strcmp(func->name, "just_return_func")) &&
+		     (kind != 51 || strcmp(func->name, "just_return_func"))) ||
+		    ((kind == 48 || !strcmp(func->name, "startup_64")) &&
+		     (kind != 48 || strcmp(func->name, "startup_64"))) ||
+		    ((kind == 49 || !strcmp(func->name, "secondary_startup_64")) &&
+		     (kind != 49 || strcmp(func->name, "secondary_startup_64"))) ||
+		    ((kind == 50 || !strcmp(func->name, "common_startup_64")) &&
+		     (kind != 50 || strcmp(func->name, "common_startup_64"))) ||
+		    ((kind == 46 || !strcmp(func->name, "early_idt_handler_array")) &&
+		     (kind != 46 || strcmp(func->name, "early_idt_handler_array"))) ||
+		    ((kind == 47 || !strcmp(func->name, "early_idt_handler_common")) &&
+		     (kind != 47 || strcmp(func->name, "early_idt_handler_common"))) ||
+		    ((kind == 44 || !strcmp(func->name, "entry_SYSENTER_compat")) &&
+		     (kind != 44 || strcmp(func->name, "entry_SYSENTER_compat"))) ||
+		    ((kind == 45 || !strcmp(func->name, "entry_SYSCALL_compat")) &&
+		     (kind != 45 || strcmp(func->name, "entry_SYSCALL_compat"))) ||
+		    ((kind == 40 || !strcmp(func->name, "common_interrupt_return")) &&
+		     (kind != 40 || strcmp(func->name, "common_interrupt_return"))) ||
+		    ((kind == 41 || !strcmp(func->name, "asm_exc_nmi")) &&
+		     (kind != 41 || strcmp(func->name, "asm_exc_nmi"))) ||
+		    ((kind == 42 || !strcmp(func->name, "entry_SYSCALL_64")) &&
+		     (kind != 42 || strcmp(func->name, "entry_SYSCALL_64"))) ||
+		    ((kind == 43 || !strcmp(func->name, "entry_SYSCALL32_ignore")) &&
+		     (kind != 43 || strcmp(func->name, "entry_SYSCALL32_ignore"))) ||
+		    (((kind >= 37 && kind <= 39) || rap_entry_root_kind(func->name)) &&
+		     kind != rap_entry_root_kind(func->name)) ||
+		    (((kind >= 33 && kind <= 36) || rap_idt_kind(func->name)) &&
+		     kind != rap_idt_kind(func->name)) ||
+		    ((kind == 32 || !strcmp(func->name, "wakeup_long64")) &&
+		     (kind != 32 || strcmp(func->name, "wakeup_long64"))) ||
+		    ((kind == 30 || !strcmp(func->name, "__switch_to_asm")) &&
+		     (kind != 30 || strcmp(func->name, "__switch_to_asm"))) ||
+		    ((kind == 31 || !strcmp(func->name, "ret_from_fork_asm")) &&
+		     (kind != 31 || strcmp(func->name, "ret_from_fork_asm"))) ||
+		    ((kind == 28 || rap_fred_name(func->name)) &&
+		     (kind != 28 || !rap_fred_name(func->name))) ||
+		    ((kind == 29 || !strcmp(func->name, "verify_cpu")) &&
+		     (kind != 29 || strcmp(func->name, "verify_cpu"))) ||
+		    ((kind == 27 || rap_thunk_name(func->name)) &&
+		     (kind != 27 || !rap_thunk_name(func->name))) ||
+		    (((kind >= 21 && kind <= 25) || rap_hv_crash_kind(func->name)) &&
+		     kind != rap_hv_crash_kind(func->name)) ||
+		    (kind == 26 && strcmp(func->name, "hdn_realmode_restart")) ||
+		    (!strcmp(func->name, "hdn_realmode_restart") && kind != 26) ||
+		    (kind == 19 && strcmp(func->name, "hdn_hv_hypercall")) ||
+		    (kind == 20 && strcmp(func->name, "hdn_hv_vtl_gate")) ||
+		    (!strcmp(func->name, "hdn_hv_hypercall") && kind != 19) ||
+		    (!strcmp(func->name, "hdn_hv_vtl_gate") && kind != 20) ||
+		    (kind == 18 && strcmp(func->name, "asm_acpi_mp_play_dead")) ||
+		    (!strcmp(func->name, "asm_acpi_mp_play_dead") && kind != 18) ||
+		    (kind == 6 && !func->static_call_tramp) ||
+		    (func->static_call_tramp && kind != 6) ||
+		    (kind == 5 && !rap_private_name(func->name)) ||
+		    (rap_private_name(func->name) && kind != 5) ||
+		    ((!strcmp(func->name, "restore_image") ||
+		      !strcmp(func->name, "core_restore_code")) && kind != 8) ||
+		    (!strcmp(func->name, "restore_registers") && kind != 9) ||
+		    (!strcmp(func->name, "hdn_rap_kexec") && kind != 10) ||
+		    (rap_kexec_terminal_name(func->name) && kind != 11) ||
+		    (!strcmp(func->name, "hdn_rap_kexec_return") && kind != 12) ||
+		    (!strcmp(func->name, "__hdn_efi_call") && kind != 14) ||
+		    (!strcmp(func->name, "__hdn_efi_return") && kind != 15) ||
+		    (!strcmp(func->name, "__hdn_efi_fault_return") && kind != 16) ||
+		    (!strcmp(func->name, "__hdn_efi64_thunk") && kind != 17) ||
+		    ((!strcmp(func->name, "vmx_do_nmi_irqoff") ||
+		      !strcmp(func->name, "vmx_do_interrupt_irqoff")) && kind != 13) ||
+		    (!strcmp(func->name, "__hdn_rap_fail") && kind != 3) ||
+		    (!strcmp(func->name, "__hdn_rap_halt") && kind != 2)) {
+			ERROR("RAP runtime protocol has the wrong coverage kind");
+			return -1;
+		}
+		func->rap_kind = kind;
+		func->rap_returns = returns;
+		if (kind == 7 && opts.link && strncmp(func->name, "__pi_", 5)) {
+			ERROR("RAP bootstrap coverage escaped the prefixed physical startup domain");
+			return -1;
+		}
+	}
+	{
+		struct symbol *func;
+
+		for_each_sym(file->elf, func)
+			if (func->rap_kind == 27 && verify_rap_thunk(file, func))
+				return -1;
+		if (validate_rap_thunk_peers(file))
+			return -1;
+		if (read_rap_mitigation_calls(file))
+			return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind >= 33 && func->rap_kind <= 36 && verify_rap_idt(file, func))
+				return -1;
+		if (validate_rap_idt_peers(file))
+			return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind >= 37 && func->rap_kind <= 39 && verify_rap_entry_root(file, func))
+				return -1;
+		if (validate_rap_entry_root_peers(file))
+			return -1;
+		for_each_sym(file->elf, func) {
+			if (((func->rap_kind >= 52 && func->rap_kind <= 54) && verify_rap_pvh(file, func)) ||
+			    (func->rap_kind == 51 && verify_rap_error_return(file, func)) ||
+			    (func->rap_kind == 40 && verify_rap_interrupt_return(file, func)) ||
+			    (func->rap_kind == 41 && verify_rap_nmi(file, func)) ||
+			    (func->rap_kind == 42 && verify_rap_syscall(file, func)) ||
+			    (func->rap_kind == 43 && verify_rap_syscall32_ignore(file, func)) ||
+			    ((func->rap_kind == 44 || func->rap_kind == 45) && verify_rap_compat(file, func)) ||
+			    ((func->rap_kind == 46 || func->rap_kind == 47) && verify_rap_early_idt(file, func)) ||
+			    ((func->rap_kind >= 48 && func->rap_kind <= 50) && verify_rap_startup(file, func)))
+				return -1;
+		}
+		if (validate_rap_interrupt_return_peers(file) || validate_rap_syscall_peers(file) ||
+		    validate_rap_compat_peers(file) || validate_rap_early_idt_peers(file))
+			return -1;
+		if (validate_rap_startup_peers(file))
+			return -1;
+		if (validate_rap_pvh_peers(file))
+			return -1;
+		for_each_sym(file->elf, func)
+			if (!strcmp(func->name, "rewind_stack_and_make_dead") && !is_undef_sym(func) &&
+			    verify_rap_rewind(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if ((func->rap_kind == 32 || (!strcmp(func->name, "do_suspend_lowlevel") &&
+			     !is_undef_sym(func))) && verify_rap_s3(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if ((func->rap_kind == 30 || func->rap_kind == 31) && verify_rap_switch(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind == 28 && verify_rap_fred(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind == 29 && verify_rap_cpu(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind == 26 && verify_rap_realmode_restart(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind >= 21 && func->rap_kind <= 25 && verify_rap_hv_crash(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if ((func->rap_kind == 19 || func->rap_kind == 20) &&
+			    verify_rap_hyperv(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind == 18 && verify_rap_madt(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (!strcmp(func->name, "ibt_selftest") && is_func_sym(func) &&
+			    verify_rap_ibt(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (rap_regs_name(func->name) && is_func_sym(func) &&
+			    verify_rap_regs(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind == 3 && verify_rap_terminal(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind == 4 && verify_rap_adapter(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind == 8 && verify_rap_image_handoff(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind == 9 && verify_rap_image_resume(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind >= 10 && func->rap_kind <= 12 && verify_rap_kexec(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind >= 14 && func->rap_kind <= 17 && verify_rap_efi(file, func))
+				return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind == 13 && verify_rap_hardware_event(file, func))
+				return -1;
+		if (validate_rap_nmi_peers(file))
+			return -1;
+		for_each_sym(file->elf, func)
+			if (func->rap_kind == 5 && !strcmp(func->name, "ftrace_regs_caller") &&
+			    verify_rap_ftrace_handoff(file, func))
+				return -1;
+	}
+	return 0;
+}
+
+/* Bind the runtime redirection table to actual compiler entry and fentry
+ * instructions. A type-compatible address alone must not nominate an interior
+ * label as the replacement function's protected-body continuation. */
+static int read_rap_function_entries(struct objtool_file *file)
+{
+	struct section *sec = find_section_by_name(file->elf, ".hdn.rap.entries");
+	unsigned long off;
+
+	if (!sec)
+		return 0;
+	if (sec_size(sec) % 32) {
+		ERROR("invalid RAP typed-entry metadata size");
+		return -1;
+	}
+	for (off = 0; off < sec_size(sec); off += 32) {
+		struct reloc *start = find_reloc_by_dest(file->elf, sec, off);
+		struct reloc *type = find_reloc_by_dest(file->elf, sec, off + 8);
+		struct reloc *body = find_reloc_by_dest(file->elf, sec, off + 16);
+		struct reloc *trace = find_reloc_by_dest(file->elf, sec, off + 24);
+		struct instruction *first, *entry, *trace_call;
+		struct symbol *func, *callee;
+		unsigned long body_offset;
+
+		if (memcmp(sec->data->d_buf + off, (char[32]){}, 32))
+			goto bad;
+		if (!start && !type && !body && !trace)
+			continue;
+		if (!start || !type || !body || arch_reloc_size(start) != 8 ||
+		    arch_reloc_size(type) != 8 || arch_reloc_size(body) != 8 ||
+		    (strcmp(type->sym->sec->name, ".hdn.rap.types") &&
+		     (opts.link || type->sym->sec->idx != SHN_UNDEF ||
+		      strncmp(type->sym->name, "__hdn_rap_type_", 15))))
+			goto bad;
+		first = find_insn(file, start->sym->sec, start->sym->offset + reloc_addend(start));
+		func = first ? rap_insn_owner(first) : NULL;
+		if (!func || first->offset != func->offset ||
+		    (func->rap_kind && func->rap_kind != 1) || func->rap_typed_entry)
+			goto bad;
+		if (first->type == INSN_ENDBR)
+			first = next_insn_same_sec(file, first);
+		entry = first ? next_insn_same_sec(file, first) : NULL;
+		if (!entry || !entry->rap_entry || body->sym->sec != entry->sec)
+			goto bad;
+		body_offset = body->sym->offset + reloc_addend(body);
+		if (body_offset != entry->offset + entry->len)
+			goto bad;
+		trace_call = find_insn(file, entry->sec, body_offset + 7);
+		callee = trace_call ? insn_call_dest(trace_call) : NULL;
+		if (trace) {
+			if (arch_reloc_size(trace) != 8 || trace->sym->sec != entry->sec ||
+			    trace->sym->offset + reloc_addend(trace) != body_offset + 12 ||
+			    !trace_call || !trace_call->rap_site || !callee || !callee->fentry)
+				goto bad;
+		} else if (callee && callee->fentry) {
+			goto bad;
+		}
+		func->rap_typed_entry = true;
+	}
+	return 0;
+bad:
+	ERROR("RAP typed-entry metadata does not match the protected function body");
+	return -1;
+}
+
+/* Static-call contracts preserve the native eight-byte patch ABI. They are
+ * direct-call identities, not function-entry or indirect-target permissions. */
+static int read_rap_static_calls(struct objtool_file *file)
+{
+	struct section *contracts = find_section_by_name(file->elf, ".hdn.rap.static_calls");
+	struct section *sites = find_section_by_name(file->elf, ".hdn.rap.static_sites");
+	unsigned long off;
+
+	if (contracts && sec_size(contracts) % 32)
+		goto bad;
+	if (sites && sec_size(sites) % 16)
+		goto bad;
+	for (off = 0; contracts && off < sec_size(contracts); off += 32) {
+		struct reloc *start = find_reloc_by_dest(file->elf, contracts, off);
+		struct reloc *key = find_reloc_by_dest(file->elf, contracts, off + 8);
+		struct reloc *type = find_reloc_by_dest(file->elf, contracts, off + 16);
+		struct reloc *zero = find_reloc_by_dest(file->elf, contracts, off + 24);
+		struct instruction *first, *insn;
+		struct symbol *func, *callee, *type_anchor, *zero_anchor;
+		struct rap_sequence sequence;
+		uint64_t flags;
+		char *anchor_name;
+		unsigned int field;
+
+		memcpy(&flags, contracts->data->d_buf + off + 24, 8);
+		if (!start && !key && !type && !zero &&
+		    !memcmp(contracts->data->d_buf + off, (char[32]){}, 32) &&
+		    !find_reloc_by_dest_range(file->elf, contracts, off, 32))
+			continue;
+		if (!start || !key || !type || arch_reloc_size(start) != 8 ||
+		    arch_reloc_size(key) != 8 || arch_reloc_size(type) != 8 ||
+		    memcmp(contracts->data->d_buf + off, (char[24]){}, 24))
+			goto bad;
+		for (field = 0; field < 32; field += 8)
+			if (find_reloc_by_dest_range(file->elf, contracts, off + field + 1, 7))
+				goto bad;
+		first = find_insn(file, start->sym->sec, start->sym->offset + reloc_addend(start));
+		func = first ? rap_insn_owner(first) : NULL;
+		callee = first ? insn_call_dest(first) : NULL;
+		if (!func || first->offset != func->offset || !func->static_call_tramp ||
+		    func->rap_kind != 6 || func->rap_static_contract || func->len != 8 ||
+		    strcmp(func->sec->name, ".static_call.text") || is_weak_sym(func) ||
+		    !callee || first->len != 5 ||
+		    strncmp(key->sym->name, STATIC_CALL_KEY_PREFIX_STR, STATIC_CALL_KEY_PREFIX_LEN) ||
+		    strcmp(key->sym->name + STATIC_CALL_KEY_PREFIX_LEN,
+			   func->name + STATIC_CALL_TRAMP_PREFIX_LEN) || reloc_addend(key) ||
+		    (strcmp(type->sym->sec->name, ".hdn.rap.types") &&
+		     (opts.link || !is_undef_sym(type->sym) ||
+		      strncmp(type->sym->name, "__hdn_rap_type_", 15))))
+			goto bad;
+		if (asprintf(&anchor_name, "__hdn_rap_type_%s", func->name) < 0)
+			goto bad;
+		type_anchor = find_symbol_by_name(file->elf, anchor_name);
+		free(anchor_name);
+		if (!type_anchor || type->sym->sec != type_anchor->sec ||
+		    type->sym->offset + reloc_addend(type) != type_anchor->offset ||
+		    (is_undef_sym(type_anchor) && type->sym != type_anchor))
+			goto bad;
+		if (zero) {
+			const char *prefix = "__hdn_rap_static_zero_";
+
+			if (flags || arch_reloc_size(zero) != 8 || reloc_addend(zero))
+				goto bad;
+			/* ld -r folds a zero-valued weak absolute anchor into the ELF
+			 * null symbol. This still resolves to exactly zero, not a
+			 * missing external permission which could be rebound later. */
+			if (zero->sym->idx && (zero->sym->sym.st_shndx != SHN_ABS ||
+			    strncmp(zero->sym->name, prefix, strlen(prefix)) ||
+			    strcmp(zero->sym->name + strlen(prefix), func->name)))
+				goto bad;
+			flags = zero->sym->offset;
+		}
+		if (asprintf(&anchor_name, "__hdn_rap_static_zero_%s", func->name) < 0)
+			goto bad;
+		zero_anchor = find_symbol_by_name(file->elf, anchor_name);
+		free(anchor_name);
+		if (!zero_anchor || zero_anchor->sym.st_shndx != SHN_ABS ||
+		    zero_anchor->offset != flags || flags > 1 ||
+		    (!strcmp(callee->name, "__static_call_return0") && !flags))
+			goto bad;
+		sequence = (struct rap_sequence) { .file = file, .func = func };
+		if (!rap_sequence_edge(&sequence, callee->name, false) ||
+		    !rap_sequence_bytes(&sequence, "\x0f\xb9\xcc", 3) || sequence.pos != func->len)
+			goto bad;
+		rap_for_each_insn(file, func, insn)
+			if (insn->alts)
+				goto bad;
+		func->rap_static_contract = true;
+	}
+	for (off = 0; sites && off < sec_size(sites); off += 16) {
+		struct reloc *site = find_reloc_by_dest(file->elf, sites, off);
+		struct reloc *tramp = find_reloc_by_dest(file->elf, sites, off + 8);
+		struct instruction *call;
+		struct symbol *callee;
+		unsigned long return_site;
+
+		if (!site && !tramp && !memcmp(sites->data->d_buf + off, (char[16]){}, 16) &&
+		    !find_reloc_by_dest_range(file->elf, sites, off, 16))
+			continue;
+		if (!site || !tramp || arch_reloc_size(site) != 8 || arch_reloc_size(tramp) != 8 ||
+		    memcmp(sites->data->d_buf + off, (char[16]){}, 16) ||
+		    find_reloc_by_dest_range(file->elf, sites, off + 1, 7) ||
+		    find_reloc_by_dest_range(file->elf, sites, off + 9, 7))
+			goto bad;
+		return_site = site->sym->offset + reloc_addend(site);
+		call = return_site >= 5 ? find_insn(file, site->sym->sec, return_site - 5) : NULL;
+		callee = call ? insn_call_dest(call) : NULL;
+		if (!call || call->len != 5 || call->type != INSN_CALL || !call->rap_site ||
+		    call->rap_static_site || !callee || !callee->static_call_tramp ||
+		    tramp->sym->sec != callee->sec ||
+		    (is_undef_sym(callee) && tramp->sym != callee) ||
+		    tramp->sym->offset + reloc_addend(tramp) != callee->offset)
+			goto bad;
+		call->rap_static_site = true;
+	}
+	return 0;
+bad:
+	ERROR("RAP static-call metadata does not match its exact patch contract");
+	return -1;
+}
+
+/* A strict producer, separate from ordinary ORC/IBT validation. Assembly which
+ * has not yet acquired its explicit ABI adapter fails this gate. Neither a
+ * stack/unreachable annotation nor a compiler runtime record exempts a transfer
+ * from the required binding checks. */
+static int validate_rap(struct objtool_file *file)
+{
+	struct symbol *func;
+	struct instruction *insn;
+	struct section *targets = find_section_by_name(file->elf, ".hdn.rap.targets");
+	int warnings = 0;
+
+	if (file->elf->ehdr.e_machine != EM_X86_64) {
+		ERROR("RAP coverage is defined only for x86-64");
+		return 1;
+	}
+	for_each_sym(file->elf, func) {
+		unsigned long returns = 0, entries = 0;
+		struct instruction *first;
+		bool protected = func->rap_kind == 1 || func->rap_kind == 5;
+
+		if ((!is_func_sym(func) && !is_notype_sym(func)) || !func->sec->text ||
+		    !func->len || func->cold || func->embedded_insn)
+			continue;
+		first = find_insn(file, func->sec, func->offset);
+		/* Aliases share the exact same body and canonical coverage record. */
+		if (first && rap_insn_owner(first) != func)
+			continue;
+		if (first && first->type == INSN_ENDBR)
+			first = next_insn_same_sec(file, first);
+		if (!func->rap_kind) {
+			WARN_FUNC(func->sec, func->offset, "function lacks RAP coverage");
+			warnings++;
+			continue;
+		}
+		if (func->rap_kind == 1 && !func->rap_typed_entry) {
+			WARN_FUNC(func->sec, func->offset, "function lacks RAP typed-entry metadata");
+			warnings++;
+		}
+		if ((func->rap_kind == 5 || func->rap_kind == 6 || func->rap_kind == 7 ||
+		     func->rap_kind == 8 || func->rap_kind == 9 || func->rap_kind >= 10) && targets) {
+			unsigned long off;
+
+			for (off = 0; off < sec_size(targets); off += 16) {
+				struct reloc *reloc = find_reloc_by_dest(file->elf, targets, off);
+
+				if (reloc && reloc->sym->sec == func->sec &&
+				    reloc->sym->offset + reloc_addend(reloc) >= func->offset &&
+				    reloc->sym->offset + reloc_addend(reloc) < func->offset + func->len) {
+					WARN_FUNC(func->sec, func->offset, "private RAP ABI has an ordinary indirect target");
+					warnings++;
+				}
+			}
+		}
+		if (func->rap_kind >= 52 && func->rap_kind <= 54) {
+			if (!func->rap_pvh_protocol) {
+				WARN_FUNC(func->sec, func->offset, "RAP PVH root lacks a checked boot protocol");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind == 51) {
+			if (!func->rap_error_return_protocol) {
+				WARN_FUNC(func->sec, func->offset, "RAP error injection lacks a checked epilogue");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind >= 40 && func->rap_kind <= 50) {
+			bool complete = func->rap_kind == 41 ? func->rap_nmi_protocol :
+				func->rap_kind == 42 ? func->rap_syscall_protocol :
+				func->rap_kind >= 48 ? func->rap_startup_protocol :
+				func->rap_kind >= 46 ? func->rap_early_idt_protocol :
+				func->rap_kind >= 44 ? func->rap_compat_protocol : func->rap_interrupt_return_protocol;
+			if (!complete) {
+				WARN_FUNC(func->sec, func->offset, "RAP hardware root lacks a checked entry/exit protocol");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind >= 37 && func->rap_kind <= 39) {
+			if (!func->rap_entry_root_protocol) {
+				WARN_FUNC(func->sec, func->offset, "RAP pre-C helper lacks a checked entry protocol");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind >= 33 && func->rap_kind <= 36) {
+			if (!func->rap_idt_protocol) {
+				WARN_FUNC(func->sec, func->offset, "RAP IDT entry lacks a checked native frame protocol");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind == 32 || !strcmp(func->name, "do_suspend_lowlevel")) {
+			struct symbol *state = find_symbol_by_name(file->elf, "hdn_rap_resume_state");
+			struct symbol *save = find_symbol_by_name(file->elf, "hdn_rap_resume_save");
+			struct symbol *restore = find_symbol_by_name(file->elf, "hdn_rap_resume_restore");
+			struct symbol *entry = find_symbol_by_name(file->elf, "wakeup_long64");
+			struct symbol *body = find_symbol_by_name(file->elf, "do_suspend_lowlevel");
+
+			if (!func->rap_s3_protocol || !entry || !entry->rap_s3_protocol ||
+			    !body || !body->rap_s3_protocol || (opts.link &&
+			    (!state || strcmp(state->sec->name, ".data..ro_after_init") ||
+			     !save || save->rap_kind != 2 || !restore || restore->rap_kind != 2))) {
+				WARN_FUNC(func->sec, func->offset, "RAP S3 lacks its sealed checkpoint and fixed continuation");
+				warnings++;
+			}
+			if (func->rap_kind == 32)
+				continue;
+		}
+		if (func->rap_kind == 30 || func->rap_kind == 31) {
+			struct symbol *switcher = find_symbol_by_name(file->elf, "__switch_to");
+			struct symbol *capture = find_symbol_by_name(file->elf, "hdn_rap_switch");
+			struct symbol *fork = find_symbol_by_name(file->elf, "ret_from_fork");
+			struct symbol *seed = find_symbol_by_name(file->elf, "hdn_rap_task_seed");
+
+			if (!func->rap_switch_protocol || (opts.link &&
+			    (!switcher || switcher->rap_kind != 1 || !capture || capture->rap_kind != 2 ||
+			     !fork || fork->rap_kind != 1 || !seed || seed->rap_kind != 2))) {
+				WARN_FUNC(func->sec, func->offset, "RAP switch/fork lacks its protected runtime and continuation");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind == 28) {
+			static const char * const roots[] = {
+				"fred_entry_from_user", "fred_entry_from_kernel",
+				"hdn_rap_frame_enter", "hdn_rap_frame_exit",
+			};
+			unsigned int n;
+
+			if (!func->rap_fred_protocol) {
+				WARN_FUNC(func->sec, func->offset, "RAP FRED root lacks a checked frame protocol");
+				warnings++;
+			}
+			for (n = 0; opts.link && n < ARRAY_SIZE(roots); n++) {
+				struct symbol *root = find_symbol_by_name(file->elf, roots[n]);
+				if (!root || root->rap_kind != (n < 2 ? 1 : 2)) {
+					WARN_FUNC(func->sec, func->offset, "RAP FRED handler/runtime coverage is incomplete");
+					warnings++;
+				}
+			}
+			continue;
+		}
+		if (func->rap_kind == 29) {
+			if (!func->rap_cpu_protocol) {
+				WARN_FUNC(func->sec, func->offset, "RAP CPU startup leaf lacks a checked instruction protocol");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind == 27) {
+			if (!func->rap_thunk_protocol) {
+				WARN_FUNC(func->sec, func->offset, "RAP mitigation thunk lacks a checked instruction protocol");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind == 26) {
+			struct symbol *state = find_symbol_by_name(file->elf, "hdn_realmode_reboot");
+			if (!func->rap_realmode_protocol || !state || (opts.link &&
+			    (strcmp(state->sec->name, ".data..ro_after_init") || state->len != 16))) {
+				WARN_FUNC(func->sec, func->offset, "RAP reboot lacks its immutable launch descriptor");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind >= 21 && func->rap_kind <= 25) {
+			struct symbol *cpu = find_symbol_by_name(file->elf, "hdn_hv_crash_cpu");
+			struct symbol *capture = find_symbol_by_name(file->elf, "hdn_hv_crash_capture");
+			struct symbol *finish = find_symbol_by_name(file->elf, "hdn_hv_crash_finish");
+			struct symbol *handler = find_symbol_by_name(file->elf, "hv_crash_handle");
+			unsigned int kind;
+
+			if (!func->rap_hv_crash_protocol || (opts.link &&
+			    (!cpu || cpu->len != 128 || strcmp(cpu->sec->name, ".data..ro_after_init") ||
+			     !capture || capture->rap_kind != 2 || !finish || finish->rap_kind != 2 ||
+			     !handler || handler->rap_kind != 1))) {
+				WARN_FUNC(func->sec, func->offset, "RAP Hyper-V crash recovery lacks protected state and runtime roots");
+				warnings++;
+			}
+			if (opts.link) {
+				static const char * const names[] = { "hdn_hv_crash_enter", "hdn_hv_crash_return",
+					"hdn_hv_crash_continue", "hv_crash_asm32", "hv_crash_asm64" };
+				for (kind = 0; kind < ARRAY_SIZE(names); kind++) {
+					struct symbol *peer = find_symbol_by_name(file->elf, names[kind]);
+					if (!peer || peer->rap_kind != kind + 21 || !peer->rap_hv_crash_protocol) {
+						WARN_FUNC(func->sec, func->offset, "RAP Hyper-V crash path is incomplete");
+						warnings++;
+					}
+				}
+			}
+			continue;
+		}
+		if (func->rap_kind == 19 || func->rap_kind == 20) {
+			struct symbol *state = find_symbol_by_name(file->elf,
+				func->rap_kind == 19 ? "hdn_hv_hypercall_target" : "hdn_hv_vtl_target");
+			struct symbol *ret = find_symbol_by_name(file->elf, "__hdn_rap_return");
+
+			if (!func->rap_hyperv_protocol || !state || !ret ||
+			    (opts.link && (strcmp(state->sec->name, ".data..ro_after_init") ||
+				state->len != 8 || !ret->rap_adapter))) {
+				WARN_FUNC(func->sec, func->offset, "RAP Hyper-V gateway lacks its sealed endpoint and return root");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind == 18) {
+			struct symbol *state = find_symbol_by_name(file->elf, "hdn_madt_launch");
+
+			if (!func->rap_madt_protocol || !state ||
+			    (opts.link && (strcmp(state->sec->name, ".data..ro_after_init") ||
+				state->len != 4096 || (state->offset & 4095)))) {
+				WARN_FUNC(func->sec, func->offset, "RAP ACPI reset lacks its dedicated frozen launch page");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind >= 14 && func->rap_kind <= 17) {
+			struct symbol *enter = find_symbol_by_name(file->elf, "hdn_efi_enter");
+			struct symbol *finish = find_symbol_by_name(file->elf, "hdn_efi_finish");
+			struct symbol *state = find_symbol_by_name(file->elf, "hdn_efi_state");
+			struct symbol *ret = find_symbol_by_name(file->elf, "__hdn_rap_return");
+			struct symbol *gate = find_symbol_by_name(file->elf, "__hdn_efi_return");
+			struct symbol *fault = find_symbol_by_name(file->elf, "__hdn_efi_fault_return");
+
+			if (!func->rap_efi_protocol || !enter || !finish || !state || !ret ||
+			    (opts.link && (enter->rap_kind != 2 || finish->rap_kind != 2 ||
+				!gate || gate->rap_kind != 15 || !gate->rap_efi_protocol ||
+				!fault || fault->rap_kind != 16 || !fault->rap_efi_protocol ||
+				!ret->rap_adapter || strcmp(state->sec->name, ".data..ro_after_init")))) {
+				WARN_FUNC(func->sec, func->offset, "RAP EFI lacks its closed runtime and protected state");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind == 13) {
+			struct symbol *selector = find_symbol_by_name(file->elf, "hdn_rap_vmx_vector");
+			if (!func->rap_hardware_event ||
+			    (!strcmp(func->name, "vmx_do_interrupt_irqoff") &&
+			     (!selector || (!is_undef_sym(selector) && selector->rap_kind != 1)))) {
+				WARN_FUNC(func->sec, func->offset, "RAP synthetic interrupt lacks its protected selector");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind >= 10 && func->rap_kind <= 12) {
+			static const char * const roots[] = {
+				"hdn_rap_kexec_enter", "hdn_rap_kexec_finish",
+			};
+			unsigned int i;
+
+			if (!func->rap_kexec_protocol) {
+				WARN_FUNC(func->sec, func->offset, "unverified RAP kexec protocol");
+				warnings++;
+			}
+			if (opts.link) {
+				struct symbol *state = find_symbol_by_name(file->elf, "hdn_rap_kexec_state");
+				struct symbol *ret = find_symbol_by_name(file->elf, "hdn_rap_kexec_return");
+				struct symbol *entry = find_symbol_by_name(file->elf, "hdn_rap_kexec");
+				struct symbol *auth = find_symbol_by_name(file->elf, "__hdn_rap_return");
+
+				if (!state || strcmp(state->sec->name, ".data..ro_after_init") ||
+				    !ret || !ret->rap_kexec_protocol || ret->rap_kind != 12 ||
+				    !entry || !entry->rap_kexec_protocol || entry->rap_kind != 10 ||
+				    !auth || !auth->rap_adapter) {
+					WARN_FUNC(func->sec, func->offset, "RAP kexec lacks its protected state and return adapter");
+					warnings++;
+				}
+				for (i = 0; i < ARRAY_SIZE(roots); i++) {
+					struct symbol *root = find_symbol_by_name(file->elf, roots[i]);
+					if (!root || root->rap_kind != 2) {
+						WARN_FUNC(func->sec, func->offset, "RAP kexec lacks its closed runtime root");
+						warnings++;
+					}
+				}
+			}
+			continue;
+		}
+		if (func->rap_kind == 9) {
+			struct symbol *restore = find_symbol_by_name(file->elf, "hdn_rap_resume_restore");
+			struct symbol *ret = find_symbol_by_name(file->elf, "__hdn_rap_return");
+			struct symbol *state = find_symbol_by_name(file->elf, "hdn_rap_resume_state");
+
+			if (!func->rap_resume_entry || !restore || !ret || !state ||
+			    (opts.link && (restore->rap_kind != 2 || !ret->rap_adapter ||
+					  strcmp(state->sec->name, ".data..ro_after_init")))) {
+				WARN_FUNC(func->sec, func->offset, "RAP image resume lacks its protected checkpoint/return roots");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind == 8) {
+			struct symbol *admit = find_symbol_by_name(file->elf, "hdn_rap_hibernate_enter");
+			struct symbol *launch = find_symbol_by_name(file->elf, "restore_image");
+			struct symbol *copy = find_symbol_by_name(file->elf, "core_restore_code");
+
+			if (!func->rap_image_handoff || !launch || !copy ||
+			    !launch->rap_image_handoff || !copy->rap_image_handoff ||
+			    !admit || (admit->rap_kind != 2 &&
+				       (opts.link || !is_undef_sym(admit)))) {
+				WARN_FUNC(func->sec, func->offset, "RAP image handoff lacks its closed admission root");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind == 7) {
+			/* Physical startup has no runtime GS/stack identity. It is a
+			 * closed direct-call domain, not an uninstrumented target set
+			 * callable by ordinary kernel code. */
+			rap_for_each_insn(file, func, insn) {
+				struct symbol *callee = insn_call_dest(insn);
+
+				if (insn->type == INSN_CALL_DYNAMIC || is_dynamic_jump(insn) ||
+				    ((insn->type == INSN_CALL || is_sibling_call(insn)) &&
+				     (!callee || (callee->rap_kind != 7 &&
+				      (opts.link || !is_undef_sym(callee)))))) {
+					WARN_INSN(insn, "RAP bootstrap leaves its closed direct-call domain");
+					warnings++;
+				}
+			}
+			continue;
+		}
+		if (func->rap_kind == 6) {
+			struct symbol *callee = first ? insn_call_dest(first) : NULL;
+
+			if (!func->rap_static_contract || !callee ||
+			    (!is_undef_sym(callee) && callee->rap_kind != 1 &&
+			     !(callee->rap_adapter && !strcmp(callee->name, "__hdn_rap_static_null")))) {
+				WARN_FUNC(func->sec, func->offset, "static-call trampoline lacks protected destination coverage");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind == 3) {
+			struct symbol *prepare = find_symbol_by_name(file->elf, "hdn_rap_failure_prepare");
+			struct symbol *report = find_symbol_by_name(file->elf, "hdn_rap_failure_report");
+
+			if (!func->rap_terminal || !prepare || prepare->rap_kind != 2 ||
+			    !report || report->rap_kind != 1) {
+				WARN_FUNC(func->sec, func->offset, "RAP terminal domain lacks protected setup/report coverage");
+				warnings++;
+			}
+			continue;
+		}
+		if (func->rap_kind == 4) {
+			unsigned int call_kind = rap_hook_name(func->name) ? 1 : 2;
+
+			/* Exact bytes alone do not establish that the runtime callees
+			 * and assembly continuations belong to this same closed bundle. */
+			if (!func->rap_adapter) {
+				WARN_FUNC(func->sec, func->offset, "unverified RAP adapter");
+				warnings++;
+			}
+			rap_for_each_insn(file, func, insn) {
+				struct symbol *callee = insn_call_dest(insn);
+
+				if ((insn->type == INSN_CALL && (!callee || callee->rap_kind != call_kind)) ||
+				    (is_static_jump(insn) && is_sibling_call(insn) && (!callee ||
+				     (!callee->rap_terminal && !callee->rap_adapter)))) {
+					WARN_INSN(insn, "RAP adapter leaves its closed runtime boundary");
+					warnings++;
+				}
+			}
+			continue;
+		}
+		if (first && first->type == INSN_ENDBR)
+			first = next_insn_same_sec(file, first);
+		if (func->rap_kind == 5 && !strcmp(func->name, "ftrace_regs_caller")) {
+			struct symbol *handoff = find_symbol_by_name(file->elf, "hdn_rap_bpf_trace_handoff");
+
+			/* verify_rap_ftrace_handoff checked the exact leading PUSHF. */
+			first = next_insn_same_sec(file, first);
+			if (!handoff || handoff->rap_kind != 2) {
+				WARN_FUNC(func->sec, func->offset, "RAP tracing handoff lacks its closed root");
+				warnings++;
+			}
+		}
+		rap_for_each_insn(file, func, insn) {
+			struct symbol *callee = insn_call_dest(insn);
+
+			if (insn->type == INSN_CALL && callee && callee->rap_kind == 7) {
+				WARN_INSN(insn, "runtime RAP call enters the physical bootstrap domain");
+				warnings++;
+			}
+			if (callee && ((callee->rap_kind >= 33 && callee->rap_kind <= 54) ||
+				       callee->rap_kind == 28 || callee->rap_kind == 29 ||
+				       callee->rap_kind == 31 || callee->rap_kind == 32 ||
+				       callee->rap_kind == 11 || callee->rap_kind == 12 ||
+				       callee->rap_kind == 15 || callee->rap_kind == 16 ||
+				       (callee->rap_kind >= 22 && callee->rap_kind <= 25))) {
+				WARN_INSN(insn, "ordinary RAP code enters a terminal handoff domain");
+				warnings++;
+			}
+			if (insn->rap_entry) {
+				entries++;
+				if (!protected || prev_insn_same_sec(file, insn) != first) {
+					WARN_INSN(insn, "RAP entry is not the first body operation");
+					warnings++;
+				}
+			}
+			if (insn->type == INSN_CALL && !insn->rap_entry && !insn->rap_site && !insn->rap_leaf_call) {
+				WARN_INSN(insn, "call has no RAP return-site binding");
+				warnings++;
+			}
+			if (insn->type == INSN_CALL && callee && callee->static_call_tramp &&
+			    !insn->rap_static_site) {
+				WARN_INSN(insn, "static call lacks immutable RAP patch-site identity");
+				warnings++;
+			}
+			if (insn->type == INSN_CALL_DYNAMIC || (is_dynamic_jump(insn) && !insn->rap_jump)) {
+				WARN_INSN(insn, "unprotected indirect RAP transfer");
+				warnings++;
+			}
+			if (func->rap_kind == 2 && insn->type == INSN_CALL && !insn->rap_leaf_call &&
+			    (!callee || (callee->rap_kind != 2 && !callee->rap_terminal))) {
+				WARN_INSN(insn, "RAP runtime calls outside its closed recursion boundary");
+				warnings++;
+			}
+			if (insn->type == INSN_RETURN) {
+				returns += insn->rap_return;
+				if (protected && !insn->rap_return) {
+					WARN_INSN(insn, "return bypasses the RAP authenticator");
+					warnings++;
+				}
+			}
+			if (is_sibling_call(insn) && !insn->rap_handoff) {
+				WARN_INSN(insn, "RAP sibling transfer lacks an explicit ABI adapter");
+				warnings++;
+			}
+		}
+		if (entries != protected || returns != func->rap_returns) {
+			WARN_FUNC(func->sec, func->offset, "RAP entry/return counts disagree with compiler coverage");
+			warnings++;
+		}
+	}
+	/* Standalone assembly and padding cannot hide unowned transfer code. */
+	for_each_insn(file, insn) {
+		if (rap_insn_owner(insn) || insn->hole || insn->rap_thunk_safe || insn->rap_hw_safe)
+			continue;
+		if (insn->type == INSN_CALL || insn->type == INSN_CALL_DYNAMIC ||
+		    insn->type == INSN_RETURN || is_jump(insn)) {
+			WARN_INSN(insn, "assembly transfer lacks RAP function ownership");
+			warnings++;
+		}
+	}
+	return warnings;
 }
 
 static int decode_sections(struct objtool_file *file)
@@ -2686,6 +4759,18 @@ static int decode_sections(struct objtool_file *file)
 
 	if (add_jump_table_alts(file))
 		return -1;
+	if (read_rap_jumps(file))
+		return -1;
+	if (read_rap_sites(file))
+		return -1;
+	if (read_rap_entries(file))
+		return -1;
+	if (read_rap_functions(file))
+		return -1;
+	if (read_rap_function_entries(file))
+		return -1;
+	if (read_rap_static_calls(file))
+		return -1;
 
 	if (read_unwind_hints(file))
 		return -1;
@@ -2711,7 +4796,9 @@ static bool is_special_call(struct instruction *insn)
 		if (!dest)
 			return false;
 
-		if (dest->fentry || dest->embedded_insn)
+		if (dest->fentry || dest->embedded_insn ||
+		    !strcmp(dest->name, "__hdn_rap_enter") ||
+		    !strcmp(dest->name, "__hdn_rap_enter_flags"))
 			return true;
 	}
 
@@ -2865,6 +4952,12 @@ static int update_cfi_state(struct instruction *insn,
 
 	/* ignore UNWIND_HINT_UNDEFINED regions */
 	if (cfi->force_undefined)
+		return 0;
+	/* The terminal protocol installs a fresh stack with no caller chain.
+	 * Its exact body has already been checked, including every operation
+	 * after the stack switch. Keep END_OF_STACK for the reporter's caller. */
+	if (cfi->type == UNWIND_HINT_TYPE_END_OF_STACK && insn_func(insn) &&
+	    insn_func(insn)->rap_terminal)
 		return 0;
 
 	/* stack operations don't make sense with an undefined CFA */
@@ -3437,7 +5530,7 @@ static bool insn_cfi_match(struct instruction *insn, struct cfi_state *cfi2)
 static inline bool func_uaccess_safe(struct symbol *func)
 {
 	if (func)
-		return func->uaccess_safe;
+		return func->uaccess_safe || func->rap_terminal;
 
 	return false;
 }
@@ -3553,7 +5646,20 @@ static int validate_sibling_call(struct objtool_file *file,
 				 struct instruction *insn,
 				 struct insn_state *state)
 {
-	if (insn_func(insn) && has_modified_stack_frame(insn, state)) {
+	struct symbol *func = insn_func(insn), *dest = insn_call_dest(insn);
+	/* This exact adapter has already consumed its return slot. The fixed
+	 * capture restores a single authenticated slot before its architecture
+	 * RET. Ordinary sibling calls must retain the usual stack geometry. */
+	bool rap_transfer = func && (func->rap_adapter || insn->rap_handoff) && dest && dest->rap_adapter &&
+			    (!strcmp(dest->name, "__hdn_rap_transfer") ||
+			     (rap_hook_name(func->name) &&
+			      (!strcmp(dest->name, "__hdn_rap_graph_return") ||
+			       !strcmp(dest->name, "__hdn_rap_rethook_return"))));
+
+	/* The byte-verified terminal protocol abandons its caller's stack and
+	 * can only branch to its verified non-returning halt loop. */
+	if (func && !func->rap_terminal && !rap_transfer &&
+	    has_modified_stack_frame(insn, state)) {
 		WARN_INSN(insn, "sibling call from callable instruction with modified stack frame");
 		return 1;
 	}
@@ -3961,12 +6067,14 @@ static int validate_insn(struct objtool_file *file, struct symbol *func,
 		if (!opts.uaccess)
 			break;
 
-		if (!statep->uaccess && func) {
+		/* A PUSHF/CLAC/POPF adapter may start with AC clear. Its saved
+		 * state is still checked at POPF and on every exit. */
+		if (!statep->uaccess && func && !statep->uaccess_stack && !func->rap_terminal) {
 			WARN_INSN(insn, "redundant UACCESS disable");
 			return 1;
 		}
 
-		if (func_uaccess_safe(func) && !statep->uaccess_stack) {
+		if (func_uaccess_safe(func) && !statep->uaccess_stack && !func->rap_terminal) {
 			WARN_INSN(insn, "UACCESS-safe disables UACCESS");
 			return 1;
 		}
@@ -3986,7 +6094,7 @@ static int validate_insn(struct objtool_file *file, struct symbol *func,
 
 	case INSN_CLD:
 		TRACE_INSN(insn, "cld");
-		if (!statep->df && func) {
+		if (!statep->df && func && !func->rap_terminal) {
 			WARN_INSN(insn, "redundant CLD");
 			return 1;
 		}
@@ -4695,6 +6803,11 @@ static int validate_ibt_insn(struct objtool_file *file, struct instruction *insn
 	unsigned long off;
 	int warnings = 0;
 
+	/* Already proven to load R10 with the immediately following call's
+	 * exact return address. A noreturn call may end at a symbol boundary. */
+	if (insn->rap_binding)
+		return 0;
+
 	/*
 	 * Looking for function pointer load relocations.  Ignore
 	 * direct/indirect branches:
@@ -4822,6 +6935,13 @@ static int validate_ibt(struct objtool_file *file)
 		    !strcmp(sec->name, ".llvm_bb_addr_map")		||
 		    !strcmp(sec->name, "__tracepoints")			||
 		    !strcmp(sec->name, ".return_sites")			||
+		    /* Validated as exact post-CALL continuations above. */
+		    !strcmp(sec->name, ".hdn.rap.sites")			||
+		    /* Typed identities and checked entry/fentry continuations;
+		     * these are not ordinary IBT indirect-call destinations. */
+		    !strcmp(sec->name, ".hdn.rap.entries")			||
+		    !strcmp(sec->name, ".hdn.rap.static_calls")		||
+		    !strcmp(sec->name, ".hdn.rap.static_sites")		||
 		    !strcmp(sec->name, ".call_sites")			||
 		    !strcmp(sec->name, "__patchable_function_entries"))
 			continue;
@@ -5048,6 +7168,8 @@ int check(struct objtool_file *file)
 
 	if (opts.ibt)
 		warnings += validate_ibt(file);
+	if (opts.rap)
+		warnings += validate_rap(file);
 
 	if (opts.sls)
 		warnings += validate_sls(file);

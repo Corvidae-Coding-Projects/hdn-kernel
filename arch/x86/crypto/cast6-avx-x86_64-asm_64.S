@@ -9,6 +9,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <asm/frame.h>
 #include "glue_helper-asm-avx.S"
 
@@ -250,6 +251,7 @@
 
 .align 8
 SYM_FUNC_START_LOCAL(__cast6_enc_blk8)
+	HDN_REGS_FUNC __cast6_enc_blk8
 	/* input:
 	 *	%rdi: ctx
 	 *	RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2: blocks
@@ -293,11 +295,13 @@ SYM_FUNC_START_LOCAL(__cast6_enc_blk8)
 	outunpack_blocks(RA1, RB1, RC1, RD1, RTMP, RX, RKRF, RKM);
 	outunpack_blocks(RA2, RB2, RC2, RD2, RTMP, RX, RKRF, RKM);
 
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __cast6_enc_blk8
 SYM_FUNC_END(__cast6_enc_blk8)
 
 .align 8
 SYM_FUNC_START_LOCAL(__cast6_dec_blk8)
+	HDN_REGS_FUNC __cast6_dec_blk8
 	/* input:
 	 *	%rdi: ctx
 	 *	RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2: encrypted blocks
@@ -340,10 +344,12 @@ SYM_FUNC_START_LOCAL(__cast6_dec_blk8)
 	outunpack_blocks(RA1, RB1, RC1, RD1, RTMP, RX, RKRF, RKM);
 	outunpack_blocks(RA2, RB2, RC2, RD2, RTMP, RX, RKRF, RKM);
 
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __cast6_dec_blk8
 SYM_FUNC_END(__cast6_dec_blk8)
 
 SYM_FUNC_START(cast6_ecb_enc_8way)
+	HDN_ASM_FUNCTION cast6_ecb_enc_8way
 	/* input:
 	 *	%rdi: ctx
 	 *	%rsi: dst
@@ -357,16 +363,18 @@ SYM_FUNC_START(cast6_ecb_enc_8way)
 
 	load_8way(%rdx, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
-	call __cast6_enc_blk8;
+	HDN_REGS_CALL __cast6_enc_blk8;
 
 	store_8way(%r11, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
 	popq %r15;
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END cast6_ecb_enc_8way
 SYM_FUNC_END(cast6_ecb_enc_8way)
 
 SYM_FUNC_START(cast6_ecb_dec_8way)
+	HDN_ASM_FUNCTION cast6_ecb_dec_8way
 	/* input:
 	 *	%rdi: ctx
 	 *	%rsi: dst
@@ -380,16 +388,18 @@ SYM_FUNC_START(cast6_ecb_dec_8way)
 
 	load_8way(%rdx, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
-	call __cast6_dec_blk8;
+	HDN_REGS_CALL __cast6_dec_blk8;
 
 	store_8way(%r11, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
 	popq %r15;
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END cast6_ecb_dec_8way
 SYM_FUNC_END(cast6_ecb_dec_8way)
 
 SYM_FUNC_START(cast6_cbc_dec_8way)
+	HDN_ASM_FUNCTION cast6_cbc_dec_8way
 	/* input:
 	 *	%rdi: ctx
 	 *	%rsi: dst
@@ -405,12 +415,13 @@ SYM_FUNC_START(cast6_cbc_dec_8way)
 
 	load_8way(%rdx, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
-	call __cast6_dec_blk8;
+	HDN_REGS_CALL __cast6_dec_blk8;
 
 	store_cbc_8way(%r12, %r11, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
 	popq %r15;
 	popq %r12;
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END cast6_cbc_dec_8way
 SYM_FUNC_END(cast6_cbc_dec_8way)

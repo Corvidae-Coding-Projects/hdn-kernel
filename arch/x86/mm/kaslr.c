@@ -192,7 +192,7 @@ void __meminit init_trampoline_kaslr(void)
 	pud = pud_offset(p4d, vaddr);
 
 	pud_tramp = pud_page_tramp + pud_index(paddr);
-	*pud_tramp = *pud;
+	set_pud(pud_tramp, *pud);
 
 	if (pgtable_l5_enabled()) {
 		p4d_page_tramp = alloc_low_page();

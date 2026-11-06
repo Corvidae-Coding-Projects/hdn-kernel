@@ -70,7 +70,7 @@ static struct file *io_splice_get_file(struct io_kiocb *req,
 	io_ring_submit_lock(ctx, issue_flags);
 	node = io_rsrc_node_lookup(&ctx->file_table.data, sp->splice_fd_in);
 	if (node) {
-		node->refs++;
+		io_get_rsrc_node(ctx, node);
 		sp->rsrc_node = node;
 		file = io_slot_file(node);
 		req->flags |= REQ_F_NEED_CLEANUP;

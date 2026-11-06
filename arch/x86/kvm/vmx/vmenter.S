@@ -6,6 +6,7 @@
 #include <asm/nospec-branch.h>
 #include <asm/percpu.h>
 #include <asm/segment.h>
+#include <asm/hdn_rap.h>
 #include "kvm-asm-offsets.h"
 #include "run_flags.h"
 
@@ -60,7 +61,7 @@
 	 * Using an unwind hint is problematic due to x86-64's dynamic alignment.
 	 */
 	leave
-	RET
+	HDN_ENTRY_ROOT_RETURN
 .endm
 
 .section .noinstr.text, "ax"
@@ -77,6 +78,7 @@
  *	0 on VM-Exit, 1 on VM-Fail
  */
 SYM_FUNC_START(__vmx_vcpu_run)
+	HDN_DIRECT_FUNC_ENTER __vmx_vcpu_run
 	push %_ASM_BP
 	mov  %_ASM_SP, %_ASM_BP
 #ifdef CONFIG_X86_64
@@ -103,7 +105,7 @@ SYM_FUNC_START(__vmx_vcpu_run)
 	push %_ASM_ARG2
 
 	lea (%_ASM_SP), %_ASM_ARG2
-	call vmx_update_host_rsp
+	HDN_C_CALL vmx_update_host_rsp
 
 	ALTERNATIVE "jmp .Lspec_ctrl_done", "", X86_FEATURE_MSR_SPEC_CTRL
 
@@ -289,7 +291,7 @@ SYM_INNER_LABEL_ALIGN(vmx_vmexit, SYM_L_GLOBAL)
 	pop %_ASM_ARG2	/* @flags */
 	pop %_ASM_ARG1	/* @vmx */
 
-	call vmx_spec_ctrl_restore_host
+	HDN_C_CALL vmx_spec_ctrl_restore_host
 
 	CLEAR_BRANCH_HISTORY_VMEXIT
 
@@ -307,7 +309,7 @@ SYM_INNER_LABEL_ALIGN(vmx_vmexit, SYM_L_GLOBAL)
 	pop %edi
 #endif
 	pop %_ASM_BP
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 .Lfixup:
 	cmpb $0, _ASM_RIP(kvm_rebooting)
@@ -321,6 +323,8 @@ SYM_INNER_LABEL_ALIGN(vmx_vmexit, SYM_L_GLOBAL)
 SYM_FUNC_END(__vmx_vcpu_run)
 
 SYM_FUNC_START(vmx_do_nmi_irqoff)
+	HDN_HARDWARE_EVENT_FUNC vmx_do_nmi_irqoff
+	HDN_FUNC_ENTER
 	VMX_DO_EVENT_IRQOFF call asm_exc_nmi_kvm_vmx
 SYM_FUNC_END(vmx_do_nmi_irqoff)
 
@@ -381,6 +385,12 @@ SYM_FUNC_END(vmread_error_trampoline)
 #ifndef CONFIG_X86_FRED
 
 SYM_FUNC_START(vmx_do_interrupt_irqoff)
+	HDN_HARDWARE_EVENT_FUNC vmx_do_interrupt_irqoff
+	HDN_FUNC_ENTER
+#ifdef HDN_RAP_ASM_ACTIVE
+	HDN_C_CALL hdn_rap_vmx_vector
+	movq %rax, %rdi
+#endif
 	VMX_DO_EVENT_IRQOFF CALL_NOSPEC _ASM_ARG1
 SYM_FUNC_END(vmx_do_interrupt_irqoff)
 

@@ -52,6 +52,8 @@
 #include <linux/security.h>
 #include <linux/hugetlb.h>
 #include <linux/hardening.h>
+#include <linux/hdn_rap.h>
+#include <linux/hdn_stack.h>
 #include <linux/seccomp.h>
 #include <linux/swap.h>
 #include <linux/syscalls.h>
@@ -334,6 +336,17 @@ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
 	struct vm_struct *vm_area;
 	void *stack;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	int error = hdn_stack_alloc(tsk, node);
+
+	if (error)
+		return error;
+	error = memcg_charge_kernel_stack(tsk->stack_vm_area);
+	if (error)
+		hdn_stack_free(tsk);
+	return error;
+#endif
+
 	vm_area = alloc_thread_stack_node_from_cache(tsk, node);
 	if (vm_area) {
 		if (memcg_charge_kernel_stack(vm_area)) {
@@ -378,6 +391,11 @@ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
 
 static void free_thread_stack(struct task_struct *tsk)
 {
+	hdn_rap_task_release(tsk);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_stack_free(tsk);
+	return;
+#endif
 	if (!try_release_thread_stack_to_cache(tsk->stack_vm_area))
 		thread_stack_delayed_free(tsk);
 
@@ -905,6 +923,15 @@ void set_task_stack_end_magic(struct task_struct *tsk)
 	unsigned long *stackend;
 
 	stackend = end_of_stack(tsk);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (hdn_stack_address((unsigned long)stackend)) {
+		unsigned long magic = STACK_END_MAGIC;
+
+		if (hdn_stack_construct(tsk, (unsigned long)stackend, &magic, sizeof(magic)))
+			panic("HDN private stack guard initialization failed");
+		return;
+	}
+#endif
 	*stackend = STACK_END_MAGIC;	/* for overflow detection */
 }
 
@@ -931,6 +958,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	refcount_set(&tsk->stack_refcount, 1);
 #endif
 	account_kernel_stack(tsk, 1);
+
+	err = hdn_rap_task_prepare(tsk, node);
+	if (err)
+		goto free_stack;
 
 	err = scs_prepare(tsk, node);
 	if (err)
@@ -1275,6 +1306,12 @@ int replace_mm_exe_file(struct mm_struct *mm, struct file *new_exe_file)
 	struct vm_area_struct *vma;
 	struct file *old_exe_file;
 	int ret = 0;
+
+#ifdef CONFIG_SECURITY_HARDENING
+	/* A compatibility binding names the committed image, never proc metadata. */
+	if (READ_ONCE(mm->hardening_compat_epoch))
+		return -EPERM;
+#endif
 
 	/* Forbid mm->exe_file change if old file still mapped. */
 	old_exe_file = get_mm_exe_file(mm);

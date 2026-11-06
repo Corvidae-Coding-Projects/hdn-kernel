@@ -12,6 +12,8 @@
 #include <linux/bpf.h>
 #include <linux/memory.h>
 #include <linux/sort.h>
+#include <linux/execmem.h>
+#include <linux/hdn_execmem.h>
 #include <asm/extable.h>
 #include <asm/ftrace.h>
 #include <asm/set_memory.h>
@@ -19,6 +21,7 @@
 #include <asm/text-patching.h>
 #include <asm/unwind.h>
 #include <asm/cfi.h>
+#include <asm/hdn_rap_bpf.h>
 
 static bool all_callee_regs_used[4] = {true, true, true, true};
 
@@ -309,6 +312,7 @@ int bpf_arch_text_invalidate(void *dst, size_t len)
 
 struct jit_context {
 	int cleanup_addr; /* Epilogue code offset */
+	struct hdn_rap_bpf_layout rap;
 
 	/*
 	 * Program specific offsets of labels in the code; these rely on the
@@ -326,7 +330,7 @@ struct jit_context {
 /* Number of bytes emit_patch() needs to generate instructions */
 #define X86_PATCH_SIZE		5
 /* Number of bytes that will be skipped on tailcall */
-#define X86_TAIL_CALL_OFFSET	(12 + ENDBR_INSN_SIZE)
+#define X86_TAIL_CALL_OFFSET	(12 + ENDBR_INSN_SIZE + HDN_BPF_RAP_ENTRY_SIZE + HDN_BPF_RAP_BIND_SIZE)
 
 static void push_r9(u8 **pprog)
 {
@@ -414,6 +418,40 @@ static void emit_nops(u8 **pprog, int len)
  * in arch/x86/kernel/alternative.c
  */
 static int emit_call(u8 **prog, void *func, void *ip);
+
+/* Keep emit_call() exactly five bytes: text-poke callers provide five-byte
+ * buffers. Only semantic calls acquire the compiler's R10 continuation ABI. */
+static void emit_rap_bind(u8 **pprog)
+{
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	u8 *prog = *pprog;
+
+	EMIT3_off32(0x4c, 0x8d, 0x15, 5); /* lea after_call(%rip), %r10 */
+	*pprog = prog;
+#endif
+}
+
+static int emit_bound_call(u8 **pprog, void *func, void *ip)
+{
+	emit_rap_bind(pprog);
+	return emit_call(pprog, func, ip + HDN_BPF_RAP_BIND_SIZE);
+}
+
+static int emit_rap_enter(u8 **pprog, void *ip, bool exception, bool trampoline_jump)
+{
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	u8 *prog = *pprog;
+	int error;
+
+	EMIT3_off32(0x4c, 0x8d, 0x1d, 5); /* lea after_entry(%rip), %r11 */
+	error = emit_call(&prog, exception ? __hdn_rap_bpf_exception :
+		trampoline_jump ? __hdn_rap_bpf_tramp_enter : __hdn_rap_enter, ip + 7);
+	if (error)
+		return error;
+	*pprog = prog;
+#endif
+	return 0;
+}
 
 static void emit_fineibt(u8 **pprog, u8 *ip, u32 hash, int arity)
 {
@@ -503,17 +541,21 @@ static void emit_prologue_tail_call(u8 **pprog, bool is_subprog)
  * bpf_tail_call helper will skip the first X86_TAIL_CALL_OFFSET bytes
  * while jumping to another program
  */
-static void emit_prologue(u8 **pprog, u8 *ip, u32 stack_depth, bool ebpf_from_cbpf,
+static int emit_prologue(u8 **pprog, u8 *ip, u32 stack_depth, bool ebpf_from_cbpf,
 			  bool tail_call_reachable, bool is_subprog,
-			  bool is_exception_cb)
+			  bool is_exception_cb, struct hdn_rap_bpf_layout *rap)
 {
-	u8 *prog = *pprog;
+	u8 *prog = *pprog, *start = prog;
 
 	if (is_subprog) {
 		emit_cfi(&prog, ip, cfi_bpf_subprog_hash, 5);
 	} else {
 		emit_cfi(&prog, ip, cfi_bpf_hash, 1);
 	}
+	rap->entry = prog - start;
+	if (emit_rap_enter(&prog, ip + (prog - start), is_exception_cb, false))
+		return -ERANGE;
+	emit_rap_bind(&prog);
 	/* BPF trampoline can be made to work without these nops,
 	 * but let's waste 5 bytes for now and optimize later
 	 */
@@ -546,6 +588,7 @@ static void emit_prologue(u8 **pprog, u8 *ip, u32 stack_depth, bool ebpf_from_cb
 	}
 
 	/* X86_TAIL_CALL_OFFSET is here */
+	rap->tail = !is_subprog && !is_exception_cb && !ebpf_from_cbpf ? prog - start : 0;
 	EMIT_ENDBR();
 
 	/* sub rsp, rounded_stack_depth */
@@ -554,6 +597,7 @@ static void emit_prologue(u8 **pprog, u8 *ip, u32 stack_depth, bool ebpf_from_cb
 	if (tail_call_reachable)
 		emit_prologue_tail_call(&prog, is_subprog);
 	*pprog = prog;
+	return 0;
 }
 
 static int emit_patch(u8 **pprog, void *func, void *ip, u8 opcode)
@@ -580,7 +624,7 @@ static int emit_rsb_call(u8 **pprog, void *func, void *ip)
 {
 	OPTIMIZER_HIDE_VAR(func);
 	ip += x86_call_depth_emit_accounting(pprog, func, ip);
-	return emit_patch(pprog, func, ip, 0xE8);
+	return emit_bound_call(pprog, func, ip);
 }
 
 static int emit_jump(u8 **pprog, void *func, void *ip)
@@ -632,6 +676,19 @@ out:
 	return ret;
 }
 
+/* Both removal and installation are bound to immutable patch ownership. The
+ * map updater retains the target program's normal lifetime reference. */
+static int __bpf_rap_tail_text_poke(void *ip, enum bpf_text_poke_type old_t,
+		enum bpf_text_poke_type new_t, void *old_addr, void *new_addr)
+{
+	if ((old_t != BPF_MOD_NOP && old_t != BPF_MOD_JUMP) ||
+	    (new_t != BPF_MOD_NOP && new_t != BPF_MOD_JUMP) ||
+	    !hdn_rap_bpf_tail_patch((unsigned long)ip, (unsigned long)old_addr) ||
+	    !hdn_rap_bpf_tail_patch((unsigned long)ip, (unsigned long)new_addr))
+		return -EINVAL;
+	return __bpf_arch_text_poke(ip, old_t, new_t, old_addr, new_addr);
+}
+
 int bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 		       enum bpf_text_poke_type new_t, void *old_addr,
 		       void *new_addr)
@@ -641,18 +698,26 @@ int bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 		/* BPF poking in modules is not supported */
 		return -EINVAL;
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	ip = (void *)hdn_rap_bpf_patch_address((unsigned long)ip);
+	if (!ip || hdn_rap_bpf_text_patch((unsigned long)ip, old_t, (unsigned long *)&old_addr) ||
+	    hdn_rap_bpf_text_patch((unsigned long)ip, new_t, (unsigned long *)&new_addr))
+		return -EINVAL;
+#else
 	/*
 	 * See emit_prologue(), for IBT builds the trampoline hook is preceded
 	 * with an ENDBR instruction.
 	 */
 	if (is_endbr(ip))
 		ip += ENDBR_INSN_SIZE;
+#endif
 
 	return __bpf_arch_text_poke(ip, old_t, new_t, old_addr, new_addr);
 }
 
 #define EMIT_LFENCE()	EMIT3(0x0F, 0xAE, 0xE8)
 
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 static void __emit_indirect_jump(u8 **pprog, int reg, bool ereg)
 {
 	u8 *prog = *pprog;
@@ -692,11 +757,36 @@ static void emit_indirect_jump(u8 **pprog, int bpf_reg, u8 *ip)
 	*pprog = prog;
 }
 
+#endif /* !CONFIG_SECURITY_HARDENING_RAP */
+
+static int emit_bpf_rap_jump(u8 **pprog, int bpf_reg, u8 *ip)
+{
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	u8 *prog = *pprog, *start = prog;
+	int error;
+
+	/* Move before binding R10: a blinded target may itself be in R10. */
+	EMIT_mov(AUX_REG, bpf_reg);
+	error = emit_bound_call(&prog, __hdn_rap_bpf_jump, ip + (prog - start));
+	if (error)
+		return error;
+	EMIT1(0xcc); /* this adapter consumes the CALL slot and never returns */
+	*pprog = prog;
+#else
+	emit_indirect_jump(pprog, bpf_reg, ip);
+#endif
+	return 0;
+}
+
 static void emit_return(u8 **pprog, u8 *ip)
 {
 	u8 *prog = *pprog;
 
-	if (cpu_wants_rethunk()) {
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP)) {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		emit_jump(&prog, __hdn_rap_return, ip);
+#endif
+	} else if (cpu_wants_rethunk()) {
 		emit_jump(&prog, x86_return_thunk, ip);
 	} else {
 		EMIT1(0xC3);		/* ret */
@@ -723,7 +813,7 @@ static void emit_return(u8 **pprog, u8 *ip)
  *   goto *(prog->bpf_func + prologue_size);
  * out:
  */
-static void emit_bpf_tail_call_indirect(struct bpf_prog *bpf_prog,
+static int emit_bpf_tail_call_indirect(struct bpf_prog *bpf_prog,
 					u8 **pprog, bool *callee_regs_used,
 					u32 stack_depth, u8 *ip,
 					struct jit_context *ctx)
@@ -804,11 +894,13 @@ static void emit_bpf_tail_call_indirect(struct bpf_prog *bpf_prog,
 	 * rdi == ctx (1st arg)
 	 * rcx == prog->bpf_func + X86_TAIL_CALL_OFFSET
 	 */
-	emit_indirect_jump(&prog, BPF_REG_4 /* R4 -> rcx */, ip + (prog - start));
+	if (emit_bpf_rap_jump(&prog, BPF_REG_4 /* R4 -> rcx */, ip + (prog - start)))
+		return -ERANGE;
 
 	/* out: */
 	ctx->tail_call_indirect_label = prog - start;
 	*pprog = prog;
+	return 0;
 }
 
 static void emit_bpf_tail_call_direct(struct bpf_prog *bpf_prog,
@@ -889,13 +981,13 @@ static void bpf_tail_call_direct_fixup(struct bpf_prog *prog)
 		mutex_lock(&array->aux->poke_mutex);
 		target = array->ptrs[poke->tail_call.key];
 		if (target) {
-			ret = __bpf_arch_text_poke(poke->tailcall_target,
+			ret = __bpf_rap_tail_text_poke(poke->tailcall_target,
 						   BPF_MOD_NOP, BPF_MOD_JUMP,
 						   NULL,
 						   (u8 *)target->bpf_func +
 						   poke->adj_off);
 			BUG_ON(ret < 0);
-			ret = __bpf_arch_text_poke(poke->tailcall_bypass,
+			ret = __bpf_rap_tail_text_poke(poke->tailcall_bypass,
 						   BPF_MOD_JUMP, BPF_MOD_NOP,
 						   (u8 *)poke->tailcall_target +
 						   X86_PATCH_SIZE, NULL);
@@ -1608,11 +1700,12 @@ static void emit_priv_frame_ptr(u8 **pprog, void __percpu *priv_frame_ptr)
 #define PRIV_STACK_GUARD_VAL   0xEB9F12345678eb9fULL
 
 static int emit_spectre_bhb_barrier(u8 **pprog, u8 *ip,
-				    struct bpf_prog *bpf_prog)
+				    struct bpf_prog *bpf_prog, unsigned int *call_end)
 {
-	u8 *prog = *pprog;
+	u8 *prog = *pprog, *start = prog;
 	u8 *func;
 
+	*call_end = 0;
 	if (cpu_feature_enabled(X86_FEATURE_CLEAR_BHB_LOOP)) {
 		/* The clearing sequence clobbers eax and ecx. */
 		EMIT1(0x50); /* push rax */
@@ -1622,8 +1715,9 @@ static int emit_spectre_bhb_barrier(u8 **pprog, u8 *ip,
 		func = (u8 *)clear_bhb_loop;
 		ip += x86_call_depth_emit_accounting(&prog, func, ip);
 
-		if (emit_call(&prog, func, ip))
+		if (emit_bound_call(&prog, func, ip))
 			return -EINVAL;
+		*call_end = prog - start;
 		EMIT1(0x59); /* pop rcx */
 		EMIT1(0x58); /* pop rax */
 	}
@@ -1679,9 +1773,12 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image, u8 *rw_image
 
 	detect_reg_usage(insn, insn_cnt, callee_regs_used);
 
-	emit_prologue(&prog, image, stack_depth,
+	err = emit_prologue(&prog, image, stack_depth,
 		      bpf_prog_was_classic(bpf_prog), tail_call_reachable,
-		      bpf_is_subprog(bpf_prog), bpf_prog->aux->exception_cb);
+		      bpf_is_subprog(bpf_prog), bpf_prog->aux->exception_cb, &ctx->rap);
+	if (err)
+		return err;
+	ctx->rap.bhb = 0;
 
 	bpf_prog->aux->ksym.fp_start = prog - temp;
 
@@ -1695,6 +1792,11 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image, u8 *rw_image
 		 */
 		push_r12(&prog);
 		push_callee_regs(&prog, all_callee_regs_used);
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		if (emit_bound_call(&prog, __hdn_rap_bpf_boundary, image + (prog - temp)))
+			return -ERANGE;
+		ctx->rap.boundary = prog - temp;
+#endif
 	} else {
 		if (arena_vm_start)
 			push_r12(&prog);
@@ -2454,8 +2556,23 @@ populate_extable:
 				ip += 2;
 			}
 			ip += x86_call_depth_emit_accounting(&prog, func, ip);
-			if (emit_call(&prog, func, ip))
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+			/* The timed-loop helper has an assembly R10 argument/result.
+			 * Carry it through the bound-call continuation registers. */
+			if (func == (u8 *)arch_bpf_timed_may_goto) {
+				EMIT2(0x41, 0x53); /* push r11 */
+				EMIT2(0x41, 0x52); /* push r10 */
+				ip += 4;
+			}
+#endif
+			if (emit_bound_call(&prog, func, ip))
 				return -EINVAL;
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+			if (func == (u8 *)arch_bpf_timed_may_goto) {
+				EMIT2(0x41, 0x5a); /* pop r10 result */
+				EMIT2(0x41, 0x5b); /* pop r11 */
+			}
+#endif
 			if (priv_frame_ptr)
 				pop_r9(&prog);
 			break;
@@ -2469,13 +2586,16 @@ populate_extable:
 							  callee_regs_used,
 							  stack_depth,
 							  ctx);
-			else
-				emit_bpf_tail_call_indirect(bpf_prog,
+			else {
+				err = emit_bpf_tail_call_indirect(bpf_prog,
 							    &prog,
 							    callee_regs_used,
 							    stack_depth,
 							    image + addrs[i - 1],
 							    ctx);
+				if (err)
+					return err;
+			}
 			break;
 
 			/* cond jump */
@@ -2639,7 +2759,8 @@ emit_cond_jmp:		/* Convert BPF opcode to x86 */
 			break;
 
 		case BPF_JMP | BPF_JA | BPF_X:
-			emit_indirect_jump(&prog, insn->dst_reg, image + addrs[i - 1]);
+			if (emit_bpf_rap_jump(&prog, insn->dst_reg, image + addrs[i - 1]))
+				return -ERANGE;
 			break;
 		case BPF_JMP | BPF_JA:
 		case BPF_JMP32 | BPF_JA:
@@ -2730,9 +2851,12 @@ emit_jmp:
 			if (bpf_prog_was_classic(bpf_prog) &&
 			    !ns_capable_noaudit(&init_user_ns, CAP_SYS_ADMIN)) {
 				u8 *ip = image + addrs[i - 1];
+				unsigned int call_end;
 
-				if (emit_spectre_bhb_barrier(&prog, ip, bpf_prog))
+				if (emit_spectre_bhb_barrier(&prog, ip, bpf_prog, &call_end))
 					return -EINVAL;
+				if (call_end)
+					ctx->rap.bhb = proglen + call_end;
 			}
 			if (bpf_prog->aux->exception_boundary) {
 				pop_callee_regs(&prog, all_callee_regs_used);
@@ -2971,13 +3095,44 @@ static void restore_regs(const struct btf_func_model *m, u8 **prog,
 static int invoke_bpf_prog(const struct btf_func_model *m, u8 **pprog,
 			   struct bpf_tramp_link *l, int stack_size,
 			   int run_ctx_off, bool save_ret,
-			   void *image, void *rw_image)
+			   void *image, void *rw_image, struct bpf_tramp_image *im)
 {
 	u8 *prog = *pprog;
 	u8 *jmp_insn;
 	int ctx_cookie_off = offsetof(struct bpf_tramp_run_ctx, bpf_cookie);
 	struct bpf_prog *p = l->link.prog;
 	u64 cookie = l->cookie;
+	bpf_trampoline_enter_t enter = bpf_trampoline_enter(p);
+	bpf_trampoline_exit_t exit = bpf_trampoline_exit(p);
+	bpf_func_t function = READ_ONCE(p->bpf_func);
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	struct bpf_tramp_unlink *unlink = NULL;
+
+	if (im) {
+		if (im->nr_unlink >= ARRAY_SIZE(im->unlink))
+			return -E2BIG;
+		unlink = &im->unlink[im->nr_unlink++];
+		unlink->link = l;
+		unlink->prog = p;
+		unlink->start = (unsigned long)image + (prog - (u8 *)rw_image);
+		/* Detach skips the complete enter/program/exit group. It must
+		 * not depend on allocating or sealing a replacement image. */
+		emit_nops(&prog, X86_PATCH_SIZE);
+	}
+#endif
+
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* Capture once, check against producer-selected prototypes, and emit
+	 * these same values. A mutable program field cannot nominate a target
+	 * with a different calling convention for a generated direct CALL. */
+	if (!hdn_rap_target_type_matches((unsigned long)enter,
+		&__hdn_rap_type_provider_bpf_trampoline_enter) ||
+	    !hdn_rap_target_type_matches((unsigned long)exit,
+		&__hdn_rap_type_provider_bpf_trampoline_exit) ||
+	    !hdn_rap_target_type_matches((unsigned long)function,
+		&__hdn_rap_type_provider_bpf_program))
+		return -ENOEXEC;
+#endif
 
 	/* mov rdi, cookie */
 	emit_mov_imm64(&prog, BPF_REG_1, (long) cookie >> 32, (u32) (long) cookie);
@@ -2999,7 +3154,7 @@ static int invoke_bpf_prog(const struct btf_func_model *m, u8 **pprog,
 	else
 		EMIT4(0x48, 0x8D, 0x75, -run_ctx_off);
 
-	if (emit_rsb_call(&prog, bpf_trampoline_enter(p), image + (prog - (u8 *)rw_image)))
+	if (emit_rsb_call(&prog, enter, image + (prog - (u8 *)rw_image)))
 		return -EINVAL;
 	/* remember prog start time returned by __bpf_prog_enter */
 	emit_mov_reg(&prog, true, BPF_REG_6, BPF_REG_0);
@@ -3023,7 +3178,7 @@ static int invoke_bpf_prog(const struct btf_func_model *m, u8 **pprog,
 			       (long) p->insnsi >> 32,
 			       (u32) (long) p->insnsi);
 	/* call JITed bpf program or interpreter */
-	if (emit_rsb_call(&prog, p->bpf_func, image + (prog - (u8 *)rw_image)))
+	if (emit_rsb_call(&prog, function, image + (prog - (u8 *)rw_image)))
 		return -EINVAL;
 
 	/*
@@ -3038,6 +3193,8 @@ static int invoke_bpf_prog(const struct btf_func_model *m, u8 **pprog,
 		emit_stx(&prog, BPF_DW, BPF_REG_FP, BPF_REG_0, -8);
 
 	/* replace 2 nops with JE insn, since jmp target is known */
+	if (!is_imm8(prog - jmp_insn - 2))
+		return -ERANGE;
 	jmp_insn[0] = X86_JE;
 	jmp_insn[1] = prog - jmp_insn - 2;
 
@@ -3050,9 +3207,13 @@ static int invoke_bpf_prog(const struct btf_func_model *m, u8 **pprog,
 		EMIT3_off32(0x48, 0x8D, 0x95, -run_ctx_off);
 	else
 		EMIT4(0x48, 0x8D, 0x55, -run_ctx_off);
-	if (emit_rsb_call(&prog, bpf_trampoline_exit(p), image + (prog - (u8 *)rw_image)))
+	if (emit_rsb_call(&prog, exit, image + (prog - (u8 *)rw_image)))
 		return -EINVAL;
 
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	if (unlink)
+		unlink->end = (unsigned long)image + (prog - (u8 *)rw_image);
+#endif
 	*pprog = prog;
 	return 0;
 }
@@ -3087,7 +3248,7 @@ static int invoke_bpf(const struct btf_func_model *m, u8 **pprog,
 		      struct bpf_tramp_links *tl, int stack_size,
 		      int run_ctx_off, int func_meta_off, bool save_ret,
 		      void *image, void *rw_image, u64 func_meta,
-		      int cookie_off)
+		      int cookie_off, struct bpf_tramp_image *im)
 {
 	int i, cur_cookie = (cookie_off - stack_size) / 8;
 	u8 *prog = *pprog;
@@ -3099,7 +3260,7 @@ static int invoke_bpf(const struct btf_func_model *m, u8 **pprog,
 			cur_cookie--;
 		}
 		if (invoke_bpf_prog(m, &prog, tl->links[i], stack_size,
-				    run_ctx_off, save_ret, image, rw_image))
+				    run_ctx_off, save_ret, image, rw_image, im))
 			return -EINVAL;
 	}
 	*pprog = prog;
@@ -3109,7 +3270,7 @@ static int invoke_bpf(const struct btf_func_model *m, u8 **pprog,
 static int invoke_bpf_mod_ret(const struct btf_func_model *m, u8 **pprog,
 			      struct bpf_tramp_links *tl, int stack_size,
 			      int run_ctx_off, u8 **branches,
-			      void *image, void *rw_image)
+			      void *image, void *rw_image, struct bpf_tramp_image *im)
 {
 	u8 *prog = *pprog;
 	int i;
@@ -3121,7 +3282,7 @@ static int invoke_bpf_mod_ret(const struct btf_func_model *m, u8 **pprog,
 	emit_stx(&prog, BPF_DW, BPF_REG_FP, BPF_REG_0, -8);
 	for (i = 0; i < tl->nr_links; i++) {
 		if (invoke_bpf_prog(m, &prog, tl->links[i], stack_size, run_ctx_off, true,
-				    image, rw_image))
+				    image, rw_image, im))
 			return -EINVAL;
 
 		/* mod_ret prog stored return value into [rbp - 8]. Emit:
@@ -3212,7 +3373,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 					 void *rw_image_end, void *image,
 					 const struct btf_func_model *m, u32 flags,
 					 struct bpf_tramp_links *tlinks,
-					 void *func_addr)
+					 void *func_addr, struct hdn_rap_bpf_tramp_layout *rap)
 {
 	int i, ret, nr_regs = m->nr_args, stack_size = 0;
 	int regs_off, func_meta_off, ip_off, run_ctx_off, arg_stack_off, rbx_off;
@@ -3225,6 +3386,12 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 	u64 func_meta;
 	u8 *prog;
 	bool save_ret;
+	struct bpf_tramp_image *detach_im = flags & BPF_TRAMP_F_INDIRECT ? NULL : im;
+
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	if (im)
+		im->nr_unlink = 0;
+#endif
 
 	/*
 	 * F_INDIRECT is only compatible with F_RET_FENTRY_RET, it is
@@ -3327,6 +3494,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 		if (is_endbr(orig_call))
 			orig_call += ENDBR_INSN_SIZE;
 		orig_call += X86_PATCH_SIZE;
+		orig_call += HDN_BPF_RAP_ENTRY_SIZE + HDN_BPF_RAP_BIND_SIZE;
 	}
 
 	prog = rw_image;
@@ -3345,6 +3513,9 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 		 */
 		x86_call_depth_emit_accounting(&prog, NULL, image);
 	}
+	rap->entry = prog - (u8 *)rw_image;
+	if (emit_rap_enter(&prog, image + rap->entry, false, bpf_trampoline_use_jmp(flags)))
+		return -ERANGE;
 	EMIT1(0x55);		 /* push rbp */
 	EMIT3(0x48, 0x89, 0xE5); /* mov rbp, rsp */
 	if (im)
@@ -3394,7 +3565,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 	if (fentry->nr_links) {
 		if (invoke_bpf(m, &prog, fentry, regs_off, run_ctx_off, func_meta_off,
 			       flags & BPF_TRAMP_F_RET_FENTRY_RET, image, rw_image,
-			       func_meta, cookie_off))
+			       func_meta, cookie_off, detach_im))
 			return -EINVAL;
 	}
 
@@ -3405,7 +3576,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 			return -ENOMEM;
 
 		if (invoke_bpf_mod_ret(m, &prog, fmod_ret, regs_off,
-				       run_ctx_off, branches, image, rw_image)) {
+				       run_ctx_off, branches, image, rw_image, detach_im)) {
 			ret = -EINVAL;
 			goto cleanup;
 		}
@@ -3422,6 +3593,18 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 			LOAD_TRAMP_TAIL_CALL_CNT_PTR(stack_size);
 		}
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		{
+			u8 *ip = image + (prog - (u8 *)rw_image);
+
+			ip += x86_call_depth_emit_accounting(&prog, orig_call, ip);
+			if (emit_bound_call(&prog, __hdn_rap_bpf_original, ip)) {
+				ret = -ERANGE;
+				goto cleanup;
+			}
+			rap->original = prog - (u8 *)rw_image;
+		}
+#else
 		if (flags & BPF_TRAMP_F_ORIG_STACK) {
 			emit_ldx(&prog, BPF_DW, BPF_REG_6, BPF_REG_FP, 8);
 			EMIT2(0xff, 0xd3); /* call *rbx */
@@ -3432,9 +3615,11 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 				goto cleanup;
 			}
 		}
+#endif
 		/* remember return value in a stack for bpf prog to access */
 		emit_stx(&prog, BPF_DW, BPF_REG_FP, BPF_REG_0, -8);
 		im->ip_after_call = image + (prog - (u8 *)rw_image);
+		rap->after_call = prog - (u8 *)rw_image;
 		emit_nops(&prog, X86_PATCH_SIZE);
 	}
 
@@ -3461,7 +3646,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 
 	if (fexit->nr_links) {
 		if (invoke_bpf(m, &prog, fexit, regs_off, run_ctx_off, func_meta_off,
-			       false, image, rw_image, func_meta, cookie_off)) {
+			       false, image, rw_image, func_meta, cookie_off, detach_im)) {
 			ret = -EINVAL;
 			goto cleanup;
 		}
@@ -3476,6 +3661,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 	 */
 	if (flags & BPF_TRAMP_F_CALL_ORIG) {
 		im->ip_epilogue = image + (prog - (u8 *)rw_image);
+		rap->epilogue = prog - (u8 *)rw_image;
 		/* arg1: mov rdi, im */
 		emit_mov_imm64(&prog, BPF_REG_1, (long) im >> 32, (u32) (long) im);
 		if (emit_rsb_call(&prog, __bpf_tramp_exit, image + (prog - (u8 *)rw_image))) {
@@ -3500,10 +3686,30 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 		im->ksym.fp_end = prog - (u8 *)rw_image;
 
 	if (flags & BPF_TRAMP_F_SKIP_FRAME) {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		if (emit_bound_call(&prog, __hdn_rap_bpf_skip, image + (prog - (u8 *)rw_image))) {
+			ret = -ERANGE;
+			goto cleanup;
+		}
+		rap->skip = prog - (u8 *)rw_image;
+		EMIT1(0xcc);
+	} else {
+		emit_return(&prog, image + (prog - (u8 *)rw_image));
+#else
 		/* skip our return address and return to parent */
 		EMIT4(0x48, 0x83, 0xC4, 8); /* add rsp, 8 */
+#endif
 	}
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 	emit_return(&prog, image + (prog - (u8 *)rw_image));
+#endif
+	rap->size = prog - (u8 *)rw_image;
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	if (detach_im) {
+		rap->nr_unlink = detach_im->nr_unlink;
+		rap->unlink = detach_im->unlink;
+	}
+#endif
 	/* Make sure the trampoline generation logic doesn't overflow */
 	if (WARN_ON_ONCE(prog > (u8 *)rw_image_end - BPF_INSN_SAFETY)) {
 		ret = -EFAULT;
@@ -3518,17 +3724,57 @@ cleanup:
 
 void *arch_alloc_bpf_trampoline(unsigned int size)
 {
-	return bpf_prog_pack_alloc(size, jit_fill_hole);
+	return bpf_prog_pack_alloc_type(size, jit_fill_hole, EXECMEM_BPF_TRAMPOLINE);
+}
+
+int arch_bpf_trampoline_unlink(struct bpf_tramp_image *im,
+			       struct bpf_tramp_link *link)
+{
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	unsigned int i, count = 0;
+	int ret;
+
+	if (!im || im->nr_unlink > ARRAY_SIZE(im->unlink))
+		return -EINVAL;
+	for (i = 0; i < im->nr_unlink; i++) {
+		const struct bpf_tramp_unlink *slot = &im->unlink[i];
+
+		if (slot->link != link)
+			continue;
+		if (slot->start < (unsigned long)im->image ||
+		    slot->start >= (unsigned long)im->image + im->size ||
+		    slot->end <= slot->start || slot->end - slot->start <= X86_PATCH_SIZE ||
+		    slot->end >= (unsigned long)im->image + im->size ||
+		    !hdn_rap_bpf_unlink_check((unsigned long)im->image, (unsigned long)link,
+				slot->start, slot->end))
+			return -EINVAL;
+		/* Only this one-way removal can use the frozen unlink site. The
+		 * general text-poke adapter cannot reopen a removed invocation. */
+		ret = __bpf_arch_text_poke((void *)slot->start, BPF_MOD_NOP,
+				BPF_MOD_JUMP, NULL, (void *)slot->end);
+		if (ret < 0)
+			return ret;
+		count++;
+	}
+	return count == 1 ? 0 : -EINVAL;
+#else
+	return -EOPNOTSUPP;
+#endif
 }
 
 void arch_free_bpf_trampoline(void *image, unsigned int size)
 {
+	hdn_rap_bpf_release_range(image, size);
 	bpf_prog_pack_free(image, size);
 }
 
 int arch_protect_bpf_trampoline(void *image, unsigned int size)
 {
-	return 0;
+	int error = 0;
+
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM))
+		error = hdn_execmem_bpf_finalize(image);
+	return error ?: hdn_rap_bpf_trampoline_publish(image, size);
 }
 
 int arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *image, void *image_end,
@@ -3537,6 +3783,7 @@ int arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *image, void *i
 				void *func_addr)
 {
 	void *rw_image, *tmp;
+	struct hdn_rap_bpf_tramp_layout rap = {};
 	int ret;
 	u32 size = image_end - image;
 
@@ -3546,15 +3793,23 @@ int arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *image, void *i
 	rw_image = kvmalloc(size, GFP_KERNEL);
 	if (!rw_image)
 		return -ENOMEM;
+	jit_fill_hole(rw_image, size);
 
 	ret = __arch_prepare_bpf_trampoline(im, rw_image, rw_image + size, image, m,
-					    flags, tlinks, func_addr);
+					    flags, tlinks, func_addr, &rap);
 	if (ret < 0)
 		goto out;
 
 	tmp = bpf_arch_text_copy(image, rw_image, size);
 	if (IS_ERR(tmp))
 		ret = PTR_ERR(tmp);
+	else {
+		int error = hdn_rap_bpf_trampoline_stage(image, rw_image, size, flags,
+				(unsigned long)func_addr, &rap);
+
+		if (error)
+			ret = error;
+	}
 out:
 	kvfree(rw_image);
 	return ret;
@@ -3564,6 +3819,7 @@ int arch_bpf_trampoline_size(const struct btf_func_model *m, u32 flags,
 			     struct bpf_tramp_links *tlinks, void *func_addr)
 {
 	struct bpf_tramp_image im;
+	struct hdn_rap_bpf_tramp_layout rap = {};
 	void *image;
 	int ret;
 
@@ -3579,7 +3835,7 @@ int arch_bpf_trampoline_size(const struct btf_func_model *m, u32 flags,
 		return -ENOMEM;
 
 	ret = __arch_prepare_bpf_trampoline(&im, image, image + PAGE_SIZE, image,
-					    m, flags, tlinks, func_addr);
+					    m, flags, tlinks, func_addr, &rap);
 	bpf_jit_free_exec(image);
 	return ret;
 }
@@ -3605,7 +3861,13 @@ static int emit_bpf_dispatcher(u8 **pprog, int a, int b, s64 *progs, u8 *image, 
 		if (err)
 			return err;
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		EMIT_mov(AUX_REG, BPF_REG_3); /* RDX candidate; keep caller R10 */
+		if (emit_jump(&prog, __hdn_rap_bpf_dispatch, image + (prog - buf)))
+			return -ERANGE;
+#else
 		emit_indirect_jump(&prog, BPF_REG_3 /* R3 -> rdx */, image + (prog - buf));
+#endif
 
 		*pprog = prog;
 		return 0;
@@ -3668,8 +3930,27 @@ int arch_prepare_bpf_dispatcher(void *image, void *buf, s64 *funcs, int num_func
 {
 	u8 *prog = buf;
 
+	if (num_funcs <= 0 || num_funcs > BPF_DISPATCHER_MAX)
+		return -EINVAL;
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	EMIT_ENDBR();
+#endif
 	sort(funcs, num_funcs, sizeof(funcs[0]), cmp_ips, NULL);
 	return emit_bpf_dispatcher(&prog, 0, num_funcs - 1, funcs, image, buf);
+}
+
+int arch_register_bpf_dispatcher(void *image, s64 *funcs, int num_funcs)
+{
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return hdn_rap_bpf_dispatcher_prepare(image, funcs, num_funcs);
+#else
+	return 0;
+#endif
+}
+
+void arch_unregister_bpf_dispatcher(void *image)
+{
+	hdn_rap_bpf_release(image);
 }
 
 static void priv_stack_init_guard(void __percpu *priv_stack_ptr, int alloc_size)
@@ -3814,12 +4095,10 @@ skip_init_addrs:
 		proglen = do_jit(prog, addrs, image, rw_image, oldproglen, &ctx, padding);
 		if (proglen <= 0) {
 out_image:
+			hdn_rap_bpf_release(image);
 			image = NULL;
-			if (header) {
-				bpf_arch_text_copy(&header->size, &rw_header->size,
-						   sizeof(rw_header->size));
+			if (header)
 				bpf_jit_binary_pack_free(header, rw_header);
-			}
 			/* Fall back to interpreter mode */
 			prog = orig_prog;
 			if (extra_pass) {
@@ -3867,18 +4146,20 @@ out_image:
 
 	if (image) {
 		if (!prog->is_func || extra_pass) {
-			/*
-			 * bpf_jit_binary_pack_finalize fails in two scenarios:
-			 *   1) header is not pointing to proper module memory;
-			 *   2) the arch doesn't support bpf_arch_text_copy().
-			 *
-			 * Both cases are serious bugs and justify WARN_ON.
-			 */
-			if (WARN_ON(bpf_jit_binary_pack_finalize(header, rw_header))) {
-				/* header has been freed */
+			int error = bpf_jit_binary_pack_finalize(header, rw_header);
+
+			/* Finalization consumes the construction buffer on both paths.
+			 * HDN permission/resource failure also retires and uncharges
+			 * the image; it must never be passed to the abort path again. */
+			rw_header = NULL;
+			if (error) {
+				if (!IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM))
+					WARN_ON_ONCE(error);
 				header = NULL;
 				goto out_image;
 			}
+			if (hdn_rap_bpf_prepare(prog, image, proglen, addrs, &ctx.rap))
+				goto out_image;
 
 			bpf_tail_call_direct_fixup(prog);
 		} else {
@@ -3939,6 +4220,10 @@ bool bpf_jit_supports_kfunc_call(void)
 
 void *bpf_arch_text_copy(void *dst, void *src, size_t len)
 {
+	int copied = hdn_execmem_bpf_copy(dst, src, len);
+
+	if (copied)
+		return copied > 0 ? dst : ERR_PTR(copied);
 	if (text_poke_copy(dst, src, len) == NULL)
 		return ERR_PTR(-EINVAL);
 	return dst;
@@ -3963,20 +4248,19 @@ void bpf_jit_free(struct bpf_prog *prog)
 		void __percpu *priv_stack_ptr;
 		int priv_stack_alloc_sz;
 
-		/*
-		 * If we fail the final pass of JIT (from jit_subprogs),
-		 * the program may not be finalized yet. Call finalize here
-		 * before freeing it.
-		 */
+		prog->bpf_func = (void *)prog->bpf_func - cfi_get_offset();
+		hdn_rap_bpf_release(prog->bpf_func);
+		/* An abandoned subprogram still owns its construction buffer.
+		 * Retire it directly: finalization here could fail, consume the
+		 * image, and leave the subsequent free reading retired memory. */
 		if (jit_data) {
-			bpf_jit_binary_pack_finalize(jit_data->header,
-						     jit_data->rw_header);
+			bpf_jit_binary_pack_free(jit_data->header, jit_data->rw_header);
 			kvfree(jit_data->addrs);
 			kfree(jit_data);
+		} else {
+			hdr = bpf_jit_binary_pack_hdr(prog);
+			bpf_jit_binary_pack_free(hdr, NULL);
 		}
-		prog->bpf_func = (void *)prog->bpf_func - cfi_get_offset();
-		hdr = bpf_jit_binary_pack_hdr(prog);
-		bpf_jit_binary_pack_free(hdr, NULL);
 		priv_stack_ptr = prog->aux->priv_stack_ptr;
 		if (priv_stack_ptr) {
 			priv_stack_alloc_sz = round_up(prog->aux->stack_depth, 8) +
@@ -4038,12 +4322,12 @@ void bpf_arch_poke_desc_update(struct bpf_jit_poke_descriptor *poke,
 	 */
 	if (new) {
 		t = old_addr ? BPF_MOD_JUMP : BPF_MOD_NOP;
-		ret = __bpf_arch_text_poke(poke->tailcall_target,
+		ret = __bpf_rap_tail_text_poke(poke->tailcall_target,
 					   t, BPF_MOD_JUMP,
 					   old_addr, new_addr);
 		BUG_ON(ret < 0);
 		if (!old) {
-			ret = __bpf_arch_text_poke(poke->tailcall_bypass,
+			ret = __bpf_rap_tail_text_poke(poke->tailcall_bypass,
 						   BPF_MOD_JUMP, BPF_MOD_NOP,
 						   poke->bypass_addr,
 						   NULL);
@@ -4051,7 +4335,7 @@ void bpf_arch_poke_desc_update(struct bpf_jit_poke_descriptor *poke,
 		}
 	} else {
 		t = old_bypass_addr ? BPF_MOD_JUMP : BPF_MOD_NOP;
-		ret = __bpf_arch_text_poke(poke->tailcall_bypass,
+		ret = __bpf_rap_tail_text_poke(poke->tailcall_bypass,
 					   t, BPF_MOD_JUMP, old_bypass_addr,
 					   poke->bypass_addr);
 		BUG_ON(ret < 0);
@@ -4062,7 +4346,7 @@ void bpf_arch_poke_desc_update(struct bpf_jit_poke_descriptor *poke,
 		if (!ret)
 			synchronize_rcu();
 		t = old_addr ? BPF_MOD_JUMP : BPF_MOD_NOP;
-		ret = __bpf_arch_text_poke(poke->tailcall_target,
+		ret = __bpf_rap_tail_text_poke(poke->tailcall_target,
 					   t, BPF_MOD_NOP, old_addr, NULL);
 		BUG_ON(ret < 0);
 	}

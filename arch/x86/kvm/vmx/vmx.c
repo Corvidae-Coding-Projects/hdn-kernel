@@ -80,6 +80,10 @@ MODULE_AUTHOR("Qumranet");
 MODULE_DESCRIPTION("KVM support for VMX (Intel VT-x) extensions");
 MODULE_LICENSE("GPL");
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+__ADDRESSABLE(__vmx_vcpu_run);
+#endif
+
 #ifdef MODULE
 static const struct x86_cpu_id vmx_cpu_id[] = {
 	X86_MATCH_FEATURE(X86_FEATURE_VMX, NULL),
@@ -644,6 +648,14 @@ static int hv_enable_l2_tlb_flush(struct kvm_vcpu *vcpu)
 static __init void hv_init_evmcs(void)
 {
 	int cpu;
+
+	/* Native nested VMX is the protected control-page ABI. Enlightened
+	 * VMCS requires direct software stores into the host-state page. */
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS)) {
+		enlightened_vmcs = false;
+		pr_info("HDN private stacks use native VMCS access\n");
+		return;
+	}
 
 	if (!enlightened_vmcs)
 		return;
@@ -3007,7 +3019,7 @@ fault:
 int vmx_enable_virtualization_cpu(void)
 {
 	int cpu = raw_smp_processor_id();
-	u64 phys_addr = __pa(per_cpu(vmxarea, cpu));
+	u64 phys_addr = vmcs_physical_address(per_cpu(vmxarea, cpu));
 	int r;
 
 	if (cr4_read_shadow() & X86_CR4_VMXE)
@@ -3056,6 +3068,9 @@ void vmx_disable_virtualization_cpu(void)
 struct vmcs *alloc_vmcs_cpu(bool shadow, int cpu, gfp_t flags)
 {
 	int node = cpu_to_node(cpu);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	return hdn_vmcs_alloc(node, flags, vmx_basic_vmcs_revision_id(vmcs_config.basic), shadow);
+#else
 	struct page *pages;
 	struct vmcs *vmcs;
 
@@ -3074,11 +3089,16 @@ struct vmcs *alloc_vmcs_cpu(bool shadow, int cpu, gfp_t flags)
 	if (shadow)
 		vmcs->hdr.shadow_vmcs = 1;
 	return vmcs;
+#endif
 }
 
 void free_vmcs(struct vmcs *vmcs)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_vmcs_free(vmcs);
+#else
 	free_page((unsigned long)vmcs);
+#endif
 }
 
 /*
@@ -7246,7 +7266,11 @@ static void handle_external_interrupt_irqoff(struct kvm_vcpu *vcpu,
 	if (IS_ENABLED(CONFIG_X86_FRED))
 		fred_entry_from_kvm(EVENT_TYPE_EXTINT, vector);
 	else
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		vmx_do_interrupt_irqoff(vector);
+#else
 		vmx_do_interrupt_irqoff(gate_offset((gate_desc *)host_idt_base + vector));
+#endif
 	kvm_after_interrupt(vcpu);
 
 	vcpu->arch.at_instruction_boundary = true;
@@ -7490,6 +7514,19 @@ static void vmx_update_hv_timer(struct kvm_vcpu *vcpu, bool force_immediate_exit
 
 void noinstr vmx_update_host_rsp(struct vcpu_vmx *vmx, unsigned long host_rsp)
 {
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS)) {
+		/* This runs on the actual private stack immediately before entry.
+		 * A software cache must not suppress a per-task root/stack update.
+		 * Nested VMCS selection also passes through this final writer. */
+		unsigned long cr3 = __get_current_cr3_fast();
+
+		vmcs_writel(HOST_RSP, host_rsp);
+		vmcs_writel(HOST_CR3, cr3);
+		vmcs_writel(HOST_RIP, (unsigned long)vmx_vmexit);
+		vmx->loaded_vmcs->host_state.rsp = host_rsp;
+		vmx->loaded_vmcs->host_state.cr3 = cr3;
+		return;
+	}
 	if (unlikely(host_rsp != vmx->loaded_vmcs->host_state.rsp)) {
 		vmx->loaded_vmcs->host_state.rsp = host_rsp;
 		vmcs_writel(HOST_RSP, host_rsp);

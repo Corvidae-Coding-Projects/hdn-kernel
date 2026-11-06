@@ -117,6 +117,8 @@ static int kernfs_getlink(struct inode *inode, char *path)
 	struct kernfs_root *root = kernfs_root(kn);
 	int error;
 
+	if (hdn_kernfs_hidden(kn))
+		return -ENOENT;
 	down_read(&root->kernfs_rwsem);
 	parent = kernfs_parent(kn);
 	error = kernfs_get_target_path(parent, target, path);

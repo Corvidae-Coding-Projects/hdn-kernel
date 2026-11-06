@@ -20,6 +20,7 @@
 #include <linux/highmem.h>
 #include <linux/pagemap.h>
 #include <linux/ptrace.h>
+#include <linux/hdn_stack.h>
 #include <linux/security.h>
 #include <linux/signal.h>
 #include <linux/uio.h>
@@ -1021,11 +1022,17 @@ ptrace_get_syscall_info(struct task_struct *child, unsigned long user_size,
 	struct ptrace_syscall_info info = {
 		.op = ptrace_get_syscall_info_op(child),
 		.arch = syscall_get_arch(child),
-		.instruction_pointer = instruction_pointer(regs),
-		.stack_pointer = user_stack_pointer(regs),
 	};
 	unsigned long actual_size = offsetof(struct ptrace_syscall_info, entry);
 	unsigned long write_size;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct pt_regs snapshot;
+
+	hdn_stack_regs_snapshot(child, &snapshot);
+	regs = &snapshot;
+#endif
+	info.instruction_pointer = instruction_pointer(regs);
+	info.stack_pointer = user_stack_pointer(regs);
 
 	switch (info.op) {
 	case PTRACE_SYSCALL_INFO_ENTRY:
@@ -1122,6 +1129,10 @@ ptrace_set_syscall_info(struct task_struct *child, unsigned long user_size,
 {
 	struct pt_regs *regs = task_pt_regs(child);
 	struct ptrace_syscall_info info;
+	int result;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct pt_regs before, after;
+#endif
 
 	if (user_size < sizeof(info))
 		return -EINVAL;
@@ -1142,17 +1153,31 @@ ptrace_set_syscall_info(struct task_struct *child, unsigned long user_size,
 	if (ptrace_get_syscall_info_op(child) != info.op)
 		return -EINVAL;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_stack_regs_snapshot(child, &before);
+	after = before;
+	regs = &after;
+#endif
+
 	switch (info.op) {
 	case PTRACE_SYSCALL_INFO_ENTRY:
-		return ptrace_set_syscall_info_entry(child, regs, &info);
+		result = ptrace_set_syscall_info_entry(child, regs, &info);
+		break;
 	case PTRACE_SYSCALL_INFO_EXIT:
-		return ptrace_set_syscall_info_exit(child, regs, &info);
+		result = ptrace_set_syscall_info_exit(child, regs, &info);
+		break;
 	case PTRACE_SYSCALL_INFO_SECCOMP:
-		return ptrace_set_syscall_info_seccomp(child, regs, &info);
+		result = ptrace_set_syscall_info_seccomp(child, regs, &info);
+		break;
 	default:
 		/* Other types of system call stops are not supported yet. */
 		return -EINVAL;
 	}
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (!result)
+		result = hdn_stack_syscall_commit(child, &before, &after);
+#endif
+	return result;
 }
 #endif /* CONFIG_HAVE_ARCH_TRACEHOOK */
 

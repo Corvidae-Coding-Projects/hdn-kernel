@@ -36,6 +36,9 @@
 	(REQUIRED_MASK0 & ((1<<(X86_FEATURE_XMM & 31)) | (1<<(X86_FEATURE_XMM2 & 31))))
 
 SYM_FUNC_START_LOCAL(verify_cpu)
+#ifdef HDN_VERIFY_CPU64
+	HDN_KEXEC_FUNC verify_cpu, 29
+#endif
 	pushf				# Save caller passed flags
 	push	$0			# Kill any dangerous flags
 	popf

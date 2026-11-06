@@ -8,8 +8,10 @@
 #include <asm/asm.h>
 
 #ifndef __ASSEMBLER__
+#include <linux/types.h>
 struct bug_entry;
 extern void __WARN_trap(struct bug_entry *bug, ...);
+int decode_bug(unsigned long addr, s32 *imm, int *len);
 #endif
 
 /*

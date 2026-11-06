@@ -99,6 +99,16 @@ static bool CalculateBytePerPixelAnd256BBlockSizes(
 		unsigned int *BlockWidth256BytesC);
 static void DisplayPipeConfiguration(struct display_mode_lib *mode_lib);
 static void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPerformanceCalculation(struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml314_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2(
+		struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml314_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart3(
+		struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml314_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2SchedulePlane(
+		struct display_mode_lib *mode_lib, unsigned int k,
+		double HostVMInefficiencyFactor, double TWait);
+static noinline_for_stack void dml314_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2ScheduleInvoke(
+		struct display_mode_lib *mode_lib, unsigned int k,
+		double HostVMInefficiencyFactor, double TWait, Pipe *myPipe);
 static unsigned int dscceComputeDelay(
 		unsigned int bpc,
 		double BPP,
@@ -2005,12 +2015,6 @@ static void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPerforman
 {
 	struct vba_vars_st *v = &mode_lib->vba;
 	unsigned int j, k;
-	double HostVMInefficiencyFactor = 1.0;
-	bool NoChromaPlanes = true;
-	int ReorderBytes;
-	double VMDataOnlyReturnBW;
-	double MaxTotalRDBandwidth = 0;
-	int PrefetchMode = v->PrefetchModePerState[v->VoltageLevel][v->maxMpcComb];
 
 	v->WritebackDISPCLK = 0.0;
 	v->DISPCLKWithRamping = 0;
@@ -2308,6 +2312,127 @@ static void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPerforman
 		for (j = 0; j < v->NumberOfActivePlanes; ++j) // NumberOfPlanes
 			if (j != k && v->BlendingAndTiming[k] == j && v->DSCEnabled[j])
 				v->DSCDelay[k] = v->DSCDelay[j];
+
+	dml314_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2(mode_lib);
+}
+
+static noinline_for_stack void dml314_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2SchedulePlane(
+		struct display_mode_lib *mode_lib, unsigned int k,
+		double HostVMInefficiencyFactor, double TWait)
+{
+	struct vba_vars_st *v = &mode_lib->vba;
+	Pipe myPipe;
+
+	myPipe.DPPCLK = v->DPPCLK[k];
+	myPipe.DISPCLK = v->DISPCLK;
+	myPipe.PixelClock = v->PixelClock[k];
+	myPipe.DCFCLKDeepSleep = v->DCFCLKDeepSleep;
+	myPipe.DPPPerPlane = v->DPPPerPlane[k];
+	myPipe.ScalerEnabled = v->ScalerEnabled[k];
+	myPipe.VRatio = v->VRatio[k];
+	myPipe.VRatioChroma = v->VRatioChroma[k];
+	myPipe.SourceScan = v->SourceScan[k];
+	myPipe.BlockWidth256BytesY = v->BlockWidth256BytesY[k];
+	myPipe.BlockHeight256BytesY = v->BlockHeight256BytesY[k];
+	myPipe.BlockWidth256BytesC = v->BlockWidth256BytesC[k];
+	myPipe.BlockHeight256BytesC = v->BlockHeight256BytesC[k];
+	myPipe.InterlaceEnable = v->Interlace[k];
+	myPipe.NumberOfCursors = v->NumberOfCursors[k];
+	myPipe.VBlank = v->VTotal[k] - v->VActive[k];
+	myPipe.HTotal = v->HTotal[k];
+	myPipe.DCCEnable = v->DCCEnable[k];
+	myPipe.ODMCombineIsEnabled = v->ODMCombineEnabled[k] == dm_odm_combine_mode_4to1
+			|| v->ODMCombineEnabled[k] == dm_odm_combine_mode_2to1;
+	myPipe.SourcePixelFormat = v->SourcePixelFormat[k];
+	myPipe.BytePerPixelY = v->BytePerPixelY[k];
+	myPipe.BytePerPixelC = v->BytePerPixelC[k];
+	myPipe.ProgressiveToInterlaceUnitInOPP = v->ProgressiveToInterlaceUnitInOPP;
+
+	dml314_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2ScheduleInvoke(
+			mode_lib, k, HostVMInefficiencyFactor, TWait, &myPipe);
+}
+
+static noinline_for_stack void dml314_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2ScheduleInvoke(
+		struct display_mode_lib *mode_lib, unsigned int k,
+		double HostVMInefficiencyFactor, double TWait, Pipe *myPipe)
+{
+	struct vba_vars_st *v = &mode_lib->vba;
+
+	v->ErrorResult[k] = CalculatePrefetchSchedule(
+			mode_lib,
+			HostVMInefficiencyFactor,
+			myPipe,
+			v->DSCDelay[k],
+			v->DPPCLKDelaySubtotal + v->DPPCLKDelayCNVCFormater,
+			v->DPPCLKDelaySCL,
+			v->DPPCLKDelaySCLLBOnly,
+			v->DPPCLKDelayCNVCCursor,
+			v->DISPCLKDelaySubtotal,
+			(unsigned int) (v->SwathWidthY[k] / v->HRatio[k]),
+			v->OutputFormat[k],
+			v->MaxInterDCNTileRepeaters,
+			dml_min(v->VStartupLines, v->MaxVStartupLines[k]),
+			v->MaxVStartupLines[k],
+			v->GPUVMMaxPageTableLevels,
+			v->GPUVMEnable,
+			v->HostVMEnable,
+			v->HostVMMaxNonCachedPageTableLevels,
+			v->HostVMMinPageSize,
+			v->DynamicMetadataEnable[k],
+			v->DynamicMetadataVMEnabled,
+			v->DynamicMetadataLinesBeforeActiveRequired[k],
+			v->DynamicMetadataTransmittedBytes[k],
+			v->UrgentLatency,
+			v->UrgentExtraLatency,
+			v->TCalc,
+			v->PDEAndMetaPTEBytesFrame[k],
+			v->MetaRowByte[k],
+			v->PixelPTEBytesPerRow[k],
+			v->PrefetchSourceLinesY[k],
+			v->SwathWidthY[k],
+			v->VInitPreFillY[k],
+			v->MaxNumSwathY[k],
+			v->PrefetchSourceLinesC[k],
+			v->SwathWidthC[k],
+			v->VInitPreFillC[k],
+			v->MaxNumSwathC[k],
+			v->swath_width_luma_ub[k],
+			v->swath_width_chroma_ub[k],
+			v->SwathHeightY[k],
+			v->SwathHeightC[k],
+			TWait,
+			&v->DSTXAfterScaler[k],
+			&v->DSTYAfterScaler[k],
+			&v->DestinationLinesForPrefetch[k],
+			&v->PrefetchBandwidth[k],
+			&v->DestinationLinesToRequestVMInVBlank[k],
+			&v->DestinationLinesToRequestRowInVBlank[k],
+			&v->VRatioPrefetchY[k],
+			&v->VRatioPrefetchC[k],
+			&v->RequiredPrefetchPixDataBWLuma[k],
+			&v->RequiredPrefetchPixDataBWChroma[k],
+			&v->NotEnoughTimeForDynamicMetadata[k],
+			&v->Tno_bw[k],
+			&v->prefetch_vmrow_bw[k],
+			&v->Tdmdl_vm[k],
+			&v->Tdmdl[k],
+			&v->TSetup[k],
+			&v->VUpdateOffsetPix[k],
+			&v->VUpdateWidthPix[k],
+			&v->VReadyOffsetPix[k]);
+}
+
+static noinline_for_stack void dml314_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2(
+		struct display_mode_lib *mode_lib)
+{
+	struct vba_vars_st *v = &mode_lib->vba;
+	unsigned int j, k;
+	double HostVMInefficiencyFactor = 1.0;
+	bool NoChromaPlanes = true;
+	int ReorderBytes;
+	double VMDataOnlyReturnBW;
+	double MaxTotalRDBandwidth = 0;
+	int PrefetchMode = v->PrefetchModePerState[v->VoltageLevel][v->maxMpcComb];
 
 	// Prefetch
 	for (k = 0; k < v->NumberOfActivePlanes; ++k) {
@@ -2609,94 +2734,8 @@ static void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPerforman
 		dml_print("DML::%s: Start loop: VStartup = %d\n", __func__, v->VStartupLines);
 
 		for (k = 0; k < v->NumberOfActivePlanes; ++k) {
-			Pipe myPipe;
-
-			myPipe.DPPCLK = v->DPPCLK[k];
-			myPipe.DISPCLK = v->DISPCLK;
-			myPipe.PixelClock = v->PixelClock[k];
-			myPipe.DCFCLKDeepSleep = v->DCFCLKDeepSleep;
-			myPipe.DPPPerPlane = v->DPPPerPlane[k];
-			myPipe.ScalerEnabled = v->ScalerEnabled[k];
-			myPipe.VRatio = v->VRatio[k];
-			myPipe.VRatioChroma = v->VRatioChroma[k];
-			myPipe.SourceScan = v->SourceScan[k];
-			myPipe.BlockWidth256BytesY = v->BlockWidth256BytesY[k];
-			myPipe.BlockHeight256BytesY = v->BlockHeight256BytesY[k];
-			myPipe.BlockWidth256BytesC = v->BlockWidth256BytesC[k];
-			myPipe.BlockHeight256BytesC = v->BlockHeight256BytesC[k];
-			myPipe.InterlaceEnable = v->Interlace[k];
-			myPipe.NumberOfCursors = v->NumberOfCursors[k];
-			myPipe.VBlank = v->VTotal[k] - v->VActive[k];
-			myPipe.HTotal = v->HTotal[k];
-			myPipe.DCCEnable = v->DCCEnable[k];
-			myPipe.ODMCombineIsEnabled = v->ODMCombineEnabled[k] == dm_odm_combine_mode_4to1
-					|| v->ODMCombineEnabled[k] == dm_odm_combine_mode_2to1;
-			myPipe.SourcePixelFormat = v->SourcePixelFormat[k];
-			myPipe.BytePerPixelY = v->BytePerPixelY[k];
-			myPipe.BytePerPixelC = v->BytePerPixelC[k];
-			myPipe.ProgressiveToInterlaceUnitInOPP = v->ProgressiveToInterlaceUnitInOPP;
-			v->ErrorResult[k] = CalculatePrefetchSchedule(
-					mode_lib,
-					HostVMInefficiencyFactor,
-					&myPipe,
-					v->DSCDelay[k],
-					v->DPPCLKDelaySubtotal + v->DPPCLKDelayCNVCFormater,
-					v->DPPCLKDelaySCL,
-					v->DPPCLKDelaySCLLBOnly,
-					v->DPPCLKDelayCNVCCursor,
-					v->DISPCLKDelaySubtotal,
-					(unsigned int) (v->SwathWidthY[k] / v->HRatio[k]),
-					v->OutputFormat[k],
-					v->MaxInterDCNTileRepeaters,
-					dml_min(v->VStartupLines, v->MaxVStartupLines[k]),
-					v->MaxVStartupLines[k],
-					v->GPUVMMaxPageTableLevels,
-					v->GPUVMEnable,
-					v->HostVMEnable,
-					v->HostVMMaxNonCachedPageTableLevels,
-					v->HostVMMinPageSize,
-					v->DynamicMetadataEnable[k],
-					v->DynamicMetadataVMEnabled,
-					v->DynamicMetadataLinesBeforeActiveRequired[k],
-					v->DynamicMetadataTransmittedBytes[k],
-					v->UrgentLatency,
-					v->UrgentExtraLatency,
-					v->TCalc,
-					v->PDEAndMetaPTEBytesFrame[k],
-					v->MetaRowByte[k],
-					v->PixelPTEBytesPerRow[k],
-					v->PrefetchSourceLinesY[k],
-					v->SwathWidthY[k],
-					v->VInitPreFillY[k],
-					v->MaxNumSwathY[k],
-					v->PrefetchSourceLinesC[k],
-					v->SwathWidthC[k],
-					v->VInitPreFillC[k],
-					v->MaxNumSwathC[k],
-					v->swath_width_luma_ub[k],
-					v->swath_width_chroma_ub[k],
-					v->SwathHeightY[k],
-					v->SwathHeightC[k],
-					TWait,
-					&v->DSTXAfterScaler[k],
-					&v->DSTYAfterScaler[k],
-					&v->DestinationLinesForPrefetch[k],
-					&v->PrefetchBandwidth[k],
-					&v->DestinationLinesToRequestVMInVBlank[k],
-					&v->DestinationLinesToRequestRowInVBlank[k],
-					&v->VRatioPrefetchY[k],
-					&v->VRatioPrefetchC[k],
-					&v->RequiredPrefetchPixDataBWLuma[k],
-					&v->RequiredPrefetchPixDataBWChroma[k],
-					&v->NotEnoughTimeForDynamicMetadata[k],
-					&v->Tno_bw[k],
-					&v->prefetch_vmrow_bw[k],
-					&v->Tdmdl_vm[k],
-					&v->Tdmdl[k],
-					&v->TSetup[k],
-					&v->VUpdateOffsetPix[k],
-					&v->VUpdateWidthPix[k],
-					&v->VReadyOffsetPix[k]);
+			dml314_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2SchedulePlane(
+					mode_lib, k, HostVMInefficiencyFactor, TWait);
 
 #ifdef __DML_VBA_DEBUG__
 			dml_print("DML::%s: k=%0d Prefetch cal result=%0d\n", __func__, k, v->ErrorResult[k]);
@@ -2987,6 +3026,16 @@ static void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPerforman
 			}
 		}
 	}
+
+	dml314_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart3(mode_lib);
+}
+
+static noinline_for_stack void dml314_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart3(
+		struct display_mode_lib *mode_lib)
+{
+	struct vba_vars_st *v = &mode_lib->vba;
+	unsigned int k;
+	int PrefetchMode = v->PrefetchModePerState[v->VoltageLevel][v->maxMpcComb];
 
 	//Display Pipeline Delivery Time in Prefetch, Groups
 	CalculatePixelDeliveryTimes(

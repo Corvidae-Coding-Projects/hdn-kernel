@@ -326,7 +326,7 @@ static int rpc_complete_task(struct rpc_task *task)
 
 	spin_lock_irqsave(&wq->lock, flags);
 	clear_bit(RPC_TASK_ACTIVE, &task->tk_runstate);
-	ret = atomic_dec_and_test(&task->tk_count);
+	ret = refcount_dec_and_test(&task->tk_count);
 	if (waitqueue_active(wq))
 		__wake_up_locked_key(wq, TASK_NORMAL, &k);
 	spin_unlock_irqrestore(&wq->lock, flags);
@@ -1101,7 +1101,7 @@ void rpc_free(struct rpc_task *task)
 static void rpc_init_task(struct rpc_task *task, const struct rpc_task_setup *task_setup_data)
 {
 	memset(task, 0, sizeof(*task));
-	atomic_set(&task->tk_count, 1);
+	refcount_set(&task->tk_count, 1);
 	task->tk_flags  = task_setup_data->flags;
 	task->tk_ops = task_setup_data->callback_ops;
 	task->tk_calldata = task_setup_data->callback_data;
@@ -1218,7 +1218,7 @@ static void rpc_final_put_task(struct rpc_task *task,
 
 static void rpc_do_put_task(struct rpc_task *task, struct workqueue_struct *q)
 {
-	if (atomic_dec_and_test(&task->tk_count)) {
+	if (refcount_dec_and_test(&task->tk_count)) {
 		rpc_release_resources_task(task);
 		rpc_final_put_task(task, q);
 	}
@@ -1247,12 +1247,12 @@ static void rpc_release_task(struct rpc_task *task)
 	 * so it should be safe to use task->tk_count as a test for whether
 	 * or not any other processes still hold references to our rpc_task.
 	 */
-	if (atomic_read(&task->tk_count) != 1 + !RPC_IS_ASYNC(task)) {
+	if (refcount_read(&task->tk_count) != 1 + !RPC_IS_ASYNC(task)) {
 		/* Wake up anyone who may be waiting for task completion */
 		if (!rpc_complete_task(task))
 			return;
 	} else {
-		if (!atomic_dec_and_test(&task->tk_count))
+		if (!refcount_dec_and_test(&task->tk_count))
 			return;
 	}
 	rpc_final_put_task(task, task->tk_workqueue);

@@ -20,6 +20,8 @@
 #include <linux/completion.h>
 #include <linux/memory.h>
 #include <linux/rcupdate.h>
+#include <linux/hdn_rap.h>
+#include <linux/hdn_livepatch.h>
 #include <asm/cacheflush.h>
 #include "core.h"
 #include "patch.h"
@@ -833,6 +835,9 @@ static int klp_write_object_relocs(struct klp_patch *patch,
 	int i, ret;
 	struct klp_modinfo *info = patch->mod->klp_info;
 
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE))
+		return hdn_klp_relocate(patch->mod, obj->name, apply);
+
 	for (i = 1; i < info->hdr.e_shnum; i++) {
 		Elf_Shdr *sec = info->sechdrs + i;
 
@@ -859,7 +864,11 @@ static int klp_apply_object_relocs(struct klp_patch *patch,
 static void klp_clear_object_relocs(struct klp_patch *patch,
 				    struct klp_object *obj)
 {
-	klp_write_object_relocs(patch, obj, false);
+	int error = klp_write_object_relocs(patch, obj, false);
+
+	/* An active relocation into departing text cannot survive its owner. */
+	if (error && IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE))
+		panic("HDN livepatch relocation withdrawal failed");
 }
 
 /* parts of the initialization that is done only when the object is loaded */
@@ -886,29 +895,47 @@ static int klp_init_object_loaded(struct klp_patch *patch,
 					     func->old_sympos,
 					     (unsigned long *)&func->old_func);
 		if (ret)
-			return ret;
+			goto clear_relocs;
 
 		ret = kallsyms_lookup_size_offset((unsigned long)func->old_func,
 						  &func->old_size, NULL);
 		if (!ret) {
 			pr_err("kallsyms size lookup failed for '%s'\n",
 			       func->old_name);
-			return -ENOENT;
+			ret = -ENOENT;
+			goto clear_relocs;
 		}
 
 		if (func->nop)
 			func->new_func = func->old_func;
+
+		/* Admission uses immutable compiler identities for direct-only
+		 * functions too. The ftrace return adapter independently validates
+		 * every selected replacement and reuses the protected caller record.
+		 * Module coming/going and klp_mutex own the code lifetimes here. */
+		if (!hdn_rap_livepatch_match((unsigned long)func->old_func,
+					 (unsigned long)func->new_func)) {
+			pr_err("incompatible RAP livepatch function '%s'\n", func->old_name);
+			ret = -ENOEXEC;
+			goto clear_relocs;
+		}
 
 		ret = kallsyms_lookup_size_offset((unsigned long)func->new_func,
 						  &func->new_size, NULL);
 		if (!ret) {
 			pr_err("kallsyms size lookup failed for '%s' replacement\n",
 			       func->old_name);
-			return -ENOENT;
+			ret = -ENOENT;
+			goto clear_relocs;
 		}
 	}
 
 	return 0;
+
+clear_relocs:
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE) && klp_is_module(obj))
+		klp_clear_object_relocs(patch, obj);
+	return ret;
 }
 
 static int klp_init_object(struct klp_patch *patch, struct klp_object *obj)
@@ -1277,6 +1304,7 @@ int klp_module_coming(struct module *mod)
 	 * get patched by a new patch.
 	 */
 	mod->klp_alive = true;
+	hdn_klp_symbols_live(mod, true);
 
 	klp_for_each_patch(patch) {
 		klp_for_each_object(patch, obj) {
@@ -1329,7 +1357,10 @@ err:
 	 */
 	pr_warn("patch '%s' failed for module '%s', refusing to load module '%s'\n",
 		patch->mod->name, obj->mod->name, obj->mod->name);
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE))
+		klp_clear_object_relocs(patch, obj);
 	mod->klp_alive = false;
+	hdn_klp_symbols_live(mod, false);
 	obj->mod = NULL;
 	klp_cleanup_module_patches_limited(mod, patch);
 	mutex_unlock(&klp_mutex);
@@ -1350,6 +1381,7 @@ void klp_module_going(struct module *mod)
 	 * get patched by a new patch.
 	 */
 	mod->klp_alive = false;
+	hdn_klp_symbols_live(mod, false);
 
 	klp_cleanup_module_patches_limited(mod, NULL);
 

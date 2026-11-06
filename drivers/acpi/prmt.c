@@ -173,6 +173,12 @@ acpi_parse_prmt(union acpi_subtable_headers *header, const unsigned long end)
 			continue;
 		}
 
+		if (arch_efi_register_prm(th->handler_addr)) {
+			pr_warn("PRM: handler failed firmware code admission: %pUL\n", &th->guid);
+			th->handler_addr = NULL;
+			continue;
+		}
+
 		th->static_data_buffer_addr =
 			efi_pa_va_lookup(&th->guid, handler_info->static_data_buffer_address);
 		/*
@@ -265,15 +271,17 @@ EXPORT_SYMBOL_GPL(acpi_prm_handler_available);
 #define UPDATE_LOCK_ALREADY_HELD 	4
 #define UPDATE_UNLOCK_WITHOUT_LOCK 	5
 
-int acpi_call_prm_handler(guid_t handler_guid, void *param_buffer)
+int acpi_call_prm_handler(guid_t handler_guid, void *param_buffer, size_t param_size)
 {
 	struct prm_handler_info *handler = find_prm_handler(&handler_guid);
 	struct prm_module_info *module = find_prm_module(&handler_guid);
 	struct prm_context_buffer context;
 	efi_status_t status;
 
-	if (!module || !handler)
+	if (!module || !handler || !handler->handler_addr)
 		return -ENODEV;
+	if (!param_buffer || !param_size)
+		return -EINVAL;
 
 	memset(&context, 0, sizeof(context));
 	ACPI_COPY_NAMESEG(context.signature, "PRMC");
@@ -283,7 +291,7 @@ int acpi_call_prm_handler(guid_t handler_guid, void *param_buffer)
 
 	status = efi_call_acpi_prm_handler(handler->handler_addr,
 					   (u64)param_buffer,
-					   &context);
+					   &context, param_size, sizeof(context));
 
 	return efi_status_to_err(status);
 }
@@ -342,7 +350,7 @@ static acpi_status acpi_platformrt_space_handler(u32 function,
 
 		status = efi_call_acpi_prm_handler(handler->handler_addr,
 						   handler->acpi_param_buffer_addr,
-						   &context);
+						   &context, 0, sizeof(context));
 		if (status == EFI_SUCCESS) {
 			buffer->prm_status = PRM_HANDLER_SUCCESS;
 		} else {

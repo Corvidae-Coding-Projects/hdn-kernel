@@ -82,6 +82,7 @@ static const struct option check_options[] = {
 	OPT_BOOLEAN(0,		 "noabs", &opts.noabs, "reject absolute references in allocatable sections"),
 	OPT_BOOLEAN('n',	 "noinstr", &opts.noinstr, "validate noinstr rules"),
 	OPT_BOOLEAN(0,		 "orc", &opts.orc, "generate ORC metadata"),
+	OPT_BOOLEAN(0,		 "rap", &opts.rap, "require complete HDN RAP transfer coverage"),
 	OPT_BOOLEAN('r',	 "retpoline", &opts.retpoline, "validate and annotate retpoline usage"),
 	OPT_BOOLEAN(0,		 "rethunk", &opts.rethunk, "validate and annotate rethunk usage"),
 	OPT_BOOLEAN(0,		 "unret", &opts.unret, "validate entry unret placement"),
@@ -177,7 +178,8 @@ static bool opts_valid(void)
 		return false;
 	}
 
-	if (opts.checksum		||
+	if (opts.rap		||
+	    opts.checksum		||
 	    opts.disas			||
 	    opts.hack_jump_label	||
 	    opts.hack_noinstr		||

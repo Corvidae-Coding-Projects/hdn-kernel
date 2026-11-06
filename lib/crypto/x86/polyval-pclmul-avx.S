@@ -23,6 +23,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <asm/frame.h>
 
 #define STRIDE_BLOCKS 8
@@ -267,6 +268,7 @@
  *			       const struct polyval_elem *b);
  */
 SYM_FUNC_START(polyval_mul_pclmul_avx)
+	HDN_ASM_FUNCTION polyval_mul_pclmul_avx
 	FRAME_BEGIN
 	vmovdqa .Lgstar(%rip), GSTAR
 	movups (%rdi), %xmm0
@@ -276,7 +278,8 @@ SYM_FUNC_START(polyval_mul_pclmul_avx)
 	montgomery_reduction SUM
 	movups SUM, (%rdi)
 	FRAME_END
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END polyval_mul_pclmul_avx
 SYM_FUNC_END(polyval_mul_pclmul_avx)
 
 /*
@@ -294,6 +297,7 @@ SYM_FUNC_END(polyval_mul_pclmul_avx)
  *				  const u8 *data, size_t nblocks);
  */
 SYM_FUNC_START(polyval_blocks_pclmul_avx)
+	HDN_ASM_FUNCTION polyval_blocks_pclmul_avx
 	FRAME_BEGIN
 	vmovdqa .Lgstar(%rip), GSTAR
 	movups (ACCUMULATOR), SUM
@@ -315,5 +319,6 @@ SYM_FUNC_START(polyval_blocks_pclmul_avx)
 .LskipPartial:
 	movups SUM, (ACCUMULATOR)
 	FRAME_END
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END polyval_blocks_pclmul_avx
 SYM_FUNC_END(polyval_blocks_pclmul_avx)

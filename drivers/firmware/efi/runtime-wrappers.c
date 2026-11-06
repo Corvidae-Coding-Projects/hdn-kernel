@@ -32,6 +32,9 @@
 #include <linux/stringify.h>
 #include <linux/workqueue.h>
 #include <linux/completion.h>
+#include <linux/slab.h>
+#include <linux/overflow.h>
+#include <linux/sched/task_stack.h>
 
 #include <asm/efi.h>
 
@@ -113,8 +116,11 @@ union efi_rts_args {
 		efi_status_t	(__efiapi *acpi_prm_handler)(u64, void *);
 		u64		param_buffer_addr;
 		void		*context;
+		size_t		param_size, context_size;
 	} ACPI_PRM_HANDLER;
 };
+
+#include "runtime-private.h"
 
 struct efi_runtime_work efi_rts_work;
 
@@ -295,7 +301,7 @@ static void __nocfi efi_call_rts(struct work_struct *work)
 		break;
 	case EFI_ACPI_PRM_HANDLER:
 #ifdef CONFIG_ACPI_PRMT
-		status = arch_efi_call_virt(args, ACPI_PRM_HANDLER.acpi_prm_handler,
+		status = arch_efi_call_virt_address(HDN_EFI_PRM, args->ACPI_PRM_HANDLER.acpi_prm_handler,
 					    args->ACPI_PRM_HANDLER.param_buffer_addr,
 					    args->ACPI_PRM_HANDLER.context);
 		break;
@@ -313,13 +319,26 @@ static void __nocfi efi_call_rts(struct work_struct *work)
 	arch_efi_call_virt_teardown();
 
 	efi_rts_work.status = status;
-	complete(&efi_rts_work.efi_rts_comp);
 	efi_runtime_lock_owner = NULL;
+	complete(&efi_rts_work.efi_rts_comp);
 }
 
 static efi_status_t __efi_queue_work(enum efi_rts_ids id,
 				     union efi_rts_args *args)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct efi_private_request *request = efi_private_prepare(id, args);
+	efi_status_t status;
+
+	if (!request)
+		return EFI_OUT_OF_RESOURCES;
+	if (request->error != EFI_SUCCESS) {
+		status = request->error;
+		efi_private_free(request);
+		return status;
+	}
+	args = &request->args;
+#endif
 	efi_rts_work.efi_rts_id = id;
 	efi_rts_work.args = args;
 	efi_rts_work.caller = __builtin_return_address(0);
@@ -346,7 +365,14 @@ static efi_status_t __efi_queue_work(enum efi_rts_ids id,
 	WARN_ON_ONCE(efi_rts_work.status == EFI_ABORTED);
 exit:
 	efi_rts_work.efi_rts_id = EFI_NONE;
+	efi_rts_work.args = NULL;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	status = efi_private_complete(request, efi_rts_work.status);
+	efi_private_free(request);
+	return status;
+#else
 	return efi_rts_work.status;
+#endif
 }
 
 static efi_status_t virt_efi_get_time(efi_time_t *tm, efi_time_cap_t *tc)
@@ -448,6 +474,10 @@ virt_efi_set_variable_nb(efi_char16_t *name, efi_guid_t *vendor, u32 attr,
 
 	if (down_trylock(&efi_runtime_lock))
 		return EFI_NOT_READY;
+	if (!efi_enabled(EFI_RUNTIME_SERVICES)) {
+		up(&efi_runtime_lock);
+		return EFI_DEVICE_ERROR;
+	}
 
 	efi_runtime_lock_owner = current;
 	status = efi_call_virt_pointer(efi.runtime, set_variable, name, vendor,
@@ -487,6 +517,10 @@ virt_efi_query_variable_info_nb(u32 attr, u64 *storage_space,
 
 	if (down_trylock(&efi_runtime_lock))
 		return EFI_NOT_READY;
+	if (!efi_enabled(EFI_RUNTIME_SERVICES)) {
+		up(&efi_runtime_lock);
+		return EFI_DEVICE_ERROR;
+	}
 
 	efi_runtime_lock_owner = current;
 	status = efi_call_virt_pointer(efi.runtime, query_variable_info, attr,
@@ -518,6 +552,10 @@ virt_efi_reset_system(int reset_type, efi_status_t status,
 		return;
 	}
 
+	if (!efi_enabled(EFI_RUNTIME_SERVICES)) {
+		up(&efi_runtime_lock);
+		return;
+	}
 	efi_runtime_lock_owner = current;
 	arch_efi_call_virt_setup();
 	efi_rts_work.efi_rts_id = EFI_RESET_SYSTEM;
@@ -584,14 +622,15 @@ void __init efi_native_runtime_setup(void)
 
 efi_status_t
 efi_call_acpi_prm_handler(efi_status_t (__efiapi *handler_addr)(u64, void *),
-			  u64 param_buffer_addr, void *context)
+			  u64 param_buffer_addr, void *context,
+			  size_t param_size, size_t context_size)
 {
 	efi_status_t status;
 
 	if (down_interruptible(&efi_runtime_lock))
 		return EFI_ABORTED;
 	status = efi_queue_work(ACPI_PRM_HANDLER, handler_addr,
-				param_buffer_addr, context);
+				param_buffer_addr, context, param_size, context_size);
 	up(&efi_runtime_lock);
 	return status;
 }

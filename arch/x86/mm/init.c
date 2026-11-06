@@ -1,3 +1,4 @@
+#include <linux/hdn_rap.h>
 #include <linux/gfp.h>
 #include <linux/initrd.h>
 #include <linux/ioport.h>
@@ -8,6 +9,9 @@
 #include <linux/kmemleak.h>
 #include <linux/sched/task.h>
 #include <linux/execmem.h>
+#include <linux/hdn_kernexec.h>
+#include <linux/sizes.h>
+#include <asm/hdn_text.h>
 
 #include <asm/set_memory.h>
 #include <asm/cpu_device_id.h>
@@ -18,6 +22,7 @@
 #include <asm/sections.h>
 #include <asm/setup.h>
 #include <asm/tlbflush.h>
+#include <asm/realmode.h>
 #include <asm/tlb.h>
 #include <asm/proto.h>
 #include <asm/dma.h>		/* for MAX_DMA_PFN */
@@ -132,7 +137,7 @@ __ref void *alloc_low_pages(unsigned int num)
 		unsigned int order;
 
 		order = get_order((unsigned long)num << PAGE_SHIFT);
-		return (void *)__get_free_pages(GFP_ATOMIC | __GFP_ZERO, order);
+		return (void *)hdn_pt_alloc_address(GFP_ATOMIC | __GFP_ZERO, order, true);
 	}
 
 	if ((pgt_buf_end + num) > pgt_buf_top || !can_use_brk_pgt) {
@@ -216,8 +221,7 @@ static int page_size_mask;
 static inline void cr4_set_bits_and_update_boot(unsigned long mask)
 {
 	mmu_cr4_features |= mask;
-	if (trampoline_cr4_features)
-		*trampoline_cr4_features = mmu_cr4_features;
+	hdn_realmode_update_cr4();
 	cr4_set_bits(mask);
 }
 
@@ -849,6 +853,7 @@ void __init poking_init(void)
 	 */
 	ptep = get_locked_pte(text_poke_mm, text_poke_mm_addr, &ptl);
 	BUG_ON(!ptep);
+	hdn_text_bind_window(ptep);
 	pte_unmap_unlock(ptep, ptl);
 }
 
@@ -943,11 +948,30 @@ void free_init_pages(const char *what, unsigned long begin, unsigned long end)
  * used for the kernel image only.  free_init_pages() will do the
  * right thing for either kind of address.
  */
-void free_kernel_image_pages(const char *what, void *begin, void *end)
+unsigned long free_kernel_image_pages(const char *what, void *begin, void *end)
 {
 	unsigned long begin_ul = (unsigned long)begin;
 	unsigned long end_ul = (unsigned long)end;
 	unsigned long len_pages = (end_ul - begin_ul) >> PAGE_SHIFT;
+	unsigned long freed = 0;
+
+#ifdef CONFIG_SECURITY_HARDENING_INITIFY
+	if (begin_ul >= __START_KERNEL_map && !debug_pagealloc_enabled()) {
+		if (!PAGE_ALIGNED(begin_ul) || !PAGE_ALIGNED(end_ul) || end_ul < begin_ul)
+			panic("HDN rejected an invalid init reclamation range");
+		if (!len_pages)
+			return 0;
+		/* Revoke X before restoring direct-map writes; retire before reuse. */
+		if (set_memory_nx(begin_ul, len_pages) ||
+		    set_memory_rw(begin_ul, len_pages) ||
+		    set_memory_np_noalias(begin_ul, len_pages))
+			panic("HDN could not retire an initialization mapping");
+		/* virt_to_page does not dereference the removed image mapping.
+		 * free_reserved_area poisons via page_address(), the direct map.
+		 */
+		return free_reserved_area(begin, end, POISON_FREE_INITMEM, what);
+	}
+#endif
 
 	free_init_pages(what, begin_ul, end_ul);
 
@@ -966,18 +990,52 @@ void free_kernel_image_pages(const char *what, void *begin, void *end)
 	 * This is only valid for 64bit kernels. 32bit has only one mapping
 	 * which can't be treated in this way for obvious reasons.
 	 */
-	if (IS_ENABLED(CONFIG_X86_64) && cpu_feature_enabled(X86_FEATURE_PTI))
-		set_memory_np_noalias(begin_ul, len_pages);
+	if (IS_ENABLED(CONFIG_X86_64) && (cpu_feature_enabled(X86_FEATURE_PTI) ||
+	    IS_ENABLED(CONFIG_SECURITY_HARDENING_INITIFY))) {
+		int error = set_memory_np_noalias(begin_ul, len_pages);
+
+		if (error && IS_ENABLED(CONFIG_SECURITY_HARDENING_INITIFY))
+			panic("HDN could not remove an initialization alias");
+	}
+	return freed;
 }
+
+#ifdef CONFIG_SECURITY_HARDENING_INITIFY
+static bool hdn_init_retired __ro_after_init;
+static unsigned long hdn_init_reclaimed __ro_after_init;
+
+bool hdn_init_aliases_retired(void)
+{
+	return smp_load_acquire(&hdn_init_retired);
+}
+
+unsigned long hdn_init_reclaimed_bytes(void)
+{
+	return hdn_init_aliases_retired() ? hdn_init_reclaimed : 0;
+}
+#endif
 
 void __ref free_initmem(void)
 {
+#ifdef CONFIG_SECURITY_HARDENING_INITIFY
+	unsigned long freed;
+#endif
+
 	e820__reallocate_tables();
 
 	mem_encrypt_free_decrypted_mem();
 
+	hdn_rap_builtin_init_retire();
+#ifdef CONFIG_SECURITY_HARDENING_INITIFY
+	freed = free_kernel_image_pages("unused kernel image (initmem)",
+					&__init_begin, &__init_end);
+	/* Debug-pagealloc deliberately retains the unmapped physical pages. */
+	hdn_init_reclaimed = freed << PAGE_SHIFT;
+	smp_store_release(&hdn_init_retired, true);
+#else
 	free_kernel_image_pages("unused kernel image (initmem)",
 				&__init_begin, &__init_end);
+#endif
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
@@ -1056,6 +1114,39 @@ unsigned long arch_max_swapfile_size(void)
 #ifdef CONFIG_EXECMEM
 static struct execmem_info execmem_info __ro_after_init;
 
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+static void __init hdn_bpf_partition(struct execmem_info *info)
+{
+	unsigned long start = info->ranges[EXECMEM_DEFAULT].start;
+	unsigned long end = info->ranges[EXECMEM_DEFAULT].end;
+	unsigned long first = ALIGN(start + SZ_64M, PMD_SIZE);
+	unsigned long last, base;
+
+	/* Keep both general segments usable and all rel32 targets reachable. */
+	if (end <= first || end - first < SZ_128M + SZ_64M)
+		panic("HDN cannot reserve the BPF executable domain");
+	last = ALIGN_DOWN(end - SZ_128M - SZ_64M, PMD_SIZE);
+	if (last < first)
+		panic("HDN cannot align the BPF executable domain");
+	base = first + get_random_u32_below((last - first) / PMD_SIZE + 1) * PMD_SIZE;
+	for (unsigned int type = 0; type < EXECMEM_TYPE_MAX; type++) {
+		struct execmem_range *range = &info->ranges[type];
+
+		if (execmem_is_bpf(type)) {
+			*range = (struct execmem_range) {
+				.start = base, .end = base + SZ_128M,
+				.alignment = MODULE_ALIGN, .pgprot = PAGE_KERNEL,
+				.flags = EXECMEM_KASAN_SHADOW | EXECMEM_RANDOMIZE,
+			};
+		} else {
+			range->end = base - PAGE_SIZE;
+			range->fallback_start = base + SZ_128M + PAGE_SIZE;
+			range->fallback_end = end;
+		}
+	}
+}
+#endif
+
 #ifdef CONFIG_ARCH_HAS_EXECMEM_ROX
 void execmem_fill_trapping_insns(void *ptr, size_t size)
 {
@@ -1123,6 +1214,9 @@ struct execmem_info __init *execmem_arch_setup(void)
 		},
 	};
 
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	hdn_bpf_partition(&execmem_info);
+#endif
 	return &execmem_info;
 }
 #endif /* CONFIG_EXECMEM */

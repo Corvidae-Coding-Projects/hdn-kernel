@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""Read one owned private-stack range from an uncompressed x86-64 ELF vmcore."""
+
+import argparse
+import bisect
+import json
+import os
+import struct
+import sys
+
+
+class Dump:
+    def __init__(self, path):
+        self.fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        self.info = {}
+        self.loads = []
+        header = self.read_file(0, 64)
+        if header[:7] != b"\x7fELF\x02\x01\x01":
+            raise ValueError("expected an uncompressed little-endian ELF64 vmcore")
+        _, kind, machine, _, _, phoff, _, _, ehsize, phsize, count, _, _, _ = struct.unpack(
+            "<16sHHIQQQIHHHHHH", header)
+        if kind != 4 or machine != 62 or ehsize != 64 or phsize != 56 or count == 0xffff:
+            raise ValueError("unsupported ELF machine, header, or extended program-header count")
+        for i in range(count):
+            typ, _, offset, _, physical, filesz, memsz, _ = struct.unpack(
+                "<IIQQQQQQ", self.read_file(phoff + i * phsize, phsize))
+            if typ == 1 and memsz:
+                if physical + memsz > 1 << 64 or filesz > memsz:
+                    raise ValueError("invalid physical segment extent")
+                self.loads.append((physical, physical + memsz, offset, filesz))
+            elif typ == 4:
+                self.notes(offset, filesz)
+        self.loads.sort()
+        if not self.loads or any(a[1] > b[0] for a, b in zip(self.loads, self.loads[1:])):
+            raise ValueError("missing or overlapping physical segments")
+        self.starts = [segment[0] for segment in self.loads]
+        if self.number("PAGESIZE", 10) != 4096 or self.number("NUMBER(sme_mask)", 10):
+            raise ValueError("private-stack dump requires 4K pages and unencrypted physical memory")
+        self.levels = 5 if self.number("NUMBER(pgtable_l5_enabled)", 10) else 4
+        self.root = (self.number("SYMBOL(init_top_pgt)", 16) - 0xffffffff80000000 +
+                     self.number("NUMBER(phys_base)", 10))
+        if self.root < 0 or self.root & 4095:
+            raise ValueError("invalid kernel root geometry")
+
+    def read_file(self, offset, size):
+        if offset < 0 or size < 0 or size > 16 * 1024 * 1024:
+            raise ValueError("invalid or oversized dump read")
+        result = os.pread(self.fd, size, offset)
+        if len(result) != size:
+            raise ValueError("truncated dump data")
+        return result
+
+    def notes(self, offset, size):
+        end = offset + size
+        while offset < end:
+            if end - offset < 12:
+                raise ValueError("truncated ELF note header")
+            namesz, descsz, _ = struct.unpack("<III", self.read_file(offset, 12))
+            name_at = offset + 12
+            desc_at = name_at + ((namesz + 3) & ~3)
+            offset = desc_at + ((descsz + 3) & ~3)
+            if offset > end or namesz > 4096 or descsz > 16 * 1024 * 1024:
+                raise ValueError("invalid ELF note extent")
+            if self.read_file(name_at, namesz).rstrip(b"\0") != b"VMCOREINFO":
+                continue
+            for line in self.read_file(desc_at, descsz).rstrip(b"\0").decode("ascii").splitlines():
+                key, separator, value = line.partition("=")
+                if separator:
+                    if key in self.info and self.info[key] != value:
+                        raise ValueError("conflicting VMCOREINFO field: " + key)
+                    self.info[key] = value
+
+    def number(self, key, base=10):
+        if key not in self.info:
+            raise ValueError("missing VMCOREINFO field: " + key)
+        return int(self.info[key], base)
+
+    def physical(self, address, size):
+        result = bytearray()
+        while size:
+            index = bisect.bisect_right(self.starts, address) - 1
+            if index < 0:
+                raise ValueError("physical page was not captured")
+            start, end, offset, filesz = self.loads[index]
+            available = min(end, start + filesz) - address
+            if available <= 0:
+                raise ValueError("physical page was not captured")
+            count = min(size, available)
+            result.extend(self.read_file(offset + address - start, count))
+            address += count
+            size -= count
+        return bytes(result)
+
+    def translate(self, address):
+        bits = 57 if self.levels == 5 else 48
+        high = address >> bits
+        expected = (1 << (64 - bits)) - 1 if address & (1 << (bits - 1)) else 0
+        if address < 0 or address >= 1 << 64 or high != expected:
+            raise ValueError("noncanonical kernel address")
+        table = self.root
+        for level in range(self.levels, 0, -1):
+            shift = 12 + 9 * (level - 1)
+            entry = struct.unpack("<Q", self.physical(table + ((address >> shift) & 511) * 8, 8))[0]
+            if not entry & 1:
+                raise ValueError("metadata mapping is not present in the captured canonical root")
+            table = entry & 0x000ffffffffff000
+            if level == 1 or (level in (2, 3) and entry & 128):
+                mask = (1 << shift) - 1
+                return (table & ~mask) | (address & mask)
+            if level > 3 and entry & 128:
+                raise ValueError("invalid large-page level")
+        raise ValueError("invalid page-table walk")
+
+    def virtual(self, address, size):
+        result = bytearray()
+        while size:
+            count = min(size, 4096 - (address & 4095))
+            result.extend(self.physical(self.translate(address), count))
+            address += count
+            size -= count
+        return bytes(result)
+
+    def word(self, address):
+        return struct.unpack("<Q", self.virtual(address, 8))[0]
+
+    def stack(self, task, address, length):
+        pages = self.number("NUMBER(HDN_STACK_PAGES)")
+        stride = self.number("NUMBER(HDN_STACK_STRIDE)")
+        buckets = self.number("NUMBER(HDN_STACK_BUCKETS)")
+        extent = pages * 4096
+        size = self.number("SIZE(hdn_stack_storage)")
+        names = ("owner", "next", "begin", "generation", "published", "pfns")
+        offsets = {name: self.number("OFFSET(hdn_stack_storage." + name + ")") for name in names}
+        if (not 1 <= pages <= 256 or stride != 2 * extent or not 1 <= buckets <= 65536 or
+                buckets & (buckets - 1) or not 1 <= size <= 4096 or
+                any(offset < 0 or offset % 8 or offset + 8 > size for offset in offsets.values()) or
+                offsets["pfns"] + pages * 8 > size or not 0 < length <= extent):
+            raise ValueError("invalid private-stack descriptor geometry or requested length")
+        region = self.word(self.number("SYMBOL(hdn_stack_region)", 16))
+        if not region or not region <= address < region + (1 << 39):
+            raise ValueError("requested address is outside the private-stack region")
+        bucket = (address // stride) & (buckets - 1)
+        descriptor = self.word(self.number("SYMBOL(hdn_stack_buckets)", 16) + bucket * 8)
+        seen = set()
+        while descriptor:
+            if descriptor in seen or len(seen) >= 1_000_000:
+                raise ValueError("cyclic or oversized stack registry")
+            seen.add(descriptor)
+            data = self.virtual(descriptor, size)
+            fields = {name: struct.unpack_from("<Q", data, offset)[0] for name, offset in offsets.items()}
+            begin = fields["begin"]
+            if fields["owner"] == task and begin <= address < begin + extent:
+                if (not fields["published"] or not fields["generation"] or
+                        length > begin + extent - address or begin % extent or
+                        not region <= begin < region + (1 << 39)):
+                    raise ValueError("unpublished or inconsistent stack descriptor")
+                result = bytearray()
+                position = address - begin
+                while len(result) < length:
+                    pfn = struct.unpack_from("<Q", data, offsets["pfns"] + (position // 4096) * 8)[0]
+                    if not pfn or pfn >= 1 << 40:
+                        raise ValueError("invalid private-stack physical page")
+                    count = min(length - len(result), 4096 - position % 4096)
+                    result.extend(self.physical(pfn * 4096 + position % 4096, count))
+                    position += count
+                return {"task": hex(task), "address": hex(address), "generation": fields["generation"],
+                        "length": length, "bytes_hex": result.hex()}
+            descriptor = fields["next"]
+        raise ValueError("no captured published stack owns this task and address")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("vmcore")
+    parser.add_argument("--task", required=True, type=lambda value: int(value, 0))
+    parser.add_argument("--address", required=True, type=lambda value: int(value, 0))
+    parser.add_argument("--length", required=True, type=lambda value: int(value, 0))
+    args = parser.parse_args()
+    dump = None
+    try:
+        dump = Dump(args.vmcore)
+        print(json.dumps(dump.stack(args.task, args.address, args.length), sort_keys=True))
+    except (OSError, ValueError, OverflowError, struct.error) as error:
+        print("hdn-stack-vmcore: " + str(error), file=sys.stderr)
+        return 1
+    finally:
+        if dump is not None:
+            os.close(dump.fd)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -6,6 +6,7 @@
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/bpf.h>
+#include <linux/hdn_stack.h>
 #include <linux/bpf_verifier.h>
 #include <linux/bpf_perf_event.h>
 #include <linux/btf.h>
@@ -778,7 +779,11 @@ const struct bpf_func_proto bpf_get_current_task_btf_proto = {
 
 BPF_CALL_1(bpf_task_pt_regs, struct task_struct *, task)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	return (unsigned long)hdn_stack_bpf_regs(task);
+#else
 	return (unsigned long) task_pt_regs(task);
+#endif
 }
 
 BTF_ID_LIST_SINGLE(bpf_task_pt_regs_ids, struct, pt_regs)

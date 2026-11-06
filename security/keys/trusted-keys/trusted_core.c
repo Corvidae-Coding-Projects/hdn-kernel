@@ -27,11 +27,11 @@
 #include <linux/string.h>
 #include <linux/uaccess.h>
 
-static char *trusted_rng = "default";
+static char *trusted_rng __ro_after_init = "default";
 module_param_named(rng, trusted_rng, charp, 0);
 MODULE_PARM_DESC(rng, "Select trusted key RNG");
 
-static char *trusted_key_source;
+static char *trusted_key_source __ro_after_init;
 module_param_named(source, trusted_key_source, charp, 0);
 MODULE_PARM_DESC(source, "Select trusted keys source (tpm, tee, caam, dcp or pkwm)");
 
@@ -58,8 +58,8 @@ DEFINE_STATIC_CALL_NULL(trusted_key_unseal,
 			*trusted_key_sources[0].ops->unseal);
 DEFINE_STATIC_CALL_NULL(trusted_key_get_random,
 			*trusted_key_sources[0].ops->get_random);
-static void (*trusted_key_exit)(void);
-static unsigned char migratable;
+static void (*trusted_key_exit)(void) __ro_after_init;
+static unsigned char migratable __ro_after_init;
 
 enum {
 	Opt_err,

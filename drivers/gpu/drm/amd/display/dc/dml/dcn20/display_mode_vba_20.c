@@ -230,6 +230,22 @@ static double CalculateWriteBackDelay(
 static void dml20_DisplayPipeConfiguration(struct display_mode_lib *mode_lib);
 static void dml20_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPerformanceCalculation(
 		struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml20_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2(
+		struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml20_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart3(
+		struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml20_ModeSupportAndSystemConfigurationPart2(
+		struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml20_ModeSupportAndSystemConfigurationPart3(
+		struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml20_ModeSupportAndSystemConfigurationPart4(
+		struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml20_ModeSupportAndSystemConfigurationPart3Setup(
+		struct display_mode_lib *mode_lib, int i, unsigned int j);
+static noinline_for_stack void dml20_ModeSupportAndSystemConfigurationPart3Prefetch(
+		struct display_mode_lib *mode_lib, int i, unsigned int j);
+static noinline_for_stack void dml20_ModeSupportAndSystemConfigurationPart3Flip(
+		struct display_mode_lib *mode_lib, int i, unsigned int j);
 
 void dml20_recalculate(struct display_mode_lib *mode_lib)
 {
@@ -1845,6 +1861,14 @@ static void dml20_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPer
 					&& mode_lib->vba.DSCEnabled[j])
 				mode_lib->vba.DSCDelay[k] = mode_lib->vba.DSCDelay[j];
 
+	dml20_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2(mode_lib);
+}
+
+static noinline_for_stack void dml20_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2(
+		struct display_mode_lib *mode_lib)
+{
+	unsigned int j, k;
+
 	// Prefetch
 	for (k = 0; k < mode_lib->vba.NumberOfActivePlanes; ++k) {
 		unsigned int PDEAndMetaPTEBytesFrameY;
@@ -2332,6 +2356,14 @@ static void dml20_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPer
 			&& (!mode_lib->vba.ImmediateFlipSupport
 					|| mode_lib->vba.ImmediateFlipSupported))
 			|| mode_lib->vba.MaximumMaxVStartupLines < mode_lib->vba.VStartupLines));
+
+	dml20_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart3(mode_lib);
+}
+
+static noinline_for_stack void dml20_DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart3(
+		struct display_mode_lib *mode_lib)
+{
+	unsigned int j, k;
 
 	//Display Pipeline Delivery Time in Prefetch
 	for (k = 0; k < mode_lib->vba.NumberOfActivePlanes; ++k) {
@@ -3285,7 +3317,7 @@ void dml20_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 	struct vba_vars_st *locals = &mode_lib->vba;
 
 	int i;
-	unsigned int j, k, m;
+	unsigned int k;
 
 	/*MODE SUPPORT, VOLTAGE STATE AND SOC CONFIGURATION*/
 
@@ -3640,6 +3672,17 @@ void dml20_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 			}
 		}
 	}
+
+	dml20_ModeSupportAndSystemConfigurationPart2(mode_lib);
+}
+
+static noinline_for_stack void dml20_ModeSupportAndSystemConfigurationPart2(
+		struct display_mode_lib *mode_lib)
+{
+	struct vba_vars_st *locals = &mode_lib->vba;
+	int i;
+	unsigned int j, k, m;
+
 	/*Maximum DISPCLK/DPPCLK Support check*/
 
 	mode_lib->vba.WritebackRequiredDISPCLK = 0.0;
@@ -4391,6 +4434,16 @@ void dml20_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 		}
 	}
 
+	dml20_ModeSupportAndSystemConfigurationPart3(mode_lib);
+}
+
+static noinline_for_stack void dml20_ModeSupportAndSystemConfigurationPart3(
+		struct display_mode_lib *mode_lib)
+{
+	struct vba_vars_st *locals = &mode_lib->vba;
+	int i;
+	unsigned int j, k;
+
 
 	/*Prefetch Check*/
 	for (i = 0; i <= locals->soc.num_states; i++) {
@@ -4409,6 +4462,21 @@ void dml20_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 
 	for (i = 0; i <= locals->soc.num_states; i++) {
 		for (j = 0; j < 2; j++) {
+			dml20_ModeSupportAndSystemConfigurationPart3Setup(mode_lib, i, j);
+			dml20_ModeSupportAndSystemConfigurationPart3Prefetch(mode_lib, i, j);
+			dml20_ModeSupportAndSystemConfigurationPart3Flip(mode_lib, i, j);
+		}
+	}
+
+	dml20_ModeSupportAndSystemConfigurationPart4(mode_lib);
+}
+
+static noinline_for_stack void dml20_ModeSupportAndSystemConfigurationPart3Setup(
+		struct display_mode_lib *mode_lib, int i, unsigned int j)
+{
+	struct vba_vars_st *locals = &mode_lib->vba;
+	unsigned int k, m;
+
 			for (k = 0; k < locals->NumberOfActivePlanes; k++) {
 				locals->NoOfDPPThisState[k] = locals->NoOfDPP[i][j][k];
 				locals->RequiredDPPCLKThisState[k] = locals->RequiredDPPCLK[i][j][k];
@@ -4667,6 +4735,13 @@ void dml20_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 				locals->MaximumVStartup[0][0][k] = mode_lib->vba.VTotal[k] - mode_lib->vba.VActive[k]
 					- dml_max(1.0, dml_ceil(locals->WritebackDelay[i][k] / (mode_lib->vba.HTotal[k] / mode_lib->vba.PixelClock[k]), 1.0));
 			}
+		}
+
+static noinline_for_stack void dml20_ModeSupportAndSystemConfigurationPart3Prefetch(
+		struct display_mode_lib *mode_lib, int i, unsigned int j)
+{
+	struct vba_vars_st *locals = &mode_lib->vba;
+	unsigned int k;
 
 			mode_lib->vba.NextPrefetchMode = mode_lib->vba.MinPrefetchMode;
 			do {
@@ -4834,6 +4909,12 @@ void dml20_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 				}
 			} while ((locals->PrefetchSupported[i][j] != true || locals->VRatioInPrefetchSupported[i][j] != true)
 					&& mode_lib->vba.NextPrefetchMode < mode_lib->vba.MaxPrefetchMode);
+		}
+
+static noinline_for_stack void dml20_ModeSupportAndSystemConfigurationPart3Flip(
+		struct display_mode_lib *mode_lib, int i, unsigned int j)
+{
+	unsigned int k;
 
 			if (mode_lib->vba.PrefetchSupported[i][j] == true
 					&& mode_lib->vba.VRatioInPrefetchSupported[i][j] == true) {
@@ -4920,8 +5001,14 @@ void dml20_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 			} else {
 				mode_lib->vba.ImmediateFlipSupportedForState[i][j] = false;
 			}
-		}
-	}
+}
+
+static noinline_for_stack void dml20_ModeSupportAndSystemConfigurationPart4(
+		struct display_mode_lib *mode_lib)
+{
+	struct vba_vars_st *locals = &mode_lib->vba;
+	int i;
+	unsigned int j, k;
 
 	/*Vertical Active BW support*/
 	mode_lib->vba.MaxTotalVActiveRDBandwidth = 0;

@@ -38,6 +38,7 @@ struct iov_iter;		/* in uio.h */
 #define VM_DEFER_KMEMLEAK	0
 #endif
 #define VM_SPARSE		0x00001000	/* sparse vm_area. not all pages are present. */
+#define VM_HDN_EXECMEM		0x00002000	/* private execmem lifecycle owns permissions */
 
 /* bits [20..32] reserved for arch specific ioremap internals */
 
@@ -66,6 +67,10 @@ struct vm_struct {
 	phys_addr_t		phys_addr;
 	const void		*caller;
 	unsigned long		requested_size;
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	/* Allocation-owned identity, retained by vrealloc until final vfree. */
+	unsigned int		hdn_alloc_domain;
+#endif
 };
 
 struct vmap_area {

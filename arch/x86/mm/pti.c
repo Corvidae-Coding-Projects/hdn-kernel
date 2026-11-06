@@ -151,7 +151,8 @@ pgd_t __pti_set_user_pgtbl(pgd_t *pgdp, pgd_t pgd)
 	 * The user page tables get the full PGD, accessible from
 	 * userspace:
 	 */
-	kernel_to_user_pgdp(pgdp)->pgd = pgd.pgd;
+	hdn_pt_store(&kernel_to_user_pgdp(pgdp)->pgd, pgd.pgd,
+		     pgtable_l5_enabled() ? 5 : 4);
 
 	/*
 	 * If this is normal user memory, make it NX in the kernel
@@ -191,7 +192,7 @@ static p4d_t *pti_user_pagetable_walk_p4d(unsigned long address)
 	}
 
 	if (pgd_none(*pgd)) {
-		unsigned long new_p4d_page = __get_free_page(gfp);
+		unsigned long new_p4d_page = hdn_pt_alloc_address(gfp, 0, false);
 		if (WARN_ON_ONCE(!new_p4d_page))
 			return NULL;
 
@@ -220,7 +221,7 @@ static pmd_t *pti_user_pagetable_walk_pmd(unsigned long address)
 
 	BUILD_BUG_ON(p4d_leaf(*p4d));
 	if (p4d_none(*p4d)) {
-		unsigned long new_pud_page = __get_free_page(gfp);
+		unsigned long new_pud_page = hdn_pt_alloc_address(gfp, 0, false);
 		if (WARN_ON_ONCE(!new_pud_page))
 			return NULL;
 
@@ -234,7 +235,7 @@ static pmd_t *pti_user_pagetable_walk_pmd(unsigned long address)
 		return NULL;
 	}
 	if (pud_none(*pud)) {
-		unsigned long new_pmd_page = __get_free_page(gfp);
+		unsigned long new_pmd_page = hdn_pt_alloc_address(gfp, 0, false);
 		if (WARN_ON_ONCE(!new_pmd_page))
 			return NULL;
 
@@ -275,7 +276,7 @@ static pte_t *pti_user_pagetable_walk_pte(unsigned long address, bool late_text)
 	}
 
 	if (pmd_none(*pmd)) {
-		unsigned long new_pte_page = __get_free_page(gfp);
+		unsigned long new_pte_page = hdn_pt_alloc_address(gfp, 0, false);
 		if (!new_pte_page)
 			return NULL;
 
@@ -304,7 +305,7 @@ static void __init pti_setup_vsyscall(void)
 	if (WARN_ON(!target_pte))
 		return;
 
-	*target_pte = *pte;
+	native_set_pte(target_pte, *pte);
 	set_vsyscall_pgtable_user_bits(kernel_to_user_pgdp(swapper_pg_dir));
 }
 #else
@@ -382,14 +383,14 @@ pti_clone_pgtable(unsigned long start, unsigned long end,
 			 * code that only set this bit when supported.
 			 */
 			if (boot_cpu_has(X86_FEATURE_PGE))
-				*pmd = pmd_set_flags(*pmd, _PAGE_GLOBAL);
+				native_set_pmd(pmd, pmd_set_flags(*pmd, _PAGE_GLOBAL));
 
 			/*
 			 * Copy the PMD.  That is, the kernelmode and usermode
 			 * tables will share the last-level page tables of this
 			 * address range
 			 */
-			*target_pmd = *pmd;
+			native_set_pmd(target_pmd, *pmd);
 
 			addr = round_up(addr + 1, PMD_SIZE);
 
@@ -413,10 +414,10 @@ pti_clone_pgtable(unsigned long start, unsigned long end,
 
 			/* Set GLOBAL bit in both PTEs */
 			if (boot_cpu_has(X86_FEATURE_PGE))
-				*pte = pte_set_flags(*pte, _PAGE_GLOBAL);
+				native_set_pte(pte, pte_set_flags(*pte, _PAGE_GLOBAL));
 
 			/* Clone the PTE */
-			*target_pte = *pte;
+			native_set_pte(target_pte, *pte);
 
 			addr = round_up(addr + 1, PAGE_SIZE);
 
@@ -442,7 +443,7 @@ static void __init pti_clone_p4d(unsigned long addr)
 
 	kernel_pgd = pgd_offset_k(addr);
 	kernel_p4d = p4d_offset(kernel_pgd, addr);
-	*user_p4d = *kernel_p4d;
+	hdn_pt_copy(user_p4d, kernel_p4d, sizeof(*user_p4d), 4);
 }
 
 /*
@@ -473,7 +474,7 @@ static void __init pti_clone_user_shared(void)
 		if (WARN_ON(!target_pte))
 			return;
 
-		*target_pte = pfn_pte(pa >> PAGE_SHIFT, PAGE_KERNEL);
+		native_set_pte(target_pte, pfn_pte(pa >> PAGE_SHIFT, PAGE_KERNEL));
 	}
 }
 

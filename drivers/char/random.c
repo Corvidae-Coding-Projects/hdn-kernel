@@ -33,6 +33,7 @@
 #include <linux/fcntl.h>
 #include <linux/slab.h>
 #include <linux/random.h>
+#include <linux/hdn_latent_entropy.h>
 #include <linux/poll.h>
 #include <linux/init.h>
 #include <linux/fs.h>
@@ -656,6 +657,17 @@ static void mix_pool_bytes(const void *buf, size_t len)
 	spin_unlock_irqrestore(&input_pool.lock, flags);
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_LATENT_ENTROPY
+/*
+ * Deliberately separate from credited input APIs. No readiness test, reseed,
+ * credit_init_bits(), or wakeup is permitted in this wrapper's call graph.
+ */
+void hdn_random_mix_nocredit(const void *buf, size_t len)
+{
+	mix_pool_bytes(buf, len);
+}
+#endif
+
 /*
  * This is an HKDF-like construction for using the hashed collected entropy
  * as a PRF key, that's then expanded block-by-block.
@@ -845,6 +857,9 @@ static int random_pm_notification(struct notifier_block *nb, unsigned long actio
 		crng_reseed(NULL);
 		pr_notice("crng reseeded on system resumption\n");
 	}
+	if (action == PM_POST_SUSPEND || action == PM_POST_HIBERNATION ||
+	    action == PM_POST_RESTORE)
+		hdn_latent_reseed();
 	return 0;
 }
 
@@ -986,6 +1001,7 @@ void __cold add_vmfork_randomness(const void *unique_vm_id, size_t len)
 		crng_reseed(NULL);
 		pr_notice("crng reseeded due to virtual machine fork\n");
 	}
+	hdn_latent_reseed();
 	blocking_notifier_call_chain(&vmfork_chain, 0, NULL);
 }
 #if IS_MODULE(CONFIG_VMGENID)

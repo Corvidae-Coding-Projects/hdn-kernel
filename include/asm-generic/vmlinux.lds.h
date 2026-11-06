@@ -483,6 +483,37 @@
 		SCHED_DATA						\
 		RO_AFTER_INIT_DATA	/* Read only after init */	\
 		. = ALIGN(8);						\
+		__start___hdn_static_creds = .;				\
+		KEEP(*(__hdn_static_creds))				\
+		__stop___hdn_static_creds = .;				\
+		. = ALIGN(8);						\
+		__hdn_rap_targets_start = .;				\
+		KEEP(*(.hdn.rap.targets))					\
+		__hdn_rap_targets_end = .;				\
+		. = ALIGN(8);						\
+		__hdn_rap_sites_start = .;				\
+		KEEP(*(.hdn.rap.sites))					\
+		__hdn_rap_sites_end = .;					\
+		. = ALIGN(8);						\
+		__hdn_rap_entries_start = .;				\
+		KEEP(*(.hdn.rap.entries))					\
+		__hdn_rap_entries_end = .;				\
+		. = ALIGN(8);						\
+		__hdn_rap_static_calls_start = .;				\
+		KEEP(*(.hdn.rap.static_calls))				\
+		__hdn_rap_static_calls_end = .;				\
+		. = ALIGN(8);						\
+		__hdn_rap_static_sites_start = .;				\
+		KEEP(*(.hdn.rap.static_sites))				\
+		__hdn_rap_static_sites_end = .;				\
+		. = ALIGN(8);						\
+		__hdn_rap_types_start = .;				\
+		KEEP(*(.hdn.rap.types))					\
+		__hdn_rap_types_end = .;					\
+		. = ALIGN(8);						\
+		__hdn_rap_build_start = .;				\
+		KEEP(*(.hdn.rap.build))					\
+		__hdn_rap_build_end = .;					\
 		BOUNDED_SECTION_BY(__tracepoints_ptrs, ___tracepoints_ptrs) \
 		*(__tracepoints_strings)/* Tracepoints: strings */	\
 	}								\

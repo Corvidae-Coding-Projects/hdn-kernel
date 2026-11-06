@@ -15,6 +15,7 @@
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/kfence.h>
+#include <linux/hdn_alloc.h>
 #include <linux/mm.h>
 #include <linux/random.h>
 #include <linux/slab.h>
@@ -315,6 +316,46 @@ static void *test_alloc(struct kunit *test, size_t size, gfp_t gfp, enum allocat
 	KUNIT_ASSERT_TRUE_MSG(test, false, "failed to allocate from KFENCE");
 	return NULL; /* Unreachable. */
 }
+
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+static void test_autoslab_domain_retention(struct kunit *test)
+{
+	struct kfence_metadata *first_meta, *second_meta;
+	struct kmem_cache *first, *second;
+	void *first_object, *second_object;
+
+	first = kmem_cache_create("kfence-hdn-domain-a", 64, 0,
+				  SLAB_ACCOUNT | SLAB_HDN_DOMAIN, NULL);
+	KUNIT_ASSERT_NOT_NULL(test, first);
+	test_cache = first;
+	hdn_cache_domain(first, HDN_ALLOC_JITTER_META);
+	first_object = test_alloc(test, 64, GFP_KERNEL_ACCOUNT, ALLOCATE_ANY);
+	KUNIT_ASSERT_NOT_NULL(test, first_object);
+	first_meta = addr_to_metadata((unsigned long)first_object);
+	KUNIT_ASSERT_NOT_NULL(test, first_meta);
+	KUNIT_EXPECT_EQ(test, first_meta->hdn_domain,
+			HDN_ALLOC_JITTER_META + 1U);
+	test_free(first_object);
+	test_cache_destroy();
+	KUNIT_EXPECT_EQ(test, first_meta->hdn_domain,
+			HDN_ALLOC_JITTER_META + 1U);
+
+	second = kmem_cache_create("kfence-hdn-domain-b", 64, 0,
+				   SLAB_ACCOUNT | SLAB_HDN_DOMAIN, NULL);
+	KUNIT_ASSERT_NOT_NULL(test, second);
+	test_cache = second;
+	hdn_cache_domain(second, HDN_ALLOC_JITTER_TEST);
+	second_object = test_alloc(test, 64, GFP_KERNEL_ACCOUNT, ALLOCATE_ANY);
+	KUNIT_ASSERT_NOT_NULL(test, second_object);
+	second_meta = addr_to_metadata((unsigned long)second_object);
+	KUNIT_ASSERT_NOT_NULL(test, second_meta);
+	KUNIT_EXPECT_PTR_NE(test, second_meta, first_meta);
+	KUNIT_EXPECT_EQ(test, second_meta->hdn_domain,
+			HDN_ALLOC_JITTER_TEST + 1U);
+	test_free(second_object);
+	test_cache_destroy();
+}
+#endif
 
 static void test_out_of_bounds_read(struct kunit *test)
 {
@@ -812,6 +853,9 @@ static struct kunit_case kfence_test_cases[] = {
 	KUNIT_CASE(test_memcache_typesafe_by_rcu),
 	KUNIT_CASE(test_krealloc),
 	KUNIT_CASE(test_memcache_alloc_bulk),
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	KUNIT_CASE(test_autoslab_domain_retention),
+#endif
 	{},
 };
 

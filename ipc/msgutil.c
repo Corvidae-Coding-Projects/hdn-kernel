@@ -8,6 +8,7 @@
 #include <linux/init.h>
 #include <linux/security.h>
 #include <linux/slab.h>
+#include <linux/hdn_alloc.h>
 #include <linux/ipc.h>
 #include <linux/msg.h>
 #include <linux/ipc_namespace.h>
@@ -43,9 +44,26 @@ static kmem_buckets *msg_buckets __ro_after_init;
 
 static int __init init_msg_buckets(void)
 {
-	msg_buckets = kmem_buckets_create("msg_msg", SLAB_ACCOUNT,
+	msg_buckets = kmem_buckets_create("msg_msg", SLAB_ACCOUNT | SLAB_HDN_DOMAIN,
 					  sizeof(struct msg_msg),
 					  DATALEN_MSG, NULL);
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	if (!msg_buckets)
+		return -ENOMEM;
+	for (unsigned int index = 0; index <= KMALLOC_SHIFT_HIGH; index++) {
+		bool alias = false;
+
+		if (!(*msg_buckets)[index])
+			continue;
+		for (unsigned int earlier = 0; earlier < index; earlier++)
+			if ((*msg_buckets)[earlier] == (*msg_buckets)[index]) {
+				alias = true;
+				break;
+			}
+		if (!alias)
+			hdn_cache_domain((*msg_buckets)[index], HDN_ALLOC_MSG_HEAD);
+	}
+#endif
 
 	return 0;
 }
@@ -58,6 +76,10 @@ static struct msg_msg *alloc_msg(size_t len)
 	size_t alen;
 
 	alen = min(len, DATALEN_MSG);
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	if (unlikely(!msg_buckets))
+		return NULL;
+#endif
 	msg = kmem_buckets_alloc(msg_buckets, sizeof(*msg) + alen, GFP_KERNEL);
 	if (msg == NULL)
 		return NULL;
@@ -73,7 +95,8 @@ static struct msg_msg *alloc_msg(size_t len)
 		cond_resched();
 
 		alen = min(len, DATALEN_SEG);
-		seg = kmalloc(sizeof(*seg) + alen, GFP_KERNEL_ACCOUNT);
+		seg = kmalloc_typed(struct msg_msgseg, sizeof(*seg) + alen,
+				    GFP_KERNEL_ACCOUNT);
 		if (seg == NULL)
 			goto out_err;
 		*pseg = seg;

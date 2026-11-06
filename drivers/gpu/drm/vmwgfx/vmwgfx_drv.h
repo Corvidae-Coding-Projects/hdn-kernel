@@ -1352,7 +1352,7 @@ int vmw_bo_cpu_blit(struct vmw_bo *dst,
 void vmw_disable_backdoor(void);
 int vmw_host_get_guestinfo(const char *guest_info_param,
 			   char *buffer, size_t *length);
-__printf(1, 2) int vmw_host_printf(const char *fmt, ...);
+int vmw_host_log(const char *log);
 int vmw_msg_ioctl(struct drm_device *dev, void *data,
 		  struct drm_file *file_priv);
 

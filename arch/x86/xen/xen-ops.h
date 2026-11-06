@@ -11,6 +11,7 @@
 #include <xen/xen-ops.h>
 
 #include <asm/page.h>
+#include <asm/xen/hypercall_types.h>
 
 #include <trace/events/xen.h>
 
@@ -321,12 +322,6 @@ static inline void xen_smp_intr_free_pv(unsigned int cpu) {}
 static inline void xen_smp_count_cpus(void) { }
 #endif /* CONFIG_SMP */
 
-#ifdef CONFIG_XEN_PV
-void xen_hypercall_pv(void);
-#endif
-void xen_hypercall_hvm(void);
-void xen_hypercall_amd(void);
-void xen_hypercall_intel(void);
 void xen_hypercall_setfunc(void);
 void *__xen_hypercall_setfunc(void);
 

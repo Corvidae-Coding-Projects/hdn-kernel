@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+#include <asm/hdn_rap.h>
 #include <linux/export.h>
 #include <linux/linkage.h>
 #include <linux/cfi_types.h>
@@ -11,6 +12,7 @@
  * %rcx	- length
  */
 SYM_TYPED_FUNC_START(__clear_pages_unrolled)
+	HDN_PRIVATE_FUNC_ENTER __clear_pages_unrolled, 1
 	shrq   $6, %rcx
 	.p2align 4
 .Lloop:
@@ -27,7 +29,7 @@ SYM_TYPED_FUNC_START(__clear_pages_unrolled)
 	leaq	64(%rdi),%rdi
 	jnz	.Lloop
 	nop
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(__clear_pages_unrolled)
 EXPORT_SYMBOL_GPL(__clear_pages_unrolled)
 
@@ -43,6 +45,7 @@ EXPORT_SYMBOL_GPL(__clear_pages_unrolled)
  */
 SYM_FUNC_START(rep_stos_alternative)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER rep_stos_alternative, 2
 	cmpq $64,%rcx
 	jae .Lunrolled
 
@@ -58,7 +61,7 @@ SYM_FUNC_START(rep_stos_alternative)
 	dec %rcx
 	jnz .Lclear_user_tail
 .Lexit:
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 	_ASM_EXTABLE_UA( 0b, .Lexit)
 
@@ -89,7 +92,7 @@ SYM_FUNC_START(rep_stos_alternative)
 	jae .Lword
 	testl %ecx,%ecx
 	jne .Lclear_user_tail
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 	/*
 	 * If we take an exception on any of the

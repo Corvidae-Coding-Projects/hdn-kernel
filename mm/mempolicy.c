@@ -78,6 +78,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/mempolicy.h>
+#include <linux/hdn_pgtable.h>
 #include <linux/pagewalk.h>
 #include <linux/highmem.h>
 #include <linux/hugetlb.h>
@@ -2318,6 +2319,28 @@ static nodemask_t *policy_nodemask(gfp_t gfp, struct mempolicy *pol,
 
 	return nodemask;
 }
+
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+/* Use the page allocator's policy selection for preallocated table pages too.
+ * Only MPOL_BIND is a hard restriction; PREFERRED_MANY permits fallback.
+ * The caller holds the current task's mems_allowed sequence across selection.
+ */
+int hdn_pt_policy_nodes(gfp_t gfp, nodemask_t *allowed, nodemask_t *preferred)
+{
+	struct mempolicy *pol = &default_policy;
+	nodemask_t *mask;
+	int nid = numa_node_id();
+
+	if (!in_interrupt() && !(gfp & __GFP_THISNODE))
+		pol = get_task_policy(current);
+	mask = policy_nodemask(gfp, pol, NO_INTERLEAVE_INDEX, &nid);
+	*allowed = node_states[N_MEMORY];
+	if (mask && pol->mode == MPOL_BIND)
+		nodes_and(*allowed, *allowed, *mask);
+	*preferred = mask ? *mask : *allowed;
+	return nid;
+}
+#endif
 
 #ifdef CONFIG_HUGETLBFS
 /*

@@ -153,6 +153,7 @@ enum kernfs_root_flag {
 	 * Renames must not change the parent node.
 	 */
 	KERNFS_ROOT_INVARIANT_PARENT		= 0x0010,
+	KERNFS_ROOT_SYSFS			= 0x0020,
 };
 
 /* type-specific structures for kernfs_node union members */
@@ -214,6 +215,10 @@ struct kernfs_node {
 	unsigned int		hash;	/* ns + name hash */
 	unsigned short		flags;
 	umode_t			mode;
+#ifdef CONFIG_SECURITY_HARDENING_SYSFS_VIEW
+	/* Immutable registration category, retained across rename and move. */
+	u64			hdn_disclosure;
+#endif
 
 	union {
 		struct kernfs_elem_dir		dir;

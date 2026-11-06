@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* Copyright(c) 2016-2020 Intel Corporation. All rights reserved. */
 
+#include <asm/hdn_rap.h>
 #include <linux/linkage.h>
 #include <asm/asm.h>
 
@@ -18,6 +19,10 @@
  * regardless of CPU machine-check-recovery capability.
  */
 SYM_FUNC_START(copy_mc_fragile)
+#ifdef HDN_RAP_ASM_ACTIVE
+	ENDBR
+#endif
+	HDN_TYPED_FUNC_ENTER copy_mc_fragile, 2
 	cmpl $8, %edx
 	/* Less than 8 bytes? Go to byte copy loop */
 	jb .L_no_whole_words
@@ -77,7 +82,7 @@ SYM_FUNC_START(copy_mc_fragile)
 .L_done_memcpy_trap:
 	xorl %eax, %eax
 .L_done:
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 	/*
 	 * Return number of bytes not copied for any failure. Note that
@@ -101,7 +106,15 @@ SYM_FUNC_START(copy_mc_fragile)
 	shll	$3, %ecx
 	addl	%edx, %ecx
 	movl	%ecx, %edx
+#ifdef HDN_RAP_ASM_ACTIVE
+	pushq %rbp
+	movq %rsp, %rbp
+	HDN_C_CALL copy_mc_fragile_handle_tail
+	popq %rbp
+	HDN_ENTRY_ROOT_RETURN
+#else
 	jmp copy_mc_fragile_handle_tail
+#endif
 
 	_ASM_EXTABLE_TYPE(.L_read_leading_bytes, .E_leading_bytes, EX_TYPE_DEFAULT_MCE_SAFE)
 	_ASM_EXTABLE_TYPE(.L_read_words, .E_read_words, EX_TYPE_DEFAULT_MCE_SAFE)
@@ -124,13 +137,17 @@ SYM_FUNC_END(copy_mc_fragile)
  * standard memcpy.
  */
 SYM_FUNC_START(copy_mc_enhanced_fast_string)
+#ifdef HDN_RAP_ASM_ACTIVE
+	ENDBR
+#endif
+	HDN_TYPED_FUNC_ENTER copy_mc_enhanced_fast_string, 2
 	movq %rdi, %rax
 	movq %rdx, %rcx
 .L_copy:
 	rep movsb
 	/* Copy successful. Return zero */
 	xorl %eax, %eax
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 .E_copy:
 	/*
@@ -141,7 +158,7 @@ SYM_FUNC_START(copy_mc_enhanced_fast_string)
 	 * user-copy routines.
 	 */
 	movq %rcx, %rax
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 	_ASM_EXTABLE_TYPE(.L_copy, .E_copy, EX_TYPE_DEFAULT_MCE_SAFE)
 

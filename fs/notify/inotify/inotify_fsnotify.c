@@ -16,6 +16,7 @@
 #include <linux/dcache.h> /* d_unlinked */
 #include <linux/fs.h> /* struct inode */
 #include <linux/fsnotify_backend.h>
+#include <linux/hdn_sysfs.h>
 #include <linux/inotify.h>
 #include <linux/path.h> /* struct path */
 #include <linux/slab.h> /* kmem_* */
@@ -24,6 +25,7 @@
 #include <linux/sched/user.h>
 #include <linux/sched/mm.h>
 
+#include "../fsnotify.h"
 #include "inotify.h"
 
 /*
@@ -40,6 +42,8 @@ static bool event_compare(struct fsnotify_event *old_fsn,
 		return false;
 	if ((old->mask == new->mask) &&
 	    (old->wd == new->wd) &&
+	    (inotify_event_disclosure(old_fsn) ==
+	     inotify_event_disclosure(new_fsn)) &&
 	    (old->name_len == new->name_len) &&
 	    (!old->name_len || !strcmp(old->name, new->name)))
 		return true;
@@ -120,6 +124,10 @@ int inotify_handle_inode_event(struct fsnotify_mark *inode_mark, u32 mask,
 	event->wd = wd;
 	event->sync_cookie = cookie;
 	event->name_len = len;
+#ifdef CONFIG_SECURITY_HARDENING_SYSFS_VIEW
+	event->hdn_disclosure = hdn_sysfs_inode_disclosure(inode ?: dir ?:
+		fsnotify_conn_inode(inode_mark->connector));
+#endif
 	if (len)
 		strscpy(event->name, name->name, event->name_len + 1);
 

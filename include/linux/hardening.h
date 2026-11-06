@@ -286,6 +286,14 @@ int hdn_authorize_socket_server(const struct socket *sock,
 bool hdn_blackhole_remote_skb(const struct sk_buff *skb);
 unsigned int hdn_tcp_lastack_retries(unsigned int retry_until);
 void hdn_report_sealed_write_fault(unsigned long address);
+void hdn_report_kernel_mapping_violation(int error);
+void hdn_report_kernel_text_transition(u64 generation, enum hdn_reason reason,
+				       int error);
+void hdn_report_kernel_deferred(enum hdn_transition transition, u64 generation,
+				enum hdn_reason reason);
+void hdn_report_kernel_seal(u32 type, int error);
+void hdn_report_kernel_page_transition(u64 generation, enum hdn_reason reason, int error);
+void hdn_report_control_flow_failure(unsigned long kind);
 void hdn_attach_proc_ip(const struct sock *sk);
 void hdn_track_proc_ip_connection(const struct sock *sk);
 void hdn_drop_proc_ip_connection(struct signal_struct *sig);
@@ -1073,6 +1081,22 @@ static inline unsigned int hdn_tcp_lastack_retries(unsigned int retry_until)
 static inline void hdn_report_sealed_write_fault(unsigned long address)
 {
 }
+
+static inline void hdn_report_kernel_mapping_violation(int error)
+{
+}
+
+static inline void hdn_report_kernel_text_transition(u64 generation,
+					 enum hdn_reason reason, int error)
+{
+}
+
+static inline void hdn_report_kernel_deferred(enum hdn_transition transition,
+				 u64 generation, enum hdn_reason reason) { }
+static inline void hdn_report_kernel_seal(u32 type, int error) { }
+static inline void hdn_report_kernel_page_transition(u64 generation,
+						    enum hdn_reason reason, int error) { }
+static inline void hdn_report_control_flow_failure(unsigned long kind) { }
 
 static inline void hdn_attach_proc_ip(const struct sock *sk)
 {

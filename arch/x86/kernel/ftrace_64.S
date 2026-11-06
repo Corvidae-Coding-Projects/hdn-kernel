@@ -12,6 +12,7 @@
 #include <asm/nospec-branch.h>
 #include <asm/unwind_hints.h>
 #include <asm/frame.h>
+#include <asm/hdn_rap.h>
 
 	.code64
 	.section .text, "ax"
@@ -132,14 +133,16 @@
 	.endm
 
 SYM_TYPED_FUNC_START(ftrace_stub)
+	HDN_TYPED_FUNC_ENTER ftrace_stub
 	CALL_DEPTH_ACCOUNT
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(ftrace_stub)
 
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
 SYM_TYPED_FUNC_START(ftrace_stub_graph)
+	HDN_TYPED_FUNC_ENTER ftrace_stub_graph
 	CALL_DEPTH_ACCOUNT
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(ftrace_stub_graph)
 #endif
 
@@ -147,13 +150,15 @@ SYM_FUNC_END(ftrace_stub_graph)
 
 SYM_FUNC_START(__fentry__)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER __fentry__
 	CALL_DEPTH_ACCOUNT
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(__fentry__)
 EXPORT_SYMBOL(__fentry__)
 
 SYM_FUNC_START(ftrace_caller)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER ftrace_caller
 	/* save_mcount_regs fills in first two parameters */
 	save_mcount_regs
 
@@ -177,12 +182,25 @@ SYM_INNER_LABEL(ftrace_caller_op_ptr, SYM_L_GLOBAL)
 	/* Account for the function call below */
 	CALL_DEPTH_ACCOUNT
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	leaq ftrace_call+5(%rip), %r10
+	.pushsection .hdn.rap.sites, "a", @progbits
+	.balign 8
+	.quad ftrace_call+5, 0
+	.popsection
+#endif
 SYM_INNER_LABEL(ftrace_call, SYM_L_GLOBAL)
 	ANNOTATE_NOENDBR
 	call ftrace_stub
 
 	/* Handlers can change the RIP */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	leaq MCOUNT_REG_SIZE(%rsp), %rdi
+	movq RIP(%rsp), %rsi
+	HDN_C_CALL hdn_rap_trace_retarget
+#else
 	movq RIP(%rsp), %rax
+#endif
 	movq %rax, MCOUNT_REG_SIZE(%rsp)
 
 	restore_mcount_regs
@@ -194,7 +212,7 @@ SYM_INNER_LABEL(ftrace_call, SYM_L_GLOBAL)
 	 */
 SYM_INNER_LABEL(ftrace_caller_end, SYM_L_GLOBAL)
 	ANNOTATE_NOENDBR
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(ftrace_caller);
 STACK_FRAME_NON_STANDARD_FP(ftrace_caller)
 
@@ -202,6 +220,15 @@ SYM_FUNC_START(ftrace_regs_caller)
 	ANNOTATE_NOENDBR
 	/* Save the current flags before any operations that can change them */
 	pushfq
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	leaq .Lhdn_ftrace_regs_entry(%rip), %r11
+	call __hdn_rap_enter_flags
+.Lhdn_ftrace_regs_entry:
+	.pushsection .discard.hdn_rap.functions, "", @progbits
+	.balign 8
+	.quad ftrace_regs_caller, 5, 1
+	.popsection
+#endif
 
 	/* added 8 bytes to save flags */
 	save_mcount_regs 8
@@ -242,6 +269,13 @@ SYM_INNER_LABEL(ftrace_regs_caller_op_ptr, SYM_L_GLOBAL)
 	/* Account for the function call below */
 	CALL_DEPTH_ACCOUNT
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	leaq ftrace_regs_call+5(%rip), %r10
+	.pushsection .hdn.rap.sites, "a", @progbits
+	.balign 8
+	.quad ftrace_regs_call+5, 0
+	.popsection
+#endif
 SYM_INNER_LABEL(ftrace_regs_call, SYM_L_GLOBAL)
 	ANNOTATE_NOENDBR
 	call ftrace_stub
@@ -251,7 +285,13 @@ SYM_INNER_LABEL(ftrace_regs_call, SYM_L_GLOBAL)
 	movq %rax, MCOUNT_REG_SIZE(%rsp)
 
 	/* Handlers can change the RIP */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	leaq MCOUNT_REG_SIZE+8(%rsp), %rdi
+	movq RIP(%rsp), %rsi
+	HDN_C_CALL hdn_rap_trace_retarget
+#else
 	movq RIP(%rsp), %rax
+#endif
 	movq %rax, MCOUNT_REG_SIZE+8(%rsp)
 
 	/* restore the rest of pt_regs */
@@ -283,9 +323,27 @@ SYM_INNER_LABEL(ftrace_regs_caller_jmp, SYM_L_GLOBAL)
 	 */
 SYM_INNER_LABEL(ftrace_regs_caller_end, SYM_L_GLOBAL)
 	ANNOTATE_NOENDBR
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 1:
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	leaq MCOUNT_REG_SIZE+8(%rsp), %rdi
+	movq ORIG_RAX(%rsp), %rsi
+	HDN_C_CALL hdn_rap_bpf_trace_handoff
+	movq %rax, %r11
+	testq %rdx, %rdx
+	jz .Lhdn_ftrace_direct_call
+	/* The result carries the immutable fentry continuation for JMP entry. */
+	movq %rdx, %r10
+	restore_mcount_regs
+	popfq
+	leaq 8(%rsp), %rsp
+	jmp __hdn_rap_transfer
+.Lhdn_ftrace_direct_call:
+	restore_mcount_regs
+	popfq
+	jmp __hdn_rap_transfer
+#else
 	testb	$1, %al
 	jz	2f
 	andq $0xfffffffffffffffe, %rax
@@ -318,25 +376,32 @@ SYM_INNER_LABEL(ftrace_regs_caller_end, SYM_L_GLOBAL)
 	ALTERNATIVE __stringify(RET), \
 		    __stringify(ANNOTATE_UNRET_SAFE; ret; int3), \
 		    X86_FEATURE_CALL_DEPTH
+#endif
 
 SYM_FUNC_END(ftrace_regs_caller)
 STACK_FRAME_NON_STANDARD_FP(ftrace_regs_caller)
 
 SYM_FUNC_START(ftrace_stub_direct_tramp)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER ftrace_stub_direct_tramp
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+SYM_INNER_LABEL(__hdn_ftrace_stub_direct_body, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
+#endif
 	CALL_DEPTH_ACCOUNT
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(ftrace_stub_direct_tramp)
 
 #else /* ! CONFIG_DYNAMIC_FTRACE */
 
 SYM_FUNC_START(__fentry__)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER __fentry__, 2
 	CALL_DEPTH_ACCOUNT
 
 	cmpq $ftrace_stub, ftrace_trace_function
 	jnz trace
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 trace:
 	/* save_mcount_regs fills in first two parameters */
@@ -348,11 +413,19 @@ trace:
 	 * ip and parent ip are used and the list function is called when
 	 * function tracing is enabled.
 	 */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	HDN_C_CALL hdn_ftrace_dispatch
+#else
 	movq ftrace_trace_function, %r8
 	CALL_NOSPEC r8
+#endif
 	restore_mcount_regs
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	HDN_ENTRY_ROOT_RETURN
+#else
 	jmp ftrace_stub
+#endif
 SYM_FUNC_END(__fentry__)
 EXPORT_SYMBOL(__fentry__)
 STACK_FRAME_NON_STANDARD_FP(__fentry__)
@@ -360,7 +433,11 @@ STACK_FRAME_NON_STANDARD_FP(__fentry__)
 #endif /* CONFIG_DYNAMIC_FTRACE */
 
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+SYM_FUNC_START(return_to_handler)
+#else
 SYM_CODE_START(return_to_handler)
+#endif
 	UNWIND_HINT_UNDEFINED
 	ANNOTATE_NOENDBR
 
@@ -380,8 +457,16 @@ SYM_CODE_START(return_to_handler)
 	movq %rdi, RSP(%rsp)
 	movq %rsp, %rdi
 
-	call ftrace_return_to_handler
+	HDN_C_CALL ftrace_return_to_handler
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	movq %rax, %r11
+	movq RDX(%rsp), %rdx
+	movq RAX(%rsp), %rax
+	/* Leave the consumed return slot for the closed hook adapter. */
+	addq $(FRAME_SIZE), %rsp
+	jmp __hdn_rap_graph_return
+#else
 	movq %rax, %rdi
 	movq RDX(%rsp), %rdx
 	movq RAX(%rsp), %rax
@@ -401,5 +486,15 @@ SYM_CODE_START(return_to_handler)
 	ALTERNATIVE __stringify(RET), \
 		    __stringify(ANNOTATE_UNRET_SAFE; ret; int3), \
 		    X86_FEATURE_CALL_DEPTH
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+SYM_FUNC_END(return_to_handler)
+_ASM_NOKPROBE(return_to_handler)
+	.pushsection .discard.hdn_rap.functions, "", @progbits
+	.balign 8
+	.quad return_to_handler, 4, 0
+	.popsection
+#else
 SYM_CODE_END(return_to_handler)
+#endif
 #endif

@@ -27,6 +27,7 @@
  * struct p9_rdir - readdir accounting
  * @head: start offset of current dirread buffer
  * @tail: end offset of current dirread buffer
+ * @capacity: allocated extent of buf, fixed for the buffer lifetime
  * @buf: dirread buffer
  *
  * private structure for keeping track of readdir
@@ -36,7 +37,8 @@
 struct p9_rdir {
 	int head;
 	int tail;
-	uint8_t buf[];
+	size_t capacity;
+	uint8_t buf[] __counted_by(capacity);
 };
 
 /**
@@ -68,10 +70,20 @@ static inline int dt_type(struct p9_wstat *mistat)
 static struct p9_rdir *v9fs_alloc_rdir_buf(struct file *filp, int buflen)
 {
 	struct p9_fid *fid = filp->private_data;
+	struct p9_rdir *rdir = fid->rdir;
 
-	if (!fid->rdir)
-		fid->rdir = kzalloc(sizeof(struct p9_rdir) + buflen, GFP_KERNEL);
-	return fid->rdir;
+	if (buflen <= 0)
+		return NULL;
+	if (!rdir) {
+		rdir = kzalloc(struct_size(rdir, buf, buflen), GFP_KERNEL);
+		if (!rdir)
+			return NULL;
+		rdir->capacity = buflen;
+		fid->rdir = rdir;
+	}
+	if (buflen > rdir->capacity)
+		return NULL;
+	return rdir;
 }
 
 /**

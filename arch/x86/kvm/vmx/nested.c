@@ -5847,7 +5847,7 @@ static void set_current_vmptr(struct vcpu_vmx *vmx, gpa_t vmptr)
 	if (enable_shadow_vmcs) {
 		secondary_exec_controls_setbit(vmx, SECONDARY_EXEC_SHADOW_VMCS);
 		vmcs_write64(VMCS_LINK_POINTER,
-			     __pa(vmx->vmcs01.shadow_vmcs));
+			     vmcs_physical_address(vmx->vmcs01.shadow_vmcs));
 		vmx->nested.need_vmcs12_to_shadow_sync = true;
 	}
 	vmx->nested.dirty_vmcs12 = true;

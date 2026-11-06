@@ -144,7 +144,7 @@ struct io_rsrc_node *io_rsrc_node_alloc(struct io_ring_ctx *ctx, int type)
 	node = io_cache_alloc(&ctx->node_cache, GFP_KERNEL);
 	if (node) {
 		node->type = type;
-		node->refs = 1;
+		refcount_set(&node->refs, 1);
 		node->tag = 0;
 		node->file_ptr = 0;
 	}
@@ -1111,7 +1111,7 @@ inline struct io_rsrc_node *io_find_buf_node(struct io_kiocb *req,
 	io_ring_submit_lock(ctx, issue_flags);
 	node = io_rsrc_node_lookup(&ctx->buf_table, req->buf_index);
 	if (node) {
-		node->refs++;
+		io_get_rsrc_node(ctx, node);
 		req->buf_node = node;
 		io_ring_submit_unlock(ctx, issue_flags);
 		return node;
@@ -1193,7 +1193,7 @@ static int io_clone_buffers(struct io_ring_ctx *ctx, struct io_ring_ctx *src_ctx
 
 		if (node) {
 			data.nodes[i] = node;
-			node->refs++;
+			io_get_rsrc_node(ctx, node);
 		}
 	}
 
@@ -1226,7 +1226,7 @@ static int io_clone_buffers(struct io_ring_ctx *ctx, struct io_ring_ctx *src_ctx
 
 		if (node) {
 			data.nodes[i] = node;
-			node->refs++;
+			io_get_rsrc_node(ctx, node);
 		}
 	}
 

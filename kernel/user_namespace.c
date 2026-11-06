@@ -3,6 +3,7 @@
 #include <linux/export.h>
 #include <linux/nsproxy.h>
 #include <linux/slab.h>
+#include <linux/hdn_alloc.h>
 #include <linux/sched/signal.h>
 #include <linux/user_namespace.h>
 #include <linux/proc_ns.h>
@@ -1414,7 +1415,8 @@ const struct proc_ns_operations userns_operations = {
 
 static __init int user_namespaces_init(void)
 {
-	user_ns_cachep = KMEM_CACHE(user_namespace, SLAB_PANIC | SLAB_ACCOUNT);
+	user_ns_cachep = KMEM_CACHE(user_namespace, SLAB_PANIC | SLAB_ACCOUNT | SLAB_HDN_DOMAIN);
+	hdn_cache_domain(user_ns_cachep, HDN_ALLOC_USER_NAMESPACE);
 	ns_tree_add(&init_user_ns);
 	return 0;
 }

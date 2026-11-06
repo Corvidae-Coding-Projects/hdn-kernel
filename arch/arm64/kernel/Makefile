@@ -36,6 +36,8 @@ obj-y			:= debug-monitors.o entry.o irq.o fpsimd.o		\
 			   syscall.o proton-pack.o idle.o patching.o pi/	\
 			   rsi.o jump_label.o
 
+obj-$(CONFIG_HDN_ARCH_CONTRACT)		+= hdn-contract.o
+CFLAGS_hdn-contract.o			+= -Werror=switch
 obj-$(CONFIG_COMPAT)			+= sys32.o signal32.o			\
 					   sys_compat.o
 obj-$(CONFIG_COMPAT)			+= sigreturn32.o

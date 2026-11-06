@@ -10,6 +10,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <asm/frame.h>
 #include "glue_helper-asm-avx2.S"
 
@@ -551,6 +552,7 @@
 	transpose_4x4(x0, x1, x2, x3, t0, t1, t2)
 
 SYM_FUNC_START_LOCAL(__serpent_enc_blk16)
+	HDN_REGS_FUNC __serpent_enc_blk16
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2: plaintext
@@ -600,10 +602,12 @@ SYM_FUNC_START_LOCAL(__serpent_enc_blk16)
 	write_blocks(RA1, RB1, RC1, RD1, RK0, RK1, RK2);
 	write_blocks(RA2, RB2, RC2, RD2, RK0, RK1, RK2);
 
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __serpent_enc_blk16
 SYM_FUNC_END(__serpent_enc_blk16)
 
 SYM_FUNC_START_LOCAL(__serpent_dec_blk16)
+	HDN_REGS_FUNC __serpent_dec_blk16
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2: ciphertext
@@ -653,10 +657,12 @@ SYM_FUNC_START_LOCAL(__serpent_dec_blk16)
 	write_blocks(RC1, RD1, RB1, RE1, RK0, RK1, RK2);
 	write_blocks(RC2, RD2, RB2, RE2, RK0, RK1, RK2);
 
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __serpent_dec_blk16
 SYM_FUNC_END(__serpent_dec_blk16)
 
 SYM_FUNC_START(serpent_ecb_enc_16way)
+	HDN_ASM_FUNCTION serpent_ecb_enc_16way
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
@@ -668,17 +674,19 @@ SYM_FUNC_START(serpent_ecb_enc_16way)
 
 	load_16way(%rdx, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
-	call __serpent_enc_blk16;
+	HDN_REGS_CALL __serpent_enc_blk16;
 
 	store_16way(%rsi, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
 	vzeroupper;
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END serpent_ecb_enc_16way
 SYM_FUNC_END(serpent_ecb_enc_16way)
 
 SYM_FUNC_START(serpent_ecb_dec_16way)
+	HDN_ASM_FUNCTION serpent_ecb_dec_16way
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
@@ -690,17 +698,19 @@ SYM_FUNC_START(serpent_ecb_dec_16way)
 
 	load_16way(%rdx, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
-	call __serpent_dec_blk16;
+	HDN_REGS_CALL __serpent_dec_blk16;
 
 	store_16way(%rsi, RC1, RD1, RB1, RE1, RC2, RD2, RB2, RE2);
 
 	vzeroupper;
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END serpent_ecb_dec_16way
 SYM_FUNC_END(serpent_ecb_dec_16way)
 
 SYM_FUNC_START(serpent_cbc_dec_16way)
+	HDN_ASM_FUNCTION serpent_cbc_dec_16way
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
@@ -712,7 +722,7 @@ SYM_FUNC_START(serpent_cbc_dec_16way)
 
 	load_16way(%rdx, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
-	call __serpent_dec_blk16;
+	HDN_REGS_CALL __serpent_dec_blk16;
 
 	store_cbc_16way(%rdx, %rsi, RC1, RD1, RB1, RE1, RC2, RD2, RB2, RE2,
 			RK0);
@@ -720,5 +730,6 @@ SYM_FUNC_START(serpent_cbc_dec_16way)
 	vzeroupper;
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END serpent_cbc_dec_16way
 SYM_FUNC_END(serpent_cbc_dec_16way)

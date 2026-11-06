@@ -8,6 +8,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 #define STATE0	%xmm0
 #define STATE1	%xmm1
@@ -142,6 +143,7 @@
  *			    const u8 iv[AEGIS128_NONCE_SIZE]);
  */
 SYM_FUNC_START(aegis128_aesni_init)
+	HDN_ASM_FUNCTION aegis128_aesni_init
 	.set STATEP, %rdi
 	.set KEYP, %rsi
 	.set IVP, %rdx
@@ -180,7 +182,8 @@ SYM_FUNC_START(aegis128_aesni_init)
 	movdqu STATE2, 0x20(STATEP)
 	movdqu STATE3, 0x30(STATEP)
 	movdqu STATE4, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END aegis128_aesni_init
 SYM_FUNC_END(aegis128_aesni_init)
 
 /*
@@ -190,6 +193,7 @@ SYM_FUNC_END(aegis128_aesni_init)
  * len must be a multiple of 16.
  */
 SYM_FUNC_START(aegis128_aesni_ad)
+	HDN_ASM_FUNCTION aegis128_aesni_ad
 	.set STATEP, %rdi
 	.set SRC, %rsi
 	.set LEN, %edx
@@ -246,7 +250,7 @@ SYM_FUNC_START(aegis128_aesni_ad)
 	movdqu STATE2, 0x20(STATEP)
 	movdqu STATE3, 0x30(STATEP)
 	movdqu STATE4, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
 
 .Lad_out_1:
 	movdqu STATE4, 0x00(STATEP)
@@ -254,7 +258,7 @@ SYM_FUNC_START(aegis128_aesni_ad)
 	movdqu STATE1, 0x20(STATEP)
 	movdqu STATE2, 0x30(STATEP)
 	movdqu STATE3, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
 
 .Lad_out_2:
 	movdqu STATE3, 0x00(STATEP)
@@ -262,7 +266,7 @@ SYM_FUNC_START(aegis128_aesni_ad)
 	movdqu STATE0, 0x20(STATEP)
 	movdqu STATE1, 0x30(STATEP)
 	movdqu STATE2, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
 
 .Lad_out_3:
 	movdqu STATE2, 0x00(STATEP)
@@ -270,7 +274,7 @@ SYM_FUNC_START(aegis128_aesni_ad)
 	movdqu STATE4, 0x20(STATEP)
 	movdqu STATE0, 0x30(STATEP)
 	movdqu STATE1, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
 
 .Lad_out_4:
 	movdqu STATE1, 0x00(STATEP)
@@ -279,7 +283,8 @@ SYM_FUNC_START(aegis128_aesni_ad)
 	movdqu STATE4, 0x30(STATEP)
 	movdqu STATE0, 0x40(STATEP)
 .Lad_out:
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END aegis128_aesni_ad
 SYM_FUNC_END(aegis128_aesni_ad)
 
 .macro encrypt_block s0 s1 s2 s3 s4 i
@@ -306,6 +311,7 @@ SYM_FUNC_END(aegis128_aesni_ad)
  * len must be nonzero and a multiple of 16.
  */
 SYM_FUNC_START(aegis128_aesni_enc)
+	HDN_ASM_FUNCTION aegis128_aesni_enc
 	.set STATEP, %rdi
 	.set SRC, %rsi
 	.set DST, %rdx
@@ -337,7 +343,7 @@ SYM_FUNC_START(aegis128_aesni_enc)
 	movdqu STATE1, 0x20(STATEP)
 	movdqu STATE2, 0x30(STATEP)
 	movdqu STATE3, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
 
 .Lenc_out_1:
 	movdqu STATE3, 0x00(STATEP)
@@ -345,7 +351,7 @@ SYM_FUNC_START(aegis128_aesni_enc)
 	movdqu STATE0, 0x20(STATEP)
 	movdqu STATE1, 0x30(STATEP)
 	movdqu STATE2, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
 
 .Lenc_out_2:
 	movdqu STATE2, 0x00(STATEP)
@@ -353,7 +359,7 @@ SYM_FUNC_START(aegis128_aesni_enc)
 	movdqu STATE4, 0x20(STATEP)
 	movdqu STATE0, 0x30(STATEP)
 	movdqu STATE1, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
 
 .Lenc_out_3:
 	movdqu STATE1, 0x00(STATEP)
@@ -361,7 +367,7 @@ SYM_FUNC_START(aegis128_aesni_enc)
 	movdqu STATE3, 0x20(STATEP)
 	movdqu STATE4, 0x30(STATEP)
 	movdqu STATE0, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
 
 .Lenc_out_4:
 	movdqu STATE0, 0x00(STATEP)
@@ -370,7 +376,8 @@ SYM_FUNC_START(aegis128_aesni_enc)
 	movdqu STATE3, 0x30(STATEP)
 	movdqu STATE4, 0x40(STATEP)
 .Lenc_out:
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END aegis128_aesni_enc
 SYM_FUNC_END(aegis128_aesni_enc)
 
 /*
@@ -378,6 +385,7 @@ SYM_FUNC_END(aegis128_aesni_enc)
  *				u8 *dst, unsigned int len);
  */
 SYM_FUNC_START(aegis128_aesni_enc_tail)
+	HDN_ASM_FUNCTION aegis128_aesni_enc_tail
 	.set STATEP, %rdi
 	.set SRC, %rsi
 	.set DST, %rdx
@@ -413,7 +421,8 @@ SYM_FUNC_START(aegis128_aesni_enc_tail)
 	movdqu STATE1, 0x20(STATEP)
 	movdqu STATE2, 0x30(STATEP)
 	movdqu STATE3, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END aegis128_aesni_enc_tail
 SYM_FUNC_END(aegis128_aesni_enc_tail)
 
 .macro decrypt_block s0 s1 s2 s3 s4 i
@@ -439,6 +448,7 @@ SYM_FUNC_END(aegis128_aesni_enc_tail)
  * len must be nonzero and a multiple of 16.
  */
 SYM_FUNC_START(aegis128_aesni_dec)
+	HDN_ASM_FUNCTION aegis128_aesni_dec
 	.set STATEP, %rdi
 	.set SRC, %rsi
 	.set DST, %rdx
@@ -470,7 +480,7 @@ SYM_FUNC_START(aegis128_aesni_dec)
 	movdqu STATE1, 0x20(STATEP)
 	movdqu STATE2, 0x30(STATEP)
 	movdqu STATE3, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
 
 .Ldec_out_1:
 	movdqu STATE3, 0x00(STATEP)
@@ -478,7 +488,7 @@ SYM_FUNC_START(aegis128_aesni_dec)
 	movdqu STATE0, 0x20(STATEP)
 	movdqu STATE1, 0x30(STATEP)
 	movdqu STATE2, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
 
 .Ldec_out_2:
 	movdqu STATE2, 0x00(STATEP)
@@ -486,7 +496,7 @@ SYM_FUNC_START(aegis128_aesni_dec)
 	movdqu STATE4, 0x20(STATEP)
 	movdqu STATE0, 0x30(STATEP)
 	movdqu STATE1, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
 
 .Ldec_out_3:
 	movdqu STATE1, 0x00(STATEP)
@@ -494,7 +504,7 @@ SYM_FUNC_START(aegis128_aesni_dec)
 	movdqu STATE3, 0x20(STATEP)
 	movdqu STATE4, 0x30(STATEP)
 	movdqu STATE0, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
 
 .Ldec_out_4:
 	movdqu STATE0, 0x00(STATEP)
@@ -503,7 +513,8 @@ SYM_FUNC_START(aegis128_aesni_dec)
 	movdqu STATE3, 0x30(STATEP)
 	movdqu STATE4, 0x40(STATEP)
 .Ldec_out:
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END aegis128_aesni_dec
 SYM_FUNC_END(aegis128_aesni_dec)
 
 /*
@@ -511,6 +522,7 @@ SYM_FUNC_END(aegis128_aesni_dec)
  *				u8 *dst, unsigned int len);
  */
 SYM_FUNC_START(aegis128_aesni_dec_tail)
+	HDN_ASM_FUNCTION aegis128_aesni_dec_tail
 	.set STATEP, %rdi
 	.set SRC, %rsi
 	.set DST, %rdx
@@ -551,7 +563,8 @@ SYM_FUNC_START(aegis128_aesni_dec_tail)
 	movdqu STATE1, 0x20(STATEP)
 	movdqu STATE2, 0x30(STATEP)
 	movdqu STATE3, 0x40(STATEP)
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END aegis128_aesni_dec_tail
 SYM_FUNC_END(aegis128_aesni_dec_tail)
 
 /*
@@ -560,6 +573,7 @@ SYM_FUNC_END(aegis128_aesni_dec_tail)
  *			     unsigned int assoclen, unsigned int cryptlen);
  */
 SYM_FUNC_START(aegis128_aesni_final)
+	HDN_ASM_FUNCTION aegis128_aesni_final
 	.set STATEP, %rdi
 	.set TAG_XOR, %rsi
 	.set ASSOCLEN, %edx
@@ -598,5 +612,6 @@ SYM_FUNC_START(aegis128_aesni_final)
 	pxor STATE4, MSG
 
 	movdqu MSG, (TAG_XOR)
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END aegis128_aesni_final
 SYM_FUNC_END(aegis128_aesni_final)

@@ -20,6 +20,7 @@
 #include <asm/suspend.h>
 #include <asm/tlbflush.h>
 #include <asm/tdx.h>
+#include <asm/hdn_stack_mm.h>
 
 #ifdef CONFIG_XEN
 #include <xen/interface/xen.h>

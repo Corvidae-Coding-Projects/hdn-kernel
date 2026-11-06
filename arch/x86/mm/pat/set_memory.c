@@ -4,6 +4,10 @@
  * Thanks to Ben LaHaise for precious feedback.
  */
 #include <linux/highmem.h>
+#include <linux/hardening.h>
+#include <linux/hdn_kernexec.h>
+#include <linux/hdn_execmem.h>
+#include <asm/hdn_gdt.h>
 #include <linux/memblock.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -661,7 +665,48 @@ static inline pgprot_t static_protections(pgprot_t prot, unsigned long start,
 /*
  * Validate strict W^X semantics.
  */
-static inline pgprot_t verify_rwx(pgprot_t old, pgprot_t new, unsigned long start,
+bool kernel_wx_enforced(void)
+{
+	return IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNEL_WX) &&
+	       (__supported_pte_mask & _PAGE_NX);
+}
+
+#ifdef CONFIG_SECURITY_HARDENING_KERNEL_WX
+bool hdn_kernel_sealed_data_page(unsigned long pfn)
+{
+	return protect_rodata(pfn, pfn) || hdn_gdt_protected_pfn(pfn, pfn) ||
+	       hdn_idt_protected_pfn(pfn, pfn) || hdn_pt_protected_pfn(pfn, pfn);
+}
+
+int hdn_kernel_mapping_check(unsigned long pfn, unsigned long nr_pages,
+			     pgprot_t prot)
+{
+	pgprotval_t flags = pgprot_val(prot);
+	unsigned long last, text_start, text_last;
+
+	if (!(flags & _PAGE_PRESENT) || !(flags & _PAGE_RW))
+		return 0;
+	if (!nr_pages || nr_pages - 1 > ULONG_MAX - pfn)
+		return -EINVAL;
+	if (kernel_wx_enforced() && !(flags & _PAGE_NX))
+		return -EACCES;
+	if (hdn_gdt_protected_pfn(pfn, pfn + nr_pages - 1) ||
+	    hdn_idt_protected_pfn(pfn, pfn + nr_pages - 1))
+		return -EPERM;
+	if (!READ_ONCE(kernel_set_to_readonly))
+		return 0;
+
+	last = pfn + nr_pages - 1;
+	text_start = PFN_DOWN(__pa_symbol(_text));
+	text_last = PFN_UP(__pa_symbol(_etext)) - 1;
+	/* Do not include the text/rodata gaps returned to the page allocator. */
+	if (overlaps(pfn, last, text_start, text_last) || protect_rodata(pfn, last))
+		return -EPERM;
+	return 0;
+}
+#endif
+
+static inline int verify_rwx(pgprot_t old, pgprot_t new, unsigned long start,
 				  unsigned long pfn, unsigned long npg,
 				  bool nx, bool rw)
 {
@@ -673,21 +718,29 @@ static inline pgprot_t verify_rwx(pgprot_t old, pgprot_t new, unsigned long star
 	 * detection and enforcement there.
 	 */
 	if (IS_ENABLED(CONFIG_X86_32))
-		return new;
+		return 0;
 
 	/* Only verify when NX is supported: */
 	if (!(__supported_pte_mask & _PAGE_NX))
-		return new;
+		return 0;
 
-	if (!((pgprot_val(old) ^ pgprot_val(new)) & (_PAGE_RW | _PAGE_NX)))
-		return new;
+	/* Non-present translations cannot expose writable executable storage. */
+	if (!(pgprot_val(new) & _PAGE_PRESENT))
+		return 0;
+
+	if (!((pgprot_val(old) ^ pgprot_val(new)) &
+	      (_PAGE_RW | _PAGE_NX | _PAGE_PRESENT)))
+		return 0;
 
 	if ((pgprot_val(new) & (_PAGE_RW | _PAGE_NX)) != _PAGE_RW)
-		return new;
+		return 0;
 
 	/* Non-leaf translation entries can disable writing or execution. */
 	if (!rw || nx)
-		return new;
+		return 0;
+
+	if (kernel_wx_enforced())
+		return -EACCES;
 
 	end = start + npg * PAGE_SIZE - 1;
 	WARN_ONCE(1, "CPA detected W^X violation: %016llx -> %016llx range: 0x%016lx - 0x%016lx PFN %lx\n",
@@ -695,12 +748,8 @@ static inline pgprot_t verify_rwx(pgprot_t old, pgprot_t new, unsigned long star
 		  (unsigned long long)pgprot_val(new),
 		  start, end, pfn);
 
-	/*
-	 * For now, allow all permission change attempts by returning the
-	 * attempted permissions.  This can 'return old' to actively
-	 * refuse the permission change at a later time.
-	 */
-	return new;
+	/* Preserve upstream diagnostic-only behavior outside the HDN contract. */
+	return 0;
 }
 
 /*
@@ -878,10 +927,22 @@ EXPORT_SYMBOL_GPL(slow_virt_to_phys);
 /*
  * Set the new pmd in all the pgds we know about:
  */
-static void __set_pmd_pte(pte_t *kpte, unsigned long address, pte_t pte)
+static void __set_pmd_pte(pte_t *kpte, unsigned long address, pte_t pte,
+			  unsigned int level)
 {
-	/* change init_mm */
+	/* CPA represents large entries as pte_t. Preserve the actual table
+	 * level for the protected mutation API rather than relabeling a PUD
+	 * or PMD page as a leaf PTE page. */
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	if (level == PG_LEVEL_1G)
+		set_pud((pud_t *)kpte, __pud(pte_val(pte)));
+	else if (level == PG_LEVEL_2M)
+		set_pmd((pmd_t *)kpte, __pmd(pte_val(pte)));
+	else
+		BUG();
+#else
 	set_pte_atomic(kpte, pte);
+#endif
 #ifdef CONFIG_X86_32
 	{
 		struct page *page;
@@ -924,6 +985,7 @@ static int __should_split_large_page(pte_t *kpte, unsigned long address,
 {
 	unsigned long numpages, pmask, psize, lpaddr, pfn, old_pfn;
 	pgprot_t old_prot, new_prot, req_prot, chk_prot;
+	int ret;
 	pte_t new_pte, *tmp;
 	enum pg_level level;
 	bool nx, rw;
@@ -991,6 +1053,11 @@ static int __should_split_large_page(pte_t *kpte, unsigned long address,
 	 */
 	pfn = old_pfn + ((address & (psize - 1)) >> PAGE_SHIFT);
 	cpa->pfn = pfn;
+	ret = hdn_kernel_mapping_check(pfn, cpa->numpages, req_prot);
+	if (!ret)
+		ret = hdn_execmem_mapping(address, pfn, cpa->numpages, req_prot, false);
+	if (ret)
+		return ret;
 
 	/*
 	 * Calculate the large page base address and the number of 4K pages
@@ -1043,8 +1110,9 @@ static int __should_split_large_page(pte_t *kpte, unsigned long address,
 	new_prot = static_protections(req_prot, lpaddr, old_pfn, numpages,
 				      psize, CPA_DETECT);
 
-	new_prot = verify_rwx(old_prot, new_prot, lpaddr, old_pfn, numpages,
-			      nx, rw);
+	ret = verify_rwx(old_prot, new_prot, lpaddr, old_pfn, numpages, nx, rw);
+	if (ret)
+		return ret;
 
 	/*
 	 * If there is a conflict, split the large page.
@@ -1060,7 +1128,7 @@ static int __should_split_large_page(pte_t *kpte, unsigned long address,
 
 	/* All checks passed. Update the large page mapping. */
 	new_pte = pfn_pte(old_pfn, new_prot);
-	__set_pmd_pte(kpte, address, new_pte);
+	__set_pmd_pte(kpte, address, new_pte, level);
 	cpa->flags |= CPA_FLUSHTLB;
 	cpa_inc_lp_preserved(level);
 	return 0;
@@ -1114,7 +1182,10 @@ static void split_set_pte(struct cpa_data *cpa, pte_t *pte, unsigned long pfn,
 	else
 		pr_warn_once("CPA: Cannot fixup static protections for PUD split\n");
 set:
-	set_pte(pte, pfn_pte(pfn, ref_prot));
+	if (size == PMD_SIZE)
+		set_pmd((pmd_t *)pte, pfn_pmd(pfn, ref_prot));
+	else
+		set_pte(pte, pfn_pte(pfn, ref_prot));
 }
 
 static int
@@ -1197,7 +1268,7 @@ __split_large_page(struct cpa_data *cpa, pte_t *kpte, unsigned long address,
 	 * pagetable protections, the actual ptes set above control the
 	 * primary protection behavior:
 	 */
-	__set_pmd_pte(kpte, address, mk_pte(base, __pgprot(_KERNPG_TABLE)));
+	__set_pmd_pte(kpte, address, mk_pte(base, __pgprot(_KERNPG_TABLE)), level);
 
 	/*
 	 * Do a global flush tlb after splitting the large page
@@ -1230,14 +1301,14 @@ static int split_large_page(struct cpa_data *cpa, pte_t *kpte,
 
 	if (!debug_pagealloc_enabled())
 		spin_unlock(&cpa_lock);
-	base = alloc_pages(GFP_KERNEL, 0);
+	base = hdn_pt_alloc(GFP_KERNEL | __GFP_ZERO, 0, true);
 	if (!debug_pagealloc_enabled())
 		spin_lock(&cpa_lock);
 	if (!base)
 		return -ENOMEM;
 
 	if (__split_large_page(cpa, kpte, address, base))
-		__free_page(base);
+		hdn_pt_free_address((unsigned long)page_address(base), 0);
 
 	return 0;
 }
@@ -1254,6 +1325,8 @@ static int collapse_pmd_page(pmd_t *pmd, unsigned long addr,
 	if (!cpu_feature_enabled(X86_FEATURE_PSE))
 		return 0;
 
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE) && PageReserved(pmd_page(*pmd)))
+		return 0;
 	addr &= PMD_MASK;
 	pte = pte_offset_kernel(pmd, addr);
 	first = *pte;
@@ -1322,6 +1395,8 @@ static int collapse_pud_page(pud_t *pud, unsigned long addr,
 	if (!direct_gbpages)
 		return 0;
 
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE) && PageReserved(pud_page(*pud)))
+		return 0;
 	addr &= PUD_MASK;
 	pmd = pmd_offset(pud, addr);
 	first = *pmd;
@@ -1408,7 +1483,7 @@ static bool try_to_free_pte_page(pte_t *pte)
 		if (!pte_none(pte[i]))
 			return false;
 
-	free_page((unsigned long)pte);
+	hdn_pt_free_address((unsigned long)pte, 0);
 	return true;
 }
 
@@ -1420,7 +1495,7 @@ static bool try_to_free_pmd_page(pmd_t *pmd)
 		if (!pmd_none(pmd[i]))
 			return false;
 
-	free_page((unsigned long)pmd);
+	hdn_pt_free_address((unsigned long)pmd, 0);
 	return true;
 }
 
@@ -1539,7 +1614,7 @@ static void unmap_pud_range(p4d_t *p4d, unsigned long start, unsigned long end)
 
 static int alloc_pte_page(pmd_t *pmd)
 {
-	pte_t *pte = (pte_t *)get_zeroed_page(GFP_KERNEL);
+	pte_t *pte = (pte_t *)hdn_pt_alloc_address(GFP_KERNEL | __GFP_ZERO, 0, true);
 	if (!pte)
 		return -1;
 
@@ -1549,7 +1624,7 @@ static int alloc_pte_page(pmd_t *pmd)
 
 static int alloc_pmd_page(pud_t *pud)
 {
-	pmd_t *pmd = (pmd_t *)get_zeroed_page(GFP_KERNEL);
+	pmd_t *pmd = (pmd_t *)hdn_pt_alloc_address(GFP_KERNEL | __GFP_ZERO, 0, true);
 	if (!pmd)
 		return -1;
 
@@ -1740,10 +1815,18 @@ static int populate_pgd(struct cpa_data *cpa, unsigned long addr)
 	pgd_t *pgd_entry;
 	long ret;
 
+	pgprot_val(pgprot) &= ~pgprot_val(cpa->mask_clr);
+	pgprot_val(pgprot) |= pgprot_val(cpa->mask_set);
+	ret = hdn_kernel_mapping_check(cpa->pfn, cpa->numpages, pgprot);
+	if (!ret)
+		ret = hdn_execmem_mapping(addr, cpa->pfn, cpa->numpages, pgprot, true);
+	if (ret)
+		return ret;
+
 	pgd_entry = cpa->pgd + pgd_index(addr);
 
 	if (pgd_none(*pgd_entry)) {
-		p4d = (p4d_t *)get_zeroed_page(GFP_KERNEL);
+		p4d = (p4d_t *)hdn_pt_alloc_address(GFP_KERNEL | __GFP_ZERO, 0, true);
 		if (!p4d)
 			return -1;
 
@@ -1755,15 +1838,12 @@ static int populate_pgd(struct cpa_data *cpa, unsigned long addr)
 	 */
 	p4d = p4d_offset(pgd_entry, addr);
 	if (p4d_none(*p4d)) {
-		pud = (pud_t *)get_zeroed_page(GFP_KERNEL);
+		pud = (pud_t *)hdn_pt_alloc_address(GFP_KERNEL | __GFP_ZERO, 0, true);
 		if (!pud)
 			return -1;
 
 		set_p4d(p4d, __p4d(__pa(pud) | _KERNPG_TABLE));
 	}
-
-	pgprot_val(pgprot) &= ~pgprot_val(cpa->mask_clr);
-	pgprot_val(pgprot) |=  pgprot_val(cpa->mask_set);
 
 	ret = populate_pud(cpa, addr, p4d, pgprot);
 	if (ret < 0) {
@@ -1852,14 +1932,20 @@ repeat:
 
 		pgprot_val(new_prot) &= ~pgprot_val(cpa->mask_clr);
 		pgprot_val(new_prot) |= pgprot_val(cpa->mask_set);
+		err = hdn_kernel_mapping_check(pfn, 1, new_prot);
+		if (!err)
+			err = hdn_execmem_mapping(address, pfn, 1, new_prot, false);
+		if (err)
+			return err;
 
 		cpa_inc_4k_install();
 		/* Hand in lpsize = 0 to enforce the protection mechanism */
 		new_prot = static_protections(new_prot, address, pfn, 1, 0,
 					      CPA_PROTECT);
 
-		new_prot = verify_rwx(old_prot, new_prot, address, pfn, 1,
-				      nx, rw);
+		err = verify_rwx(old_prot, new_prot, address, pfn, 1, nx, rw);
+		if (err)
+			return err;
 
 		new_prot = pgprot_clear_protnone_bits(new_prot);
 
@@ -1974,7 +2060,9 @@ static int cpa_process_alias(struct cpa_data *cpa)
 		 * The high mapping range is imprecise, so ignore the
 		 * return value.
 		 */
-		__change_page_attr_set_clr(&alias_cpa, 0);
+		ret = __change_page_attr_set_clr(&alias_cpa, 0);
+		if (ret == -EACCES || ret == -EPERM)
+			return ret;
 	}
 #endif
 
@@ -2031,6 +2119,9 @@ static int __change_page_attr_set_clr(struct cpa_data *cpa, int primary)
 out:
 	/* Restore the original numpages */
 	cpa->numpages = numpages;
+	/* Never enter the event ring while holding cpa_lock or pgd_lock. */
+	if (primary && (ret == -EACCES || ret == -EPERM))
+		hdn_report_kernel_mapping_violation(ret);
 	return ret;
 }
 
@@ -2307,12 +2398,32 @@ int set_memory_ro(unsigned long addr, int numpages)
 int set_memory_rox(unsigned long addr, int numpages)
 {
 	pgprot_t clr = __pgprot(_PAGE_RW | _PAGE_DIRTY);
+	int managed, ret;
+
+	managed = hdn_execmem_seal_begin(addr, numpages);
+	if (managed < 0)
+		return managed;
+
+	/*
+	 * CPA normally updates the primary mapping before its direct-map alias.
+	 * Complete and flush write revocation first, so enabling execution does
+	 * not transiently leave the direct map writable on another CPU.
+	 */
+	if (kernel_wx_enforced()) {
+		ret = set_memory_ro(addr, numpages);
+		if (ret)
+			goto out;
+	}
 
 	if (__supported_pte_mask & _PAGE_NX)
 		clr.pgprot |= _PAGE_NX;
 
-	return change_page_attr_set_clr(&addr, numpages, __pgprot(0), clr, 0,
-					CPA_COLLAPSE, NULL);
+	ret = change_page_attr_set_clr(&addr, numpages, __pgprot(0), clr, 0,
+				       CPA_COLLAPSE, NULL);
+out:
+	if (managed)
+		hdn_execmem_seal_end(addr, ret);
+	return ret;
 }
 
 int set_memory_rw(unsigned long addr, int numpages)

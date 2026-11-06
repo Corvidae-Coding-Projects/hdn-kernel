@@ -293,6 +293,9 @@ static ssize_t kernfs_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 
 static ssize_t kernfs_fop_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 {
+	/* Check before seq_file can return data buffered by another subject. */
+	if (hdn_kernfs_hidden(kernfs_of(iocb->ki_filp)->kn))
+		return -ENOENT;
 	if (kernfs_of(iocb->ki_filp)->kn->flags & KERNFS_HAS_SEQ_SHOW)
 		return seq_read_iter(iocb, iter);
 	return kernfs_file_read_iter(iocb, iter);
@@ -315,6 +318,8 @@ static ssize_t kernfs_fop_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	const struct kernfs_ops *ops;
 	char *buf;
 
+	if (hdn_kernfs_hidden(of->kn))
+		return -ENOENT;
 	if (of->atomic_write_len) {
 		if (len > of->atomic_write_len)
 			return -E2BIG;
@@ -390,6 +395,8 @@ static vm_fault_t kernfs_vma_fault(struct vm_fault *vmf)
 	struct kernfs_open_file *of = kernfs_of(file);
 	vm_fault_t ret;
 
+	if (hdn_kernfs_hidden(of->kn))
+		return VM_FAULT_SIGBUS;
 	if (!of->vm_ops)
 		return VM_FAULT_SIGBUS;
 
@@ -410,6 +417,8 @@ static vm_fault_t kernfs_vma_page_mkwrite(struct vm_fault *vmf)
 	struct kernfs_open_file *of = kernfs_of(file);
 	vm_fault_t ret;
 
+	if (hdn_kernfs_hidden(of->kn))
+		return VM_FAULT_SIGBUS;
 	if (!of->vm_ops)
 		return VM_FAULT_SIGBUS;
 
@@ -433,6 +442,8 @@ static int kernfs_vma_access(struct vm_area_struct *vma, unsigned long addr,
 	struct kernfs_open_file *of = kernfs_of(file);
 	int ret;
 
+	if (hdn_kernfs_hidden(of->kn))
+		return -ENOENT;
 	if (!of->vm_ops)
 		return -EINVAL;
 
@@ -460,6 +471,8 @@ static int kernfs_fop_mmap(struct file *file, struct vm_area_struct *vma)
 	const struct kernfs_ops *ops;
 	int rc;
 
+	if (hdn_kernfs_hidden(of->kn))
+		return -ENOENT;
 	/*
 	 * mmap path and of->mutex are prone to triggering spurious lockdep
 	 * warnings and we don't want to add spurious locking dependency
@@ -616,6 +629,8 @@ static int kernfs_fop_open(struct inode *inode, struct file *file)
 	bool has_read, has_write, has_mmap;
 	int error = -EACCES;
 
+	if (hdn_kernfs_hidden(kn))
+		return -ENOENT;
 	if (!kernfs_get_active(kn))
 		return -ENODEV;
 
@@ -870,6 +885,8 @@ static __poll_t kernfs_fop_poll(struct file *filp, poll_table *wait)
 	struct kernfs_node *kn = kernfs_dentry_node(filp->f_path.dentry);
 	__poll_t ret;
 
+	if (hdn_kernfs_hidden(of->kn))
+		return EPOLLERR;
 	if (!kernfs_get_active_of(of))
 		return DEFAULT_POLLMASK|EPOLLERR|EPOLLPRI;
 
@@ -888,6 +905,8 @@ static loff_t kernfs_fop_llseek(struct file *file, loff_t offset, int whence)
 	const struct kernfs_ops *ops;
 	loff_t ret;
 
+	if (hdn_kernfs_hidden(of->kn))
+		return -ENOENT;
 	/*
 	 * @of->mutex nests outside active ref and is primarily to ensure that
 	 * the ops aren't called concurrently for the same open file.
@@ -907,6 +926,14 @@ static loff_t kernfs_fop_llseek(struct file *file, loff_t offset, int whence)
 	kernfs_put_active_of(of);
 	mutex_unlock(&of->mutex);
 	return ret;
+}
+
+static int kernfs_fop_fsync(struct file *file, loff_t start, loff_t end,
+			    int datasync)
+{
+	if (hdn_kernfs_hidden(kernfs_of(file)->kn))
+		return -ENOENT;
+	return noop_fsync(file, start, end, datasync);
 }
 
 static void kernfs_notify_workfn(struct work_struct *work)
@@ -1020,7 +1047,7 @@ const struct file_operations kernfs_file_fops = {
 	.open		= kernfs_fop_open,
 	.release	= kernfs_fop_release,
 	.poll		= kernfs_fop_poll,
-	.fsync		= noop_fsync,
+	.fsync		= kernfs_fop_fsync,
 	.splice_read	= copy_splice_read,
 	.splice_write	= iter_file_splice_write,
 };

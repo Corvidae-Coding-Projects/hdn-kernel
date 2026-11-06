@@ -14,6 +14,8 @@
 #include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/suspend.h>
+#include <linux/hdn_execmem.h>
+#include <linux/hdn_hibernate.h>
 #include <linux/delay.h>
 #include <linux/bitops.h>
 #include <linux/spinlock.h>
@@ -31,6 +33,7 @@
 #include <linux/compiler.h>
 #include <linux/ktime.h>
 #include <linux/set_memory.h>
+#include <linux/xarray.h>
 
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -1453,6 +1456,8 @@ static bool safe_copy_page(void *dst, struct page *s_page)
 {
 	bool zeros_only;
 
+	if (hdn_execmem_snapshot_page(dst, s_page, &zeros_only))
+		return zeros_only;
 	if (kernel_page_present(s_page)) {
 		zeros_only = do_copy_page(dst, page_address(s_page));
 	} else {
@@ -1553,6 +1558,9 @@ static unsigned long copy_data_pages(struct memory_bitmap *copy_bm,
 
 /* Total number of image pages */
 static unsigned int nr_copy_pages;
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+static bool restore_copy_frozen;
+#endif
 /* Number of pages needed for saving the original pfns of the image pages */
 static unsigned int nr_meta_pages;
 /* Number of zero pages */
@@ -1591,6 +1599,7 @@ void swsusp_free(void)
 {
 	unsigned long fb_pfn, fr_pfn;
 
+	arch_hibernate_cleanup_restore();
 	if (!forbidden_pages_map || !free_pages_map)
 		goto out;
 
@@ -1624,6 +1633,9 @@ loop:
 
 out:
 	nr_copy_pages = 0;
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	restore_copy_frozen = false;
+#endif
 	nr_meta_pages = 0;
 	nr_zero_pages = 0;
 	restore_pblist = NULL;
@@ -2843,6 +2855,71 @@ next:
 	return PAGE_SIZE;
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+/* Freeze the copy program while the original PFN bitmap still exists. Both
+ * its source buffers and its own storage must be safe pages, so executing the
+ * program cannot overwrite a later source, the program, or relocated code. */
+static int snapshot_freeze_copy_list(void)
+{
+	struct hdn_hibernate_copy_page *first = NULL, *page = NULL;
+	struct pbe *node = restore_pblist, *tail = NULL;
+	DEFINE_XARRAY(destinations);
+	unsigned long count = 0, limit = (unsigned long)nr_copy_pages + nr_zero_pages;
+	int error = -EINVAL;
+
+	if (restore_copy_frozen)
+		return 0;
+	while (node) {
+		struct pbe input, *copy;
+		unsigned long source, destination;
+
+		if (++count > limit || copy_from_kernel_nofault(&input, node, sizeof(input)) ||
+		    !PAGE_ALIGNED(input.address) || !PAGE_ALIGNED(input.orig_address) ||
+		    !virt_addr_valid(input.address) || !virt_addr_valid(input.orig_address))
+			goto out;
+		source = page_to_pfn(virt_to_page(input.address));
+		destination = page_to_pfn(virt_to_page(input.orig_address));
+		if (memory_bm_test_bit(&orig_bm, source) ||
+		    !memory_bm_test_bit(&orig_bm, destination) ||
+		    !swsusp_page_is_forbidden(virt_to_page(input.address)) ||
+		    !swsusp_page_is_free(virt_to_page(input.address)))
+			goto out;
+		error = xa_insert(&destinations, destination, xa_mk_value(1), GFP_KERNEL);
+		if (error)
+			goto out;
+		if (!page || page->count == ARRAY_SIZE(page->entries)) {
+			struct hdn_hibernate_copy_page *next = (void *)get_safe_page(GFP_KERNEL);
+
+			if (!next) {
+				error = -ENOMEM;
+				goto out;
+			}
+			if (page)
+				page->next = next;
+			else
+				first = next;
+			page = next;
+		}
+		copy = &page->entries[page->count++];
+		copy->address = input.address;
+		copy->orig_address = input.orig_address;
+		copy->next = NULL;
+		if (tail)
+			tail->next = copy;
+		tail = copy;
+		node = input.next;
+		error = -EINVAL;
+	}
+	error = hdn_rap_hibernate_copy_seal(first, count);
+	if (!error)
+		restore_copy_frozen = true;
+out:
+	xa_destroy(&destinations);
+	/* Snapshot ownership frees all safe pages on every failure path. */
+	return error;
+}
+#endif
+
 /**
  * snapshot_write_finalize - Complete the loading of a hibernation image.
  *
@@ -2854,6 +2931,13 @@ next:
 int snapshot_write_finalize(struct snapshot_handle *handle)
 {
 	int error;
+
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* The original PFN bitmap was recycled after the first successful
+	 * finalization. Repeated ioctls must not revisit that storage. */
+	if (restore_copy_frozen)
+		return 0;
+#endif
 
 	/*
 	 * Call snapshot_write_next() to drain any trailing zero pages,
@@ -2868,8 +2952,15 @@ int snapshot_write_finalize(struct snapshot_handle *handle)
 	}
 	copy_last_highmem_page();
 	error = hibernate_restore_protect_page(handle->buffer);
+	if (error)
+		return error;
 	/* Do that only if we have loaded the image entirely */
 	if (handle->cur > 1 && handle->cur > nr_meta_pages + nr_copy_pages + nr_zero_pages) {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		error = snapshot_freeze_copy_list();
+		if (error)
+			return error;
+#endif
 		memory_bm_recycle(&orig_bm);
 		free_highmem_data();
 	}

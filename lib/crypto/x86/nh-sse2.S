@@ -8,6 +8,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 #define		PASS0_SUMS	%xmm0
 #define		PASS1_SUMS	%xmm1
@@ -72,6 +73,7 @@
  * It's guaranteed that message_len % 16 == 0.
  */
 SYM_FUNC_START(nh_sse2)
+	HDN_ASM_FUNCTION nh_sse2
 
 	movdqu		0x00(KEY), K0
 	movdqu		0x10(KEY), K1
@@ -119,5 +121,6 @@ SYM_FUNC_START(nh_sse2)
 	paddq		PASS2_SUMS, T1
 	movdqu		T0, 0x00(HASH)
 	movdqu		T1, 0x10(HASH)
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END nh_sse2
 SYM_FUNC_END(nh_sse2)

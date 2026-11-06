@@ -7,6 +7,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <linux/cfi_types.h>
 #include <asm/asm-offsets.h>
 #include <asm/frame.h>
@@ -874,6 +875,7 @@
 .text
 
 SYM_FUNC_START_LOCAL(__aria_aesni_avx_crypt_16way)
+	HDN_REGS_FUNC __aria_aesni_avx_crypt_16way
 	/* input:
 	*      %r9: rk
 	*      %rsi: dst
@@ -959,10 +961,12 @@ SYM_FUNC_START_LOCAL(__aria_aesni_avx_crypt_16way)
 			   (%rax), (%r8));
 
 	FRAME_END
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __aria_aesni_avx_crypt_16way
 SYM_FUNC_END(__aria_aesni_avx_crypt_16way)
 
 SYM_TYPED_FUNC_START(aria_aesni_avx_encrypt_16way)
+	HDN_ASM_FUNCTION aria_aesni_avx_encrypt_16way, 1
 	/* input:
 	*      %rdi: ctx, CTX
 	*      %rsi: dst
@@ -977,17 +981,19 @@ SYM_TYPED_FUNC_START(aria_aesni_avx_encrypt_16way)
 		     %xmm8, %xmm9, %xmm10, %xmm11, %xmm12, %xmm13, %xmm14,
 		     %xmm15, %rdx);
 
-	call __aria_aesni_avx_crypt_16way;
+	HDN_REGS_CALL __aria_aesni_avx_crypt_16way;
 
 	write_output(%xmm1, %xmm0, %xmm3, %xmm2, %xmm4, %xmm5, %xmm6, %xmm7,
 		     %xmm8, %xmm9, %xmm10, %xmm11, %xmm12, %xmm13, %xmm14,
 		     %xmm15, %rax);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_aesni_avx_encrypt_16way
 SYM_FUNC_END(aria_aesni_avx_encrypt_16way)
 
 SYM_TYPED_FUNC_START(aria_aesni_avx_decrypt_16way)
+	HDN_ASM_FUNCTION aria_aesni_avx_decrypt_16way, 1
 	/* input:
 	*      %rdi: ctx, CTX
 	*      %rsi: dst
@@ -1002,17 +1008,19 @@ SYM_TYPED_FUNC_START(aria_aesni_avx_decrypt_16way)
 		     %xmm8, %xmm9, %xmm10, %xmm11, %xmm12, %xmm13, %xmm14,
 		     %xmm15, %rdx);
 
-	call __aria_aesni_avx_crypt_16way;
+	HDN_REGS_CALL __aria_aesni_avx_crypt_16way;
 
 	write_output(%xmm1, %xmm0, %xmm3, %xmm2, %xmm4, %xmm5, %xmm6, %xmm7,
 		     %xmm8, %xmm9, %xmm10, %xmm11, %xmm12, %xmm13, %xmm14,
 		     %xmm15, %rax);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_aesni_avx_decrypt_16way
 SYM_FUNC_END(aria_aesni_avx_decrypt_16way)
 
 SYM_FUNC_START_LOCAL(__aria_aesni_avx_ctr_gen_keystream_16way)
+	HDN_REGS_FUNC __aria_aesni_avx_ctr_gen_keystream_16way
 	/* input:
 	*      %rdi: ctx
 	*      %rsi: dst
@@ -1085,10 +1093,12 @@ SYM_FUNC_START_LOCAL(__aria_aesni_avx_ctr_gen_keystream_16way)
 	vmovdqu (7 * 16)(%rcx), %xmm7;
 
 	FRAME_END
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __aria_aesni_avx_ctr_gen_keystream_16way
 SYM_FUNC_END(__aria_aesni_avx_ctr_gen_keystream_16way)
 
 SYM_TYPED_FUNC_START(aria_aesni_avx_ctr_crypt_16way)
+	HDN_ASM_FUNCTION aria_aesni_avx_ctr_crypt_16way, 1
 	/* input:
 	*      %rdi: ctx
 	*      %rsi: dst
@@ -1098,7 +1108,7 @@ SYM_TYPED_FUNC_START(aria_aesni_avx_ctr_crypt_16way)
 	*/
 	FRAME_BEGIN
 
-	call __aria_aesni_avx_ctr_gen_keystream_16way;
+	HDN_REGS_CALL __aria_aesni_avx_ctr_gen_keystream_16way;
 
 	leaq (%rsi), %r10;
 	leaq (%rdx), %r11;
@@ -1106,7 +1116,7 @@ SYM_TYPED_FUNC_START(aria_aesni_avx_ctr_crypt_16way)
 	leaq (%rcx), %rdx;
 	leaq ARIA_CTX_enc_key(CTX), %r9;
 
-	call __aria_aesni_avx_crypt_16way;
+	HDN_REGS_CALL __aria_aesni_avx_crypt_16way;
 
 	vpxor (0 * 16)(%r11), %xmm1, %xmm1;
 	vpxor (1 * 16)(%r11), %xmm0, %xmm0;
@@ -1129,10 +1139,12 @@ SYM_TYPED_FUNC_START(aria_aesni_avx_ctr_crypt_16way)
 		     %xmm15, %r10);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_aesni_avx_ctr_crypt_16way
 SYM_FUNC_END(aria_aesni_avx_ctr_crypt_16way)
 
 SYM_FUNC_START_LOCAL(__aria_aesni_avx_gfni_crypt_16way)
+	HDN_REGS_FUNC __aria_aesni_avx_gfni_crypt_16way
 	/* input:
 	*      %r9: rk
 	*      %rsi: dst
@@ -1254,10 +1266,12 @@ SYM_FUNC_START_LOCAL(__aria_aesni_avx_gfni_crypt_16way)
 			   (%rax), (%r8));
 
 	FRAME_END
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __aria_aesni_avx_gfni_crypt_16way
 SYM_FUNC_END(__aria_aesni_avx_gfni_crypt_16way)
 
 SYM_TYPED_FUNC_START(aria_aesni_avx_gfni_encrypt_16way)
+	HDN_ASM_FUNCTION aria_aesni_avx_gfni_encrypt_16way, 1
 	/* input:
 	*      %rdi: ctx, CTX
 	*      %rsi: dst
@@ -1272,17 +1286,19 @@ SYM_TYPED_FUNC_START(aria_aesni_avx_gfni_encrypt_16way)
 		     %xmm8, %xmm9, %xmm10, %xmm11, %xmm12, %xmm13, %xmm14,
 		     %xmm15, %rdx);
 
-	call __aria_aesni_avx_gfni_crypt_16way;
+	HDN_REGS_CALL __aria_aesni_avx_gfni_crypt_16way;
 
 	write_output(%xmm1, %xmm0, %xmm3, %xmm2, %xmm4, %xmm5, %xmm6, %xmm7,
 		     %xmm8, %xmm9, %xmm10, %xmm11, %xmm12, %xmm13, %xmm14,
 		     %xmm15, %rax);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_aesni_avx_gfni_encrypt_16way
 SYM_FUNC_END(aria_aesni_avx_gfni_encrypt_16way)
 
 SYM_TYPED_FUNC_START(aria_aesni_avx_gfni_decrypt_16way)
+	HDN_ASM_FUNCTION aria_aesni_avx_gfni_decrypt_16way, 1
 	/* input:
 	*      %rdi: ctx, CTX
 	*      %rsi: dst
@@ -1297,17 +1313,19 @@ SYM_TYPED_FUNC_START(aria_aesni_avx_gfni_decrypt_16way)
 		     %xmm8, %xmm9, %xmm10, %xmm11, %xmm12, %xmm13, %xmm14,
 		     %xmm15, %rdx);
 
-	call __aria_aesni_avx_gfni_crypt_16way;
+	HDN_REGS_CALL __aria_aesni_avx_gfni_crypt_16way;
 
 	write_output(%xmm1, %xmm0, %xmm3, %xmm2, %xmm4, %xmm5, %xmm6, %xmm7,
 		     %xmm8, %xmm9, %xmm10, %xmm11, %xmm12, %xmm13, %xmm14,
 		     %xmm15, %rax);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_aesni_avx_gfni_decrypt_16way
 SYM_FUNC_END(aria_aesni_avx_gfni_decrypt_16way)
 
 SYM_TYPED_FUNC_START(aria_aesni_avx_gfni_ctr_crypt_16way)
+	HDN_ASM_FUNCTION aria_aesni_avx_gfni_ctr_crypt_16way, 1
 	/* input:
 	*      %rdi: ctx
 	*      %rsi: dst
@@ -1317,7 +1335,7 @@ SYM_TYPED_FUNC_START(aria_aesni_avx_gfni_ctr_crypt_16way)
 	*/
 	FRAME_BEGIN
 
-	call __aria_aesni_avx_ctr_gen_keystream_16way
+	HDN_REGS_CALL __aria_aesni_avx_ctr_gen_keystream_16way
 
 	leaq (%rsi), %r10;
 	leaq (%rdx), %r11;
@@ -1325,7 +1343,7 @@ SYM_TYPED_FUNC_START(aria_aesni_avx_gfni_ctr_crypt_16way)
 	leaq (%rcx), %rdx;
 	leaq ARIA_CTX_enc_key(CTX), %r9;
 
-	call __aria_aesni_avx_gfni_crypt_16way;
+	HDN_REGS_CALL __aria_aesni_avx_gfni_crypt_16way;
 
 	vpxor (0 * 16)(%r11), %xmm1, %xmm1;
 	vpxor (1 * 16)(%r11), %xmm0, %xmm0;
@@ -1348,5 +1366,6 @@ SYM_TYPED_FUNC_START(aria_aesni_avx_gfni_ctr_crypt_16way)
 		     %xmm15, %r10);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_aesni_avx_gfni_ctr_crypt_16way
 SYM_FUNC_END(aria_aesni_avx_gfni_ctr_crypt_16way)

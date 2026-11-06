@@ -2,6 +2,7 @@
 #include <linux/linkage.h>
 #include <asm/percpu.h>
 #include <asm/processor-flags.h>
+#include <asm/hdn_rap.h>
 
 .text
 
@@ -18,6 +19,7 @@
  * Notably this is not LOCK prefixed and is not safe against NMIs
  */
 SYM_FUNC_START(this_cpu_cmpxchg16b_emu)
+	HDN_PRIVATE_FUNC_ENTER this_cpu_cmpxchg16b_emu, 2
 
 	pushfq
 	cli
@@ -36,7 +38,7 @@ SYM_FUNC_START(this_cpu_cmpxchg16b_emu)
 	orl	$X86_EFLAGS_ZF, (%rsp)
 
 	popfq
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 .Lnot_same:
 	/* *ptr != old */
@@ -49,6 +51,6 @@ SYM_FUNC_START(this_cpu_cmpxchg16b_emu)
 	andl	$(~X86_EFLAGS_ZF), (%rsp)
 
 	popfq
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 SYM_FUNC_END(this_cpu_cmpxchg16b_emu)

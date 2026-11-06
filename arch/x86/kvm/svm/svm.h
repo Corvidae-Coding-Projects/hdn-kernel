@@ -950,7 +950,8 @@ static inline void sev_free_decrypted_vmsa(struct kvm_vcpu *vcpu, struct vmcb_sa
 
 void __svm_sev_es_vcpu_run(struct vcpu_svm *svm, bool spec_ctrl_intercepted,
 			   struct sev_es_save_area *hostsa);
-void __svm_vcpu_run(struct vcpu_svm *svm, bool spec_ctrl_intercepted);
+void __svm_vcpu_run(struct vcpu_svm *svm, bool spec_ctrl_intercepted,
+		    unsigned long host_save_pa);
 
 #define DEFINE_KVM_GHCB_ACCESSORS(field)						\
 static __always_inline u64 kvm_ghcb_get_##field(struct vcpu_svm *svm)			\

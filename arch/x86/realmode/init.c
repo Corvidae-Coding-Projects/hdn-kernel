@@ -4,6 +4,11 @@
 #include <linux/memblock.h>
 #include <linux/cc_platform.h>
 #include <linux/pgtable.h>
+#include <linux/hdn_pgtable.h>
+#include <asm/hdn_pgtable.h>
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+#include "../mm/hdn_pgtable_internal.h"
+#endif
 
 #include <asm/set_memory.h>
 #include <asm/realmode.h>
@@ -11,12 +16,38 @@
 #include <asm/crash.h>
 #include <asm/msr.h>
 #include <asm/sev.h>
+#include <asm/hdn_stack_mm.h>
 
-struct real_mode_header *real_mode_header;
-u32 *trampoline_cr4_features;
+struct real_mode_header *real_mode_header __ro_after_init;
+u32 *trampoline_cr4_features __ro_after_init;
 
 /* Hold the pgd entry used on booting additional CPUs */
 pgd_t trampoline_pgd_entry;
+
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+struct {
+	u64 cr3;
+	u32 target;
+	u16 cs, padding;
+} hdn_realmode_reboot __ro_after_init;
+#endif
+
+void hdn_realmode_update_cr4(void)
+{
+	if (!trampoline_cr4_features)
+		return;
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	if (READ_ONCE(hdn_pt_writes_ready)) {
+		unsigned long *word = (unsigned long *)trampoline_cr4_features;
+		unsigned long value = (READ_ONCE(*word) & ~0xffffffffUL) | (u32)mmu_cr4_features;
+
+		hdn_pt_window_update(__pa(word) >> PAGE_SHIFT, offset_in_page(word),
+				     value, 0, HDN_PT_STORE);
+		return;
+	}
+#endif
+	WRITE_ONCE(*trampoline_cr4_features, mmu_cr4_features);
+}
 
 void load_trampoline_pgtable(void)
 {
@@ -30,7 +61,7 @@ void load_trampoline_pgtable(void)
 	if (boot_cpu_has(X86_FEATURE_PCID))
 		cr4_clear_bits(X86_CR4_PCIDE);
 
-	write_cr3(real_mode_header->trampoline_pgd);
+	write_cr3(hdn_stack_mm_route_kernel(real_mode_header->trampoline_pgd));
 #endif
 
 	/*
@@ -157,7 +188,11 @@ static void __init setup_real_mode(void)
 
 	trampoline_header->flags = 0;
 
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	trampoline_lock = __va(trampoline_header->lock);
+#else
 	trampoline_lock = &trampoline_header->lock;
+#endif
 	*trampoline_lock = 0;
 
 	trampoline_pgd = (u64 *) __va(real_mode_header->trampoline_pgd);
@@ -175,6 +210,11 @@ static void __init setup_real_mode(void)
 #endif
 
 	sme_sev_setup_real_mode(trampoline_header);
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	hdn_realmode_reboot.cr3 = real_mode_header->trampoline_pgd;
+	hdn_realmode_reboot.target = real_mode_header->machine_real_restart_asm;
+	hdn_realmode_reboot.cs = real_mode_header->machine_real_restart_seg;
+#endif
 }
 
 /*
@@ -206,13 +246,25 @@ static void __init set_real_mode_permissions(void)
 	set_memory_x((unsigned long) text_start, text_size >> PAGE_SHIFT);
 }
 
+static bool real_mode_initialized __initdata;
+
+bool __init real_mode_is_initialized(void)
+{
+	return real_mode_initialized;
+}
+
 void __init init_real_mode(void)
 {
+	/* Page-table sealing initializes the trampoline before creating tasks.
+	 * The ordinary early initcall must not copy over the sealed root. */
+	if (real_mode_initialized)
+		return;
 	if (!real_mode_header)
 		panic("Real mode trampoline was not allocated");
 
 	setup_real_mode();
 	set_real_mode_permissions();
+	real_mode_initialized = true;
 }
 
 static int __init do_init_real_mode(void)

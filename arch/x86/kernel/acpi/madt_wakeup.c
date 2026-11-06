@@ -6,6 +6,8 @@
 #include <linux/kexec.h>
 #include <linux/memblock.h>
 #include <linux/pgtable.h>
+#include <linux/hdn_pgtable.h>
+#include <linux/set_memory.h>
 #include <linux/sched/hotplug.h>
 #include <asm/apic.h>
 #include <asm/barrier.h>
@@ -23,6 +25,31 @@ static struct acpi_madt_multiproc_wakeup_mailbox *acpi_mp_wake_mailbox;
 
 static u64 acpi_mp_pgd __ro_after_init;
 static u64 acpi_mp_reset_vector_paddr __ro_after_init;
+
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+/* One dedicated page: freeze the publication before other tasks/CPUs exist,
+ * independently of the later global ro_after_init protection. */
+struct {
+	unsigned long ready, pgd, reset;
+	unsigned char padding[PAGE_SIZE - 3 * sizeof(unsigned long)];
+} hdn_madt_launch __aligned(PAGE_SIZE) __ro_after_init;
+
+void __init hdn_acpi_mp_seal(void)
+{
+	if (acpi_mp_pgd) {
+		hdn_madt_launch.pgd = acpi_mp_pgd;
+		hdn_madt_launch.reset = acpi_mp_reset_vector_paddr;
+		hdn_madt_launch.ready = 1;
+		if (hdn_pt_foreign_code_seal(acpi_mp_reset_vector_paddr, 1,
+				&hdn_madt_launch))
+			panic("HDN could not seal the ACPI CPU-reset code page");
+	}
+	if (hdn_pt_boot_handoff_seal(acpi_mp_pgd, (unsigned long)&hdn_madt_launch))
+		panic("HDN could not freeze the ACPI CPU-reset page tables and launch");
+	if (set_memory_ro((unsigned long)&hdn_madt_launch, 1))
+		panic("HDN could not seal the ACPI CPU-reset launch state");
+}
+#endif
 
 static void acpi_mp_stop_this_cpu(void)
 {
@@ -75,11 +102,14 @@ static int __init acpi_mp_setup_reset(u64 reset_vector)
 	struct x86_mapping_info info = {
 		.alloc_pgt_page = alloc_pgt_page,
 		.free_pgt_page	= free_pgt_page,
-		.page_flag      = __PAGE_KERNEL_LARGE_EXEC,
+		.page_flag      = __PAGE_KERNEL_LARGE,
 		.kernpg_flag    = _KERNPG_TABLE_NOENC,
 	};
-	unsigned long mstart, mend;
+	unsigned long mstart, mend, reset_page, reset_pfn, kernel_page, kernel_pfn;
 	pgd_t *pgd;
+
+	if (!reset_vector || (reset_vector & ~__PHYSICAL_MASK))
+		return -EINVAL;
 
 	pgd = alloc_pgt_page(NULL);
 	if (!pgd)
@@ -94,7 +124,9 @@ static int __init acpi_mp_setup_reset(u64 reset_vector)
 		}
 	}
 
-	mstart = PAGE_ALIGN_DOWN(reset_vector);
+	reset_page = PAGE_ALIGN_DOWN(reset_vector);
+	reset_pfn = reset_page >> PAGE_SHIFT;
+	mstart = reset_page;
 	mend = mstart + PAGE_SIZE;
 	if (kernel_ident_mapping_init(&info, pgd, mstart, mend)) {
 		kernel_ident_mapping_free(&info, pgd);
@@ -109,9 +141,20 @@ static int __init acpi_mp_setup_reset(u64 reset_vector)
 	 * before and after switching page tables.
 	 */
 	info.offset = __START_KERNEL_map - phys_base;
-	mstart = PAGE_ALIGN_DOWN(__pa(asm_acpi_mp_play_dead));
+	kernel_pfn = PAGE_ALIGN_DOWN(__pa(asm_acpi_mp_play_dead)) >> PAGE_SHIFT;
+	kernel_page = (kernel_pfn << PAGE_SHIFT) + info.offset;
+	mstart = kernel_pfn << PAGE_SHIFT;
 	mend = mstart + PAGE_SIZE;
 	if (kernel_ident_mapping_init(&info, pgd, mstart, mend)) {
+		kernel_ident_mapping_free(&info, pgd);
+		return -ENOMEM;
+	}
+	/* All other identity mappings are data-only. The reset vector and the
+	 * fixed high assembly bridge are the only executable pages in this root. */
+	if (kernel_map_pages_in_pgd(pgd, reset_pfn, reset_page, 1,
+			__PAGE_KERNEL_ROX) ||
+	    kernel_map_pages_in_pgd(pgd, kernel_pfn, kernel_page, 1,
+			__PAGE_KERNEL_ROX)) {
 		kernel_ident_mapping_free(&info, pgd);
 		return -ENOMEM;
 	}

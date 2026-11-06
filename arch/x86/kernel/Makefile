@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
+obj-$(CONFIG_HDN_ARCH_CONTRACT) += hdn-contract.o
+CFLAGS_hdn-contract.o += -Werror=switch
 #
 # Makefile for the linux kernel.
 #
@@ -18,6 +20,8 @@ CFLAGS_REMOVE_early_printk.o = -pg
 CFLAGS_REMOVE_head64.o = -pg
 CFLAGS_REMOVE_head32.o = -pg
 CFLAGS_REMOVE_rethook.o = -pg
+CFLAGS_REMOVE_hdn_text.o = -pg
+CFLAGS_REMOVE_hdn_gdt.o = -pg
 endif
 
 KASAN_SANITIZE_head$(BITS).o				:= n
@@ -43,6 +47,13 @@ KCOV_INSTRUMENT_dumpstack_$(BITS).o			:= n
 KCOV_INSTRUMENT_unwind_orc.o				:= n
 KCOV_INSTRUMENT_unwind_frame.o				:= n
 KCOV_INSTRUMENT_unwind_guess.o				:= n
+# Text-window bookkeeping also runs while a debugger has stopped other CPUs.
+KCOV_INSTRUMENT_hdn_text.o				:= n
+KCOV_INSTRUMENT_hdn_gdt.o				:= n
+# GDT aliases are private translations of initialized descriptors; avoid
+# instrumenting the temporary-CR3 interval or requiring shadow aliases.
+KASAN_SANITIZE_hdn_gdt.o					:= n
+KMSAN_SANITIZE_hdn_gdt.o					:= n
 
 # Disable KCOV to prevent crashes during kexec: load_segments() invalidates
 # the GS base, which KCOV relies on for per-CPU data.
@@ -70,6 +81,18 @@ obj-y			+= process_$(BITS).o signal.o signal_$(BITS).o
 obj-y			+= traps.o idt.o irq.o irq_$(BITS).o dumpstack_$(BITS).o
 obj-y			+= time.o ioport.o dumpstack.o nmi.o
 obj-$(CONFIG_X86_FRED)	+= fred.o
+obj-$(CONFIG_SECURITY_HARDENING_GDT) += hdn_gdt.o
+ifneq ($(filter y,$(CONFIG_SECURITY_HARDENING_GDT) $(CONFIG_SECURITY_HARDENING_PGTABLE)),)
+obj-y += hdn_entry_window.o
+endif
+CFLAGS_REMOVE_hdn_entry_window.o = $(CC_FLAGS_FTRACE) $(GCC_PLUGINS_CFLAGS)
+CFLAGS_hdn_entry_window.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
+KASAN_SANITIZE_hdn_entry_window.o := n
+KMSAN_SANITIZE_hdn_entry_window.o := n
+KCSAN_SANITIZE_hdn_entry_window.o := n
+KCOV_INSTRUMENT_hdn_entry_window.o := n
+UBSAN_SANITIZE_hdn_entry_window.o := n
+GCOV_PROFILE_hdn_entry_window.o := n
 obj-$(CONFIG_MODIFY_LDT_SYSCALL)	+= ldt.o
 obj-$(CONFIG_X86_KERNEL_IBT)		+= ibt_selftest.o
 obj-y			+= setup.o x86_init.o i8259.o irqinit.o
@@ -115,6 +138,9 @@ obj-y				+= apic/
 obj-$(CONFIG_X86_REBOOTFIXUPS)	+= reboot_fixups_32.o
 obj-$(CONFIG_DYNAMIC_FTRACE)	+= ftrace.o
 obj-$(CONFIG_FUNCTION_TRACER)	+= ftrace_$(BITS).o
+ifeq ($(CONFIG_SECURITY_HARDENING_RAP),y)
+obj-$(CONFIG_FUNCTION_TRACER)	+= ftrace.o
+endif
 obj-$(CONFIG_FUNCTION_GRAPH_TRACER) += ftrace.o
 obj-$(CONFIG_FTRACE_SYSCALLS)	+= ftrace.o
 obj-$(CONFIG_X86_TSC)		+= trace_clock.o
@@ -164,7 +190,104 @@ obj-$(CONFIG_UNWINDER_GUESS)		+= unwind_guess.o
 
 obj-$(CONFIG_CFI)			+= cfi.o
 
+obj-$(CONFIG_SECURITY_HARDENING_RAP) += hdn_rap.o hdn_rap_validate.o hdn_rap_context.o hdn_rap_context_lifecycle.o hdn_rap_thunks.o hdn_rap_failure.o
+obj-$(CONFIG_SECURITY_HARDENING_RAP) += hdn_rap_asm_types.o
+obj-$(CONFIG_SECURITY_HARDENING_PGTABLE) += hdn_livepatch.o
+ifneq ($(CONFIG_KVM_AMD),)
+ifeq ($(CONFIG_MSHV_ROOT)$(CONFIG_CRASH_DUMP),yy)
+obj-$(CONFIG_SECURITY_HARDENING_RAP) += hdn_rap_hv_crash.o
+endif
+CFLAGS_REMOVE_hdn_rap_hv_crash.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+CFLAGS_hdn_rap_hv_crash.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
+KASAN_SANITIZE_hdn_rap_hv_crash.o := n
+KCSAN_SANITIZE_hdn_rap_hv_crash.o := n
+KMSAN_SANITIZE_hdn_rap_hv_crash.o := n
+KCOV_INSTRUMENT_hdn_rap_hv_crash.o := n
+UBSAN_SANITIZE_hdn_rap_hv_crash.o := n
+GCOV_PROFILE_hdn_rap_hv_crash.o := n
+obj-$(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS) += hdn_svm.o
+endif
+ifneq ($(CONFIG_KVM_INTEL),)
+obj-$(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS) += hdn_vmcs.o
+endif
+obj-$(CONFIG_SECURITY_HARDENING_RAP) += hdn_rap_bhb.o
+obj-$(CONFIG_SECURITY_HARDENING_RAP) += hdn_rap_dynamic.o hdn_rap_bpf.o
+ifeq ($(CONFIG_EFI),y)
+obj-$(CONFIG_SECURITY_HARDENING_RAP) += hdn_rap_efi.o
+endif
+ifeq ($(CONFIG_KEXEC_CORE),y)
+obj-$(CONFIG_SECURITY_HARDENING_RAP) += hdn_rap_kexec.o hdn_rap_kexec_asm.o
+endif
+ifeq ($(CONFIG_PM_SLEEP),y)
+obj-$(CONFIG_SECURITY_HARDENING_RAP) += hdn_rap_resume.o
+endif
+obj-$(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS) += hdn_stack.o hdn_stack_access.o hdn_stack_entry.o
+
+CFLAGS_REMOVE_hdn_stack_access.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+CFLAGS_hdn_stack_access.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
+KASAN_SANITIZE_hdn_stack_access.o := n
+KCSAN_SANITIZE_hdn_stack_access.o := n
+KMSAN_SANITIZE_hdn_stack_access.o := n
+KCOV_INSTRUMENT_hdn_stack_access.o := n
+UBSAN_SANITIZE_hdn_stack_access.o := n
+GCOV_PROFILE_hdn_stack_access.o := n
+# The validation engine is the root of the compiler's transfer protocol.
+# It must never recursively instrument its own validation or diagnostics.
+CFLAGS_REMOVE_hdn_rap_validate.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+KASAN_SANITIZE_hdn_rap_validate.o := n
+KCSAN_SANITIZE_hdn_rap_validate.o := n
+KMSAN_SANITIZE_hdn_rap_validate.o := n
+KCOV_INSTRUMENT_hdn_rap_validate.o := n
+UBSAN_SANITIZE_hdn_rap_validate.o := n
+GCOV_PROFILE_hdn_rap_validate.o := n
+CFLAGS_REMOVE_hdn_rap_context.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+CFLAGS_hdn_rap_validate.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
+CFLAGS_hdn_rap_context.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
+CFLAGS_REMOVE_hdn_rap_resume.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+CFLAGS_hdn_rap_resume.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
+KASAN_SANITIZE_hdn_rap_resume.o := n
+KCSAN_SANITIZE_hdn_rap_resume.o := n
+KMSAN_SANITIZE_hdn_rap_resume.o := n
+KCOV_INSTRUMENT_hdn_rap_resume.o := n
+UBSAN_SANITIZE_hdn_rap_resume.o := n
+GCOV_PROFILE_hdn_rap_resume.o := n
+CFLAGS_REMOVE_hdn_rap_efi.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+CFLAGS_hdn_rap_efi.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
+KASAN_SANITIZE_hdn_rap_efi.o := n
+KCSAN_SANITIZE_hdn_rap_efi.o := n
+KMSAN_SANITIZE_hdn_rap_efi.o := n
+KCOV_INSTRUMENT_hdn_rap_efi.o := n
+UBSAN_SANITIZE_hdn_rap_efi.o := n
+GCOV_PROFILE_hdn_rap_efi.o := n
+CFLAGS_REMOVE_hdn_rap_kexec.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+CFLAGS_hdn_rap_kexec.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
+KASAN_SANITIZE_hdn_rap_kexec.o := n
+KCSAN_SANITIZE_hdn_rap_kexec.o := n
+KMSAN_SANITIZE_hdn_rap_kexec.o := n
+KCOV_INSTRUMENT_hdn_rap_kexec.o := n
+UBSAN_SANITIZE_hdn_rap_kexec.o := n
+GCOV_PROFILE_hdn_rap_kexec.o := n
+KASAN_SANITIZE_hdn_rap_context.o := n
+KCSAN_SANITIZE_hdn_rap_context.o := n
+KMSAN_SANITIZE_hdn_rap_context.o := n
+KCOV_INSTRUMENT_hdn_rap_context.o := n
+UBSAN_SANITIZE_hdn_rap_context.o := n
+GCOV_PROFILE_hdn_rap_context.o := n
+ifdef CONFIG_SECURITY_HARDENING_RAP
+# Runtime roots still emit type/call-site metadata and tag outgoing calls.
+# They omit their own return adapters to terminate recursive validation.
+hdn_rap_runtime_flags = $(filter -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS)) -fplugin-arg-hdn_rap_plugin-runtime=1
+CFLAGS_hdn_rap_validate.o += $(hdn_rap_runtime_flags)
+CFLAGS_hdn_rap_context.o += $(hdn_rap_runtime_flags)
+CFLAGS_hdn_rap_resume.o += $(hdn_rap_runtime_flags)
+CFLAGS_hdn_rap_kexec.o += $(hdn_rap_runtime_flags)
+CFLAGS_hdn_rap_hv_crash.o += $(hdn_rap_runtime_flags)
+CFLAGS_hdn_rap_efi.o += $(hdn_rap_runtime_flags)
+CFLAGS_hdn_stack_access.o += $(hdn_rap_runtime_flags)
+endif
+
 obj-$(CONFIG_CALL_THUNKS)		+= callthunks.o
+obj-$(CONFIG_SECURITY_HARDENING_KERNEL_WX) += hdn_text.o
 
 obj-$(CONFIG_X86_CET)			+= cet.o
 

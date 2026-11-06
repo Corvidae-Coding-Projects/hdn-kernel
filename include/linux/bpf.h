@@ -1316,6 +1316,13 @@ enum bpf_tramp_prog_type {
 	BPF_TRAMP_FSESSION,
 };
 
+struct bpf_tramp_unlink {
+	/* link is an opaque identity, never dereferenced after generation. */
+	struct bpf_tramp_link *link;
+	struct bpf_prog *prog;
+	unsigned long start, end;
+};
+
 struct bpf_tramp_image {
 	void *image;
 	int size;
@@ -1323,6 +1330,13 @@ struct bpf_tramp_image {
 	struct percpu_ref pcref;
 	void *ip_after_call;
 	void *ip_epilogue;
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	unsigned int nr_unlink;
+	bool holds_progs;
+	struct bpf_prog *target_prog;
+	struct module *target_module;
+	struct bpf_tramp_unlink unlink[BPF_MAX_TRAMP_LINKS];
+#endif
 	union {
 		struct rcu_head rcu;
 		struct work_struct work;
@@ -1357,7 +1371,16 @@ struct bpf_trampoline {
 	int progs_cnt[BPF_TRAMP_MAX];
 	/* Executable image of trampoline */
 	struct bpf_tramp_image *cur_image;
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	/* Weak while attached; each live image holds its own reference. */
+	struct bpf_prog *target_prog;
+	struct delayed_work retire_work;
+	bool retire_pending;
+#endif
 };
+
+int arch_bpf_trampoline_unlink(struct bpf_tramp_image *im,
+			       struct bpf_tramp_link *link);
 
 struct bpf_attach_target_info {
 	struct btf_func_model fmodel;
@@ -1384,6 +1407,9 @@ struct bpf_dispatcher {
 	void *rw_image;
 	u32 image_off;
 	struct bpf_ksym ksym;
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	struct hdn_bpf_dispatch_image *hdn_image;
+#endif
 #ifdef CONFIG_HAVE_STATIC_CALL
 	struct static_call_key *sc_key;
 	void *sc_tramp;
@@ -1465,6 +1491,8 @@ struct bpf_trampoline *bpf_trampoline_get(u64 key,
 					  struct bpf_attach_target_info *tgt_info);
 void bpf_trampoline_put(struct bpf_trampoline *tr);
 int arch_prepare_bpf_dispatcher(void *image, void *buf, s64 *funcs, int num_funcs);
+int arch_register_bpf_dispatcher(void *image, s64 *funcs, int num_funcs);
+void arch_unregister_bpf_dispatcher(void *image);
 
 /*
  * When the architecture supports STATIC_CALL replace the bpf_dispatcher_fn

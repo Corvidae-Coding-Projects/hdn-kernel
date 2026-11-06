@@ -10,6 +10,7 @@
 #include <linux/utsname.h>
 #include <linux/err.h>
 #include <linux/slab.h>
+#include <linux/hdn_alloc.h>
 #include <linux/cred.h>
 #include <linux/user_namespace.h>
 #include <linux/proc_ns.h>
@@ -156,9 +157,10 @@ void __init uts_ns_init(void)
 {
 	uts_ns_cache = kmem_cache_create_usercopy(
 			"uts_namespace", sizeof(struct uts_namespace), 0,
-			SLAB_PANIC|SLAB_ACCOUNT,
+			SLAB_PANIC|SLAB_ACCOUNT|SLAB_HDN_DOMAIN,
 			offsetof(struct uts_namespace, name),
 			sizeof_field(struct uts_namespace, name),
 			NULL);
+	hdn_cache_domain(uts_ns_cache, HDN_ALLOC_UTS_NAMESPACE);
 	ns_tree_add(&init_uts_ns);
 }

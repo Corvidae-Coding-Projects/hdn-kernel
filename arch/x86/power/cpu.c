@@ -29,6 +29,7 @@
 #include <asm/microcode.h>
 #include <asm/msr.h>
 #include <asm/fred.h>
+#include <asm/hdn_rap_resume.h>
 
 #ifdef CONFIG_X86_32
 __visible unsigned long saved_context_ebx;
@@ -50,7 +51,7 @@ static void msr_save_context(struct saved_context *ctxt)
 	}
 }
 
-static void msr_restore_context(struct saved_context *ctxt)
+static void msr_restore_context(const struct saved_context *ctxt)
 {
 	struct saved_msr *msr = ctxt->saved_msrs.array;
 	struct saved_msr *end = msr + ctxt->saved_msrs.num;
@@ -136,6 +137,9 @@ void save_processor_state(void)
 {
 	__save_processor_state(&saved_context);
 	x86_platform.save_sched_clock_state();
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	hdn_rap_processor_save(&saved_context);
+#endif
 }
 #ifdef CONFIG_X86_32
 EXPORT_SYMBOL(save_processor_state);
@@ -194,7 +198,7 @@ static void fix_processor_context(void)
  * The asm code that gets us here will have restored a usable GDT, although
  * it will be pointing to the wrong alias.
  */
-static void notrace __restore_processor_state(struct saved_context *ctxt)
+static void notrace __restore_processor_state(const struct saved_context *ctxt)
 {
 	struct cpuinfo_x86 *c;
 
@@ -296,7 +300,12 @@ static void notrace __restore_processor_state(struct saved_context *ctxt)
 /* Needed by apm.c */
 void notrace restore_processor_state(void)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	__restore_processor_state(hdn_rap_processor_state());
+	hdn_rap_processor_finish();
+#else
 	__restore_processor_state(&saved_context);
+#endif
 }
 #ifdef CONFIG_X86_32
 EXPORT_SYMBOL(restore_processor_state);
@@ -393,6 +402,10 @@ static int msr_build_context(const u32 *msr_id, const int num)
 	int i, j;
 
 	total_num = saved_msrs->num + num;
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	if (total_num > HDN_RAP_PM_MSRS)
+		panic("HDN processor resume MSR identity capacity exceeded");
+#endif
 
 	msr_array = kmalloc_objs(struct saved_msr, total_num);
 	if (!msr_array) {
@@ -417,6 +430,10 @@ static int msr_build_context(const u32 *msr_id, const int num)
 		msr_array[i].info.msr_no	= msr_id[j];
 		msr_array[i].valid		= !rdmsrq_safe(msr_id[j], &dummy);
 		msr_array[i].info.reg.q		= 0;
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		if (msr_array[i].valid)
+			hdn_rap_pm_msr_ids[hdn_rap_pm_msr_count++] = msr_id[j];
+#endif
 	}
 	saved_msrs->num   = total_num;
 	saved_msrs->array = msr_array;

@@ -30,6 +30,7 @@
 #include <linux/mm.h>
 #include <linux/export.h>
 #include <linux/slab.h>
+#include <linux/hdn_alloc.h>
 #include <linux/init.h>
 #include <linux/rculist.h>
 #include <linux/memblock.h>
@@ -881,8 +882,9 @@ void __init pid_idr_init(void)
 	init_pid_ns.pid_cachep = kmem_cache_create("pid",
 			struct_size_t(struct pid, numbers, 1),
 			__alignof__(struct pid),
-			SLAB_HWCACHE_ALIGN | SLAB_PANIC | SLAB_ACCOUNT,
+			SLAB_HWCACHE_ALIGN | SLAB_PANIC | SLAB_ACCOUNT | SLAB_HDN_DOMAIN,
 			NULL);
+	hdn_cache_domain(init_pid_ns.pid_cachep, HDN_ALLOC_PID);
 }
 
 static __init int pid_namespace_sysctl_init(void)

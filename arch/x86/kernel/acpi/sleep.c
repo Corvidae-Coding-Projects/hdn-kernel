@@ -22,10 +22,13 @@
 #include <linux/ftrace.h>
 #include "../../realmode/rm/wakeup.h"
 #include "sleep.h"
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+#include "../../mm/hdn_pgtable_internal.h"
+#endif
 
 unsigned long acpi_realmode_flags;
 
-#if defined(CONFIG_SMP) && defined(CONFIG_64BIT)
+#if defined(CONFIG_SMP) && defined(CONFIG_64BIT) && !defined(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS)
 static char temp_stack[4096];
 #endif
 
@@ -57,10 +60,54 @@ asmlinkage acpi_status __visible x86_acpi_enter_sleep_state(u8 state)
  * Create an identity mapped page table and copy the wakeup routine to
  * low memory.
  */
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+/* The x86-64 real-mode phase consumes only the fixed trampoline target and
+ * these platform settings. Publish into its dedicated immutable page; no
+ * writable alias remains while the system sleeps. */
+static int publish_wakeup_header(const struct wakeup_header *header)
+{
+	unsigned long destination = (unsigned long)__va(real_mode_header->wakeup_header);
+	u64 misc;
+
+	if (!irqs_disabled() || header->signature != WAKEUP_HEADER_SIGNATURE ||
+	    header->real_magic != 0x12345678 ||
+	    (header->pmode_behavior & ~((1 << WAKEUP_BEHAVIOR_RESTORE_MISC_ENABLE) |
+				      (1 << WAKEUP_BEHAVIOR_RESTORE_CR4))))
+		return -EINVAL;
+	if (header->pmode_behavior & (1 << WAKEUP_BEHAVIOR_RESTORE_MISC_ENABLE)) {
+		if (rdmsrq_safe(MSR_IA32_MISC_ENABLE, &misc) ||
+		    misc != ((u64)header->pmode_misc_en_high << 32 | header->pmode_misc_en_low))
+			return -EINVAL;
+	}
+	/* PGTABLE reports an explicit unsupported runtime on confidential
+	 * guests. Their native platform header has not been sealed. */
+	if (!hdn_pt_active()) {
+		memcpy((void *)destination, header, sizeof(*header));
+		return 0;
+	}
+	for (unsigned int offset = 0; offset < sizeof(*header); offset += sizeof(long)) {
+		unsigned long word = 0;
+		unsigned int length = min_t(unsigned int, sizeof(long), sizeof(*header) - offset);
+
+		memcpy(&word, (const unsigned char *)header + offset, length);
+		hdn_pt_window_update(__pa(destination) >> PAGE_SHIFT, offset,
+				     word, 0, HDN_PT_STORE);
+	}
+	return 0;
+}
+#endif
+
 int x86_acpi_suspend_lowlevel(void)
 {
 	struct wakeup_header *header =
 		(struct wakeup_header *) __va(real_mode_header->wakeup_header);
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	struct wakeup_header prepared;
+	int error;
+
+	memcpy(&prepared, header, sizeof(prepared));
+	header = &prepared;
+#endif
 
 	if (header->signature != WAKEUP_HEADER_SIGNATURE) {
 		printk(KERN_ERR "wakeup header does not match\n");
@@ -112,7 +159,7 @@ int x86_acpi_suspend_lowlevel(void)
 	header->pmode_cr3 = (u32)__pa_symbol(initial_page_table);
 	saved_magic = 0x12345678;
 #else /* CONFIG_64BIT */
-#ifdef CONFIG_SMP
+#if defined(CONFIG_SMP) && !defined(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS)
 	/*
 	 * As each CPU starts up, it will find its own stack pointer
 	 * from its current_task->thread.sp. Typically that will be
@@ -145,6 +192,11 @@ int x86_acpi_suspend_lowlevel(void)
 	 * Pause/unpause graph tracing around do_suspend_lowlevel as it has
 	 * inconsistent call/return info after it jumps to the wakeup vector.
 	 */
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	error = publish_wakeup_header(header);
+	if (error)
+		return error;
+#endif
 	pause_graph_tracing();
 	do_suspend_lowlevel();
 	unpause_graph_tracing();

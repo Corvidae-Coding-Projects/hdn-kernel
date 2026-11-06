@@ -7,6 +7,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <asm/frame.h>
 #include <asm/asm-offsets.h>
 #include <linux/cfi_types.h>
@@ -618,6 +619,7 @@
 
 .text
 SYM_FUNC_START_LOCAL(__aria_gfni_avx512_crypt_64way)
+	HDN_REGS_FUNC __aria_gfni_avx512_crypt_64way
 	/* input:
 	 *      %r9: rk
 	 *      %rsi: dst
@@ -776,10 +778,12 @@ SYM_FUNC_START_LOCAL(__aria_gfni_avx512_crypt_64way)
 			   %zmm10, %zmm15, %zmm0, %zmm5,
 			   (%rax), (%r8));
 	FRAME_END
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __aria_gfni_avx512_crypt_64way
 SYM_FUNC_END(__aria_gfni_avx512_crypt_64way)
 
 SYM_TYPED_FUNC_START(aria_gfni_avx512_encrypt_64way)
+	HDN_ASM_FUNCTION aria_gfni_avx512_encrypt_64way, 1
 	/* input:
 	 *      %rdi: ctx, CTX
 	 *      %rsi: dst
@@ -794,17 +798,19 @@ SYM_TYPED_FUNC_START(aria_gfni_avx512_encrypt_64way)
 		     %zmm8, %zmm9, %zmm10, %zmm11, %zmm12, %zmm13, %zmm14,
 		     %zmm15, %rdx);
 
-	call __aria_gfni_avx512_crypt_64way;
+	HDN_REGS_CALL __aria_gfni_avx512_crypt_64way;
 
 	write_output(%zmm3, %zmm2, %zmm1, %zmm0, %zmm6, %zmm7, %zmm4, %zmm5,
 		     %zmm9, %zmm8, %zmm11, %zmm10, %zmm12, %zmm13, %zmm14,
 		     %zmm15, %rax);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_gfni_avx512_encrypt_64way
 SYM_FUNC_END(aria_gfni_avx512_encrypt_64way)
 
 SYM_TYPED_FUNC_START(aria_gfni_avx512_decrypt_64way)
+	HDN_ASM_FUNCTION aria_gfni_avx512_decrypt_64way, 1
 	/* input:
 	 *      %rdi: ctx, CTX
 	 *      %rsi: dst
@@ -819,17 +825,19 @@ SYM_TYPED_FUNC_START(aria_gfni_avx512_decrypt_64way)
 		     %zmm8, %zmm9, %zmm10, %zmm11, %zmm12, %zmm13, %zmm14,
 		     %zmm15, %rdx);
 
-	call __aria_gfni_avx512_crypt_64way;
+	HDN_REGS_CALL __aria_gfni_avx512_crypt_64way;
 
 	write_output(%zmm3, %zmm2, %zmm1, %zmm0, %zmm6, %zmm7, %zmm4, %zmm5,
 		     %zmm9, %zmm8, %zmm11, %zmm10, %zmm12, %zmm13, %zmm14,
 		     %zmm15, %rax);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_gfni_avx512_decrypt_64way
 SYM_FUNC_END(aria_gfni_avx512_decrypt_64way)
 
 SYM_FUNC_START_LOCAL(__aria_gfni_avx512_ctr_gen_keystream_64way)
+	HDN_REGS_FUNC __aria_gfni_avx512_ctr_gen_keystream_64way
 	/* input:
 	 *      %rdi: ctx
 	 *      %rsi: dst
@@ -923,10 +931,12 @@ SYM_FUNC_START_LOCAL(__aria_gfni_avx512_ctr_gen_keystream_64way)
 	movq %r10, (%r8);
 
 	FRAME_END
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __aria_gfni_avx512_ctr_gen_keystream_64way
 SYM_FUNC_END(__aria_gfni_avx512_ctr_gen_keystream_64way)
 
 SYM_TYPED_FUNC_START(aria_gfni_avx512_ctr_crypt_64way)
+	HDN_ASM_FUNCTION aria_gfni_avx512_ctr_crypt_64way, 1
 	/* input:
 	 *      %rdi: ctx
 	 *      %rsi: dst
@@ -936,7 +946,7 @@ SYM_TYPED_FUNC_START(aria_gfni_avx512_ctr_crypt_64way)
 	 */
 	FRAME_BEGIN
 
-	call __aria_gfni_avx512_ctr_gen_keystream_64way
+	HDN_REGS_CALL __aria_gfni_avx512_ctr_gen_keystream_64way
 
 	leaq (%rsi), %r10;
 	leaq (%rdx), %r11;
@@ -944,7 +954,7 @@ SYM_TYPED_FUNC_START(aria_gfni_avx512_ctr_crypt_64way)
 	leaq (%rcx), %rdx;
 	leaq ARIA_CTX_enc_key(CTX), %r9;
 
-	call __aria_gfni_avx512_crypt_64way;
+	HDN_REGS_CALL __aria_gfni_avx512_crypt_64way;
 
 	vpxorq (0 * 64)(%r11), %zmm3, %zmm3;
 	vpxorq (1 * 64)(%r11), %zmm2, %zmm2;
@@ -967,5 +977,6 @@ SYM_TYPED_FUNC_START(aria_gfni_avx512_ctr_crypt_64way)
 		     %zmm15, %r10);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END aria_gfni_avx512_ctr_crypt_64way
 SYM_FUNC_END(aria_gfni_avx512_ctr_crypt_64way)

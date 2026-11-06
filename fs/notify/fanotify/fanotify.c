@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/fanotify.h>
 #include <linux/fsnotify_backend.h>
+#include <linux/hdn_sysfs.h>
 #include <linux/init.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h> /* UINT_MAX */
@@ -132,6 +133,7 @@ static bool fanotify_should_merge(struct fanotify_event *old,
 	pr_debug("%s: old=%p new=%p\n", __func__, old, new);
 
 	if (old->hash != new->hash ||
+	    fanotify_event_disclosure(old) != fanotify_event_disclosure(new) ||
 	    old->type != new->type || old->pid != new->pid)
 		return false;
 
@@ -872,6 +874,18 @@ static struct fanotify_event *fanotify_alloc_event(
 	hash ^= hash_long((unsigned long)pid | ondir, FANOTIFY_EVENT_HASH_BITS);
 	fanotify_init_event(event, hash, mask);
 	event->pid = pid;
+#ifdef CONFIG_SECURITY_HARDENING_SYSFS_VIEW
+	event->hdn_disclosure = hdn_sysfs_inode_disclosure(id) |
+		hdn_sysfs_inode_disclosure(dirid) |
+		hdn_sysfs_inode_disclosure(dir) |
+		hdn_sysfs_inode_disclosure(child);
+	if (path)
+		event->hdn_disclosure |=
+			hdn_sysfs_inode_disclosure(d_inode(path->dentry));
+	if (moved)
+		event->hdn_disclosure |=
+			hdn_sysfs_inode_disclosure(d_inode(moved));
+#endif
 
 out:
 	set_active_memcg(old_memcg);

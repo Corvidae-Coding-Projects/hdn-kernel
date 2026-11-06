@@ -21,6 +21,7 @@
 
 #include <asm/cpu_entry_area.h>
 #include <asm/stacktrace.h>
+#include <asm/hdn_rap.h>
 #include <asm/unwind.h>
 
 static int die_counter;
@@ -149,9 +150,26 @@ void show_iret_regs(struct pt_regs *regs, const char *log_lvl)
 		regs->sp, regs->flags);
 }
 
-static void show_regs_if_on_stack(struct stack_info *info, struct pt_regs *regs,
+static void show_regs_if_on_stack(struct task_struct *task,
+				  struct stack_info *info, struct pt_regs *regs,
 				  bool partial, const char *log_lvl)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct pt_regs snapshot = { };
+	struct pt_regs *original = regs;
+	size_t offset = partial ? IRET_FRAME_OFFSET : 0;
+	size_t size = partial ? IRET_FRAME_SIZE : sizeof(*regs);
+
+	if (hdn_stack_address((unsigned long)regs)) {
+		if (!on_stack(info, (void *)regs + offset, size) ||
+		    hdn_stack_read(task, (unsigned long)regs + offset,
+				   (void *)&snapshot + offset, size))
+			return;
+		regs = &snapshot;
+	}
+#else
+	struct pt_regs *original = regs;
+#endif
 	/*
 	 * These on_stack() checks aren't strictly necessary: the unwind code
 	 * has already validated the 'regs' pointer.  The checks are done for
@@ -161,10 +179,10 @@ static void show_regs_if_on_stack(struct stack_info *info, struct pt_regs *regs,
 	 * next stack, this function will be called again with the same regs so
 	 * they can be printed in the right context.
 	 */
-	if (!partial && on_stack(info, regs, sizeof(*regs))) {
+	if (!partial && on_stack(info, original, sizeof(*regs))) {
 		__show_regs(regs, SHOW_REGS_SHORT, log_lvl);
 
-	} else if (partial && on_stack(info, (void *)regs + IRET_FRAME_OFFSET,
+	} else if (partial && on_stack(info, (void *)original + IRET_FRAME_OFFSET,
 				       IRET_FRAME_SIZE)) {
 		/*
 		 * When an interrupt or exception occurs in entry code, the
@@ -234,7 +252,7 @@ static void __show_trace_log_lvl(struct task_struct *task, struct pt_regs *regs,
 			printk("%s <%s>\n", log_lvl, stack_name);
 
 		if (regs)
-			show_regs_if_on_stack(&stack_info, regs, partial, log_lvl);
+			show_regs_if_on_stack(task, &stack_info, regs, partial, log_lvl);
 
 		/*
 		 * Scan the stack, printing any text addresses we find.  At the
@@ -249,9 +267,17 @@ static void __show_trace_log_lvl(struct task_struct *task, struct pt_regs *regs,
 		for (; stack < stack_info.end; stack++) {
 			unsigned long real_addr;
 			int reliable = 0;
-			unsigned long addr = READ_ONCE_NOCHECK(*stack);
+			unsigned long addr;
 			unsigned long *ret_addr_p =
 				unwind_get_return_address_ptr(&state);
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+			if (hdn_stack_address((unsigned long)stack)) {
+				if (hdn_stack_read(task, (unsigned long)stack, &addr, sizeof(addr)))
+					break;
+			} else
+#endif
+				addr = READ_ONCE_NOCHECK(*stack);
 
 			if (!__kernel_text_address(addr))
 				continue;
@@ -295,7 +321,7 @@ next:
 			/* if the frame has entry regs, print them */
 			regs = unwind_get_entry_regs(&state, &partial);
 			if (regs)
-				show_regs_if_on_stack(&stack_info, regs, partial, log_lvl);
+				show_regs_if_on_stack(task, &stack_info, regs, partial, log_lvl);
 		}
 
 		if (stack_name)
@@ -369,8 +395,6 @@ unsigned long oops_begin(void)
 	return flags;
 }
 NOKPROBE_SYMBOL(oops_begin);
-
-void __noreturn rewind_stack_and_make_dead(int signr);
 
 void oops_end(unsigned long flags, struct pt_regs *regs, int signr)
 {

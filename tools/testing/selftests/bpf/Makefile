@@ -494,7 +494,7 @@ LSKELS := fexit_sleep.c trace_printk.c trace_vprintk.c map_ptr_kern.c 	\
 	test_ringbuf_n.c test_ringbuf_map_key.c test_ringbuf_write.c    \
 	test_ringbuf_overwrite.c
 
-LSKELS_SIGNED := fentry_test.c fexit_test.c atomics.c
+LSKELS_SIGNED := fentry_test.c fexit_test.c atomics.c hdn_bpf_detach.c
 
 # Generate both light skeleton and libbpf skeleton for these
 LSKELS_EXTRA := test_ksyms_module.c test_ksyms_weak.c kfunc_call_test.c \

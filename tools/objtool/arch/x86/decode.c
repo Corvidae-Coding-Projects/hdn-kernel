@@ -106,7 +106,7 @@ static void scan_for_insn(struct section *sec, unsigned long offset,
 	while (1) {
 
 		insn_decode(&insn, sec->data->d_buf + o, sec_size(sec) - o,
-			    INSN_MODE_64);
+			    !strcmp(sec->name, ".init.text.hdn_pvh32") ? INSN_MODE_32 : INSN_MODE_64);
 
 		if (o + insn.length > offset) {
 			*insn_off = o;
@@ -233,6 +233,8 @@ int arch_decode_instruction(struct objtool_file *file, const struct section *sec
 	x86_64 = is_x86_64(elf);
 	if (x86_64 == -1)
 		return -1;
+	if (!strcmp(sec->name, ".init.text.hdn_pvh32"))
+		x86_64 = 0;
 
 	ret = insn_decode(&ins, sec->data->d_buf + offset, maxlen,
 			  x86_64 ? INSN_MODE_64 : INSN_MODE_32);

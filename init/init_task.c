@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/init_task.h>
+#include <linux/hdn_jitter.h>
 #include <linux/export.h>
 #include <linux/mqueue.h>
 #include <linux/sched.h>
@@ -88,6 +89,7 @@ static struct cred init_cred = {
 	.group_info		= &init_groups,
 	.ucounts		= &init_ucounts,
 };
+HDN_STATIC_CRED(init_cred);
 
 /*
  * Set up the first task table, touch at your own risk!. Base=0,

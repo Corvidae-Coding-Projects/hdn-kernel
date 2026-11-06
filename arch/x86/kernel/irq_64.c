@@ -19,6 +19,7 @@
 #include <linux/smp.h>
 #include <linux/sched/task_stack.h>
 #include <linux/vmalloc.h>
+#include <linux/hdn_rap.h>
 
 #include <asm/cpu_entry_area.h>
 #include <asm/softirq_stack.h>
@@ -49,6 +50,10 @@ static int map_irq_stack(unsigned int cpu)
 	va = vmap(pages, IRQ_STACK_SIZE / PAGE_SIZE, VM_MAP, PAGE_KERNEL);
 	if (!va)
 		return -ENOMEM;
+	if (hdn_rap_cpu_stack_prepare((unsigned long)va, IRQ_STACK_SIZE, cpu_to_node(cpu), cpu)) {
+		vunmap(va);
+		return -ENOMEM;
+	}
 
 	/* Store actual TOS to avoid adjustment in the hotpath */
 	per_cpu(hardirq_stack_ptr, cpu) = va + IRQ_STACK_SIZE - 8;

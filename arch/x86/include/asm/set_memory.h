@@ -8,6 +8,7 @@
 
 #define set_memory_rox set_memory_rox
 int set_memory_rox(unsigned long addr, int numpages);
+bool kernel_wx_enforced(void);
 
 /*
  * The set_memory_* API can be used to change various attributes of a virtual

@@ -4,6 +4,7 @@
 
 #include <linux/io_uring_types.h>
 #include <linux/lockdep.h>
+#include <linux/refcount.h>
 
 #define IO_VEC_CACHE_SOFT_CAP		256
 
@@ -14,7 +15,7 @@ enum {
 
 struct io_rsrc_node {
 	unsigned char			type;
-	int				refs;
+	refcount_t			refs;
 
 	u64 tag;
 	union {
@@ -101,10 +102,17 @@ static inline struct io_rsrc_node *io_rsrc_node_lookup(struct io_rsrc_data *data
 	return NULL;
 }
 
+static inline void io_get_rsrc_node(struct io_ring_ctx *ctx, struct io_rsrc_node *node)
+{
+	/* The table or the caller owns a reference while uring_lock is held. */
+	lockdep_assert_held(&ctx->uring_lock);
+	refcount_inc(&node->refs);
+}
+
 static inline void io_put_rsrc_node(struct io_ring_ctx *ctx, struct io_rsrc_node *node)
 {
 	lockdep_assert_held(&ctx->uring_lock);
-	if (!--node->refs)
+	if (refcount_dec_and_test(&node->refs))
 		io_free_rsrc_node(ctx, node);
 }
 

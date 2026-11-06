@@ -52,7 +52,7 @@ struct trampoline_header {
 	u64 efer;
 	u32 cr4;
 	u32 flags;
-	u32 lock;
+	u32 lock; /* physical lock address with PGTABLE, inline word otherwise */
 #endif
 };
 
@@ -93,7 +93,10 @@ static inline void set_real_mode_mem(phys_addr_t mem)
 
 void reserve_real_mode(void);
 void load_trampoline_pgtable(void);
+void hdn_realmode_update_cr4(void);
+void __noreturn hdn_realmode_restart(unsigned int type);
 void init_real_mode(void);
+bool real_mode_is_initialized(void);
 
 #endif /* __ASSEMBLER__ */
 

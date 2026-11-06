@@ -12,6 +12,7 @@
 #include <asm/percpu.h>
 #include <asm/frame.h>
 #include <asm/nops.h>
+#include <asm/hdn_rap.h>
 
 	.section .text..__x86.indirect_thunk
 
@@ -59,6 +60,7 @@ SYM_PIC_ALIAS(__x86_indirect_thunk_\reg)
 
 	.align RETPOLINE_THUNK_SIZE
 SYM_CODE_START(__x86_indirect_thunk_array)
+	HDN_KEXEC_FUNC __x86_indirect_thunk_array, 27
 
 #define GEN(reg) THUNK reg
 #include <asm/GEN-for-each-reg.h>
@@ -89,6 +91,7 @@ SYM_INNER_LABEL(__x86_indirect_call_thunk_\reg, SYM_L_GLOBAL)
 
 	.align RETPOLINE_THUNK_SIZE
 SYM_CODE_START(__x86_indirect_call_thunk_array)
+	HDN_KEXEC_FUNC __x86_indirect_call_thunk_array, 27
 
 #define GEN(reg) CALL_THUNK reg
 #include <asm/GEN-for-each-reg.h>
@@ -115,6 +118,7 @@ SYM_INNER_LABEL(__x86_indirect_jump_thunk_\reg, SYM_L_GLOBAL)
 
 	.align RETPOLINE_THUNK_SIZE
 SYM_CODE_START(__x86_indirect_jump_thunk_array)
+	HDN_KEXEC_FUNC __x86_indirect_jump_thunk_array, 27
 
 #define GEN(reg) JUMP_THUNK reg
 #include <asm/GEN-for-each-reg.h>
@@ -155,14 +159,23 @@ SYM_INNER_LABEL(__x86_indirect_its_thunk_\reg, SYM_L_GLOBAL)
 /* ITS mitigation requires thunks be aligned to upper half of cacheline */
 .align 64, 0xcc
 .skip 29, 0xcc
+#ifdef HDN_RAP_ASM_ACTIVE
+SYM_CODE_START_NOALIGN(__hdn_its_thunk_region)
+	HDN_KEXEC_FUNC __hdn_its_thunk_region, 27
+#endif
 
 #define GEN(reg) ITS_THUNK reg
 #include <asm/GEN-for-each-reg.h>
 #undef GEN
 
+#ifdef HDN_RAP_ASM_ACTIVE
+SYM_CODE_END(__hdn_its_thunk_region)
+#endif
 	.align 64, 0xcc
 SYM_FUNC_ALIAS(__x86_indirect_its_thunk_array, __x86_indirect_its_thunk_rax)
+#ifndef HDN_RAP_ASM_ACTIVE
 SYM_CODE_END(__x86_indirect_its_thunk_array)
+#endif
 
 #endif /* CONFIG_MITIGATION_ITS */
 
@@ -196,6 +209,7 @@ SYM_CODE_END(__x86_indirect_its_thunk_array)
  */
 	.pushsection .text..__x86.rethunk_untrain
 SYM_CODE_START_NOALIGN(srso_alias_untrain_ret)
+	HDN_KEXEC_FUNC srso_alias_untrain_ret, 27
 	UNWIND_HINT_FUNC
 	ANNOTATE_NOENDBR
 	ASM_NOP2
@@ -215,6 +229,7 @@ SYM_CODE_START_NOALIGN(srso_alias_safe_ret)
 SYM_FUNC_END(srso_alias_safe_ret)
 
 SYM_CODE_START_NOALIGN(srso_alias_return_thunk)
+	HDN_KEXEC_FUNC srso_alias_return_thunk, 27
 	UNWIND_HINT_FUNC
 	ANNOTATE_NOENDBR
 	call srso_alias_safe_ret
@@ -235,6 +250,7 @@ SYM_CODE_END(srso_alias_return_thunk)
 	.align 64
 	.skip 64 - (srso_safe_ret - srso_untrain_ret), 0xcc
 SYM_CODE_START_LOCAL_NOALIGN(srso_untrain_ret)
+	HDN_KEXEC_FUNC srso_untrain_ret, 27
 	ANNOTATE_NOENDBR
 	.byte 0x48, 0xb8
 
@@ -257,6 +273,7 @@ SYM_CODE_END(srso_safe_ret)
 SYM_FUNC_END(srso_untrain_ret)
 
 SYM_CODE_START(srso_return_thunk)
+	HDN_KEXEC_FUNC srso_return_thunk, 27
 	UNWIND_HINT_FUNC
 	ANNOTATE_NOENDBR
 	call srso_safe_ret
@@ -267,6 +284,7 @@ SYM_CODE_END(srso_return_thunk)
 #else /* !CONFIG_MITIGATION_SRSO */
 /* Dummy for the alternative in CALL_UNTRAIN_RET. */
 SYM_CODE_START(srso_alias_untrain_ret)
+	HDN_KEXEC_FUNC srso_alias_untrain_ret, 27
 	ANNOTATE_UNRET_SAFE
 	ANNOTATE_NOENDBR
 	ret
@@ -309,6 +327,7 @@ __EXPORT_THUNK(srso_alias_untrain_ret)
 	.align 64
 	.skip 64 - (retbleed_return_thunk - retbleed_untrain_ret), 0xcc
 SYM_CODE_START_LOCAL_NOALIGN(retbleed_untrain_ret)
+	HDN_KEXEC_FUNC retbleed_untrain_ret, 27
 	ANNOTATE_NOENDBR
 	/*
 	 * As executed from retbleed_untrain_ret, this is:
@@ -365,6 +384,7 @@ SYM_FUNC_END(retbleed_untrain_ret)
 #if defined(CONFIG_MITIGATION_UNRET_ENTRY) || defined(CONFIG_MITIGATION_SRSO)
 
 SYM_FUNC_START(entry_untrain_ret)
+	HDN_KEXEC_FUNC entry_untrain_ret, 27
 	ANNOTATE_NOENDBR
 	ALTERNATIVE JMP_RETBLEED_UNTRAIN_RET, JMP_SRSO_UNTRAIN_RET, X86_FEATURE_SRSO
 SYM_FUNC_END(entry_untrain_ret)
@@ -376,6 +396,7 @@ __EXPORT_THUNK(entry_untrain_ret)
 
 	.align 64
 SYM_FUNC_START(call_depth_return_thunk)
+	HDN_KEXEC_FUNC call_depth_return_thunk, 27
 	ANNOTATE_NOENDBR
 	/*
 	 * Keep the hotpath in a 16byte I-fetch for the non-debug
@@ -411,6 +432,7 @@ SYM_FUNC_END(call_depth_return_thunk)
 .align 64, 0xcc
 .skip 32, 0xcc
 SYM_CODE_START(its_return_thunk)
+	HDN_KEXEC_FUNC its_return_thunk, 27
 	UNWIND_HINT_FUNC
 	ANNOTATE_NOENDBR
 	ANNOTATE_UNRET_SAFE
@@ -435,13 +457,20 @@ EXPORT_SYMBOL(its_return_thunk)
  * objtool/alternatives/etc to patch all the return sites.
  */
 SYM_CODE_START(__x86_return_thunk)
+	HDN_KEXEC_FUNC __x86_return_thunk, 27
 	UNWIND_HINT_FUNC
 	ANNOTATE_NOENDBR
 #if defined(CONFIG_MITIGATION_UNRET_ENTRY) || \
     defined(CONFIG_MITIGATION_SRSO) || \
     defined(CONFIG_MITIGATION_CALL_DEPTH_TRACKING)
+#ifdef HDN_RAP_ASM_ACTIVE
+	/* A missed return-site patch is terminal. Do not enter an ordinary
+	 * warning callback with a return stack belonging to another function. */
+	ALTERNATIVE __stringify(ANNOTATE_UNRET_SAFE; ret), "ud2", X86_FEATURE_ALWAYS
+#else
 	ALTERNATIVE __stringify(ANNOTATE_UNRET_SAFE; ret), \
 		   "jmp warn_thunk_thunk", X86_FEATURE_ALWAYS
+#endif
 #else
 	ANNOTATE_UNRET_SAFE
 	ret
@@ -449,6 +478,10 @@ SYM_CODE_START(__x86_return_thunk)
 	int3
 SYM_CODE_END(__x86_return_thunk)
 SYM_PIC_ALIAS(__x86_return_thunk)
+#ifdef HDN_RAP_ASM_ACTIVE
+/* The physical-startup alias names the same entry, not a second sized body. */
+.size __pi___x86_return_thunk, 0
+#endif
 EXPORT_SYMBOL(__x86_return_thunk)
 
 #endif /* CONFIG_MITIGATION_RETHUNK */

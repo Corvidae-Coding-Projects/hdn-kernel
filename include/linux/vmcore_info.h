@@ -20,7 +20,13 @@
 				     CRASH_CORE_NOTE_NAME_BYTES +	\
 				     CRASH_CORE_NOTE_DESC_BYTES)
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+/* Include the immutable stack registry geometry without truncating the
+ * upstream crash-tool ABI. All allocation/safecopy users use this bound. */
+#define VMCOREINFO_BYTES	   (2 * PAGE_SIZE)
+#else
 #define VMCOREINFO_BYTES	   PAGE_SIZE
+#endif
 #define VMCOREINFO_NOTE_NAME	   "VMCOREINFO"
 #define VMCOREINFO_NOTE_NAME_BYTES ALIGN(sizeof(VMCOREINFO_NOTE_NAME), 4)
 #define VMCOREINFO_NOTE_SIZE	   ((CRASH_CORE_NOTE_HEAD_BYTES * 2) +	\

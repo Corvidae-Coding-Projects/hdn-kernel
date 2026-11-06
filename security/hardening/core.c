@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <linux/binfmts.h>
+#include <linux/buildid.h>
 #include <linux/capability.h>
 #include <linux/cred.h>
 #include <linux/dcache.h>
@@ -15,6 +16,18 @@
 #include <linux/fsverity.h>
 #include <linux/hardirq.h>
 #include <linux/hardening.h>
+#include <linux/hdn_execmem.h>
+#include <linux/hdn_pgtable.h>
+#include <linux/hdn_kernexec.h>
+#include <linux/hdn_rap.h>
+#include <linux/hdn_stack.h>
+#include <linux/hdn_uaccess.h>
+#include <linux/execmem.h>
+#include <linux/hdn_slab.h>
+#include <linux/hdn_alloc.h>
+#include <linux/hdn_jitter.h>
+#include <linux/hdn_sysfs.h>
+#include <linux/hdn_capabilities.h>
 #include <linux/hash.h>
 #include <linux/init.h>
 #include <linux/in.h>
@@ -42,6 +55,7 @@
 #include <linux/rcupdate.h>
 #include <linux/resource.h>
 #include <linux/sched.h>
+#include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/security.h>
 #include <linux/seq_file.h>
@@ -65,6 +79,11 @@
 #include <asm/ioctls.h>
 #include <crypto/sha2.h>
 #include <uapi/linux/prctl.h>
+#include "seal.h"
+#ifdef CONFIG_SECURITY_HARDENING_KERNEL_WX
+#include <asm/hdn_gdt.h>
+#include <asm/hdn_text.h>
+#endif
 
 #define HDN_EVENT_RING_SIZE 1024
 #define HDN_AUDIT_FLOOD_BUCKET_COUNT 64
@@ -167,6 +186,7 @@
 #define HDN_MITIGATION2_TTY_ACCESS_HARDEN	(1ULL << 9)
 
 struct hdn_mitigation_state {
+	struct hdn_seal *seal;
 	u32 abi_version;
 	u32 sealed_pages;
 	u64 flags;
@@ -175,6 +195,8 @@ struct hdn_mitigation_state {
 };
 
 struct hdn_policy {
+	struct hdn_seal *seal;
+	u32 required_capabilities;
 	u32 profile_count;
 	u32 subject_rule_count;
 	u32 object_rule_count;
@@ -195,7 +217,7 @@ struct hdn_policy {
 	struct hdn_module_rule_record *module_rules;
 	struct hdn_firmware_rule_record *firmware_rules;
 	struct hdn_resource_rule_record *resource_rules;
-	struct hdn_profile_record profiles[];
+	struct hdn_profile_record profiles[] __counted_by(profile_count);
 };
 
 struct hdn_policy_free_work {
@@ -313,23 +335,16 @@ static const char * const hdn_phase_names[] = {
 };
 
 static DEFINE_MUTEX(hdn_policy_mutex);
+static DEFINE_SEQLOCK(hdn_policy_publication_lock);
+static atomic64_t hdn_policy_epoch = ATOMIC64_INIT(1);
+/* A rollback can restore base policy, never old compatibility approvals. */
+static u64 hdn_compat_generation_highwater;
+static bool hdn_compat_after_rollback;
+static bool hdn_compat_policy_enabled;
 static struct hdn_policy __rcu *hdn_active_policy;
 static struct hdn_policy __rcu *hdn_previous_policy;
 static struct hdn_policy *hdn_staged_policy;
 static enum hdn_phase hdn_phase = HDN_PHASE_POLICY_LOAD;
-static struct dentry *hdn_fs_dir;
-static struct dentry *hdn_fs_policy;
-static struct dentry *hdn_fs_refresh;
-static struct dentry *hdn_fs_commit;
-static struct dentry *hdn_fs_rollback;
-static struct dentry *hdn_fs_phase;
-static struct dentry *hdn_fs_profiles;
-static struct dentry *hdn_fs_status;
-static struct dentry *hdn_fs_events;
-static struct dentry *hdn_fs_sealed_write_probe;
-static struct dentry *hdn_fs_kernel_lockout_probe;
-static struct dentry *hdn_fs_audit_flood_burst;
-static struct dentry *hdn_fs_audit_flood_window_ms;
 static DEFINE_SPINLOCK(hdn_event_lock);
 static DEFINE_SPINLOCK(hdn_brute_lock);
 static DEFINE_SPINLOCK(hdn_kernel_lockout_lock);
@@ -348,7 +363,7 @@ static u32 hdn_audit_flood_last_action;
 static u32 hdn_audit_flood_last_authority;
 static u32 hdn_audit_flood_last_transition;
 static u32 hdn_audit_flood_last_reason;
-static int hdn_proc_task_gid __read_mostly =
+static int hdn_proc_task_gid __ro_after_init =
 	CONFIG_SECURITY_HARDENING_PROC_TASK_GID;
 
 static int __init hdn_proc_task_gid_setup(char *str)
@@ -473,8 +488,7 @@ static u64 hdn_build_mitigation_flags(void)
 		flags |= HDN_MITIGATION_NET_BLACKHOLE;
 	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_TCP_NO_SIMULT_CONNECT))
 		flags |= HDN_MITIGATION_TCP_NO_SIMULT_CONNECT;
-	if (IS_ENABLED(CONFIG_X86))
-		flags |= HDN_MITIGATION_SEALED_DATA_REPORT;
+	flags |= HDN_MITIGATION_SEALED_DATA_REPORT;
 	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_RAND_THREADSTACK))
 		flags |= HDN_MITIGATION_RAND_THREADSTACK;
 	if (IS_ENABLED(CONFIG_VMAP_STACK))
@@ -548,17 +562,41 @@ static bool hdn_mitigation2_enabled(u64 flag)
 static int __init hdn_mitigations_init(void)
 {
 	struct hdn_mitigation_state *state;
+	struct hdn_seal *seal = NULL;
 	int ret;
 
-	state = vzalloc(PAGE_SIZE);
-	if (!state)
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNSEAL)) {
+		seal = hdn_seal_create(&hdn_mitigation_seal_type, PAGE_SIZE, NUMA_NO_NODE);
+		if (IS_ERR(seal))
+			return PTR_ERR(seal);
+		state = hdn_seal_write(seal, &hdn_mitigation_seal_type);
+	} else {
+		state = vzalloc(PAGE_SIZE);
+	}
+	if (!state) {
+		if (seal)
+			hdn_seal_destroy(seal, &hdn_mitigation_seal_type);
 		return -ENOMEM;
+	}
 
+	state->seal = seal;
 	state->abi_version = HDN_POLICY_ABI_VERSION;
 	state->sealed_pages = 1;
 	state->flags = hdn_build_mitigation_flags();
 	state->flags2 = hdn_build_mitigation_flags2();
 	state->sealed = true;
+
+	if (seal) {
+		ret = hdn_seal_finish(seal, &hdn_mitigation_seal_type);
+		if (!ret)
+			ret = hdn_seal_publish(seal, &hdn_mitigation_seal_type);
+		if (ret) {
+			hdn_seal_destroy(seal, &hdn_mitigation_seal_type);
+			return ret;
+		}
+		hdn_mitigations = state;
+		return 0;
+	}
 
 	set_vm_flush_reset_perms(state);
 	ret = set_memory_ro((unsigned long)state, state->sealed_pages);
@@ -813,6 +851,13 @@ static bool hdn_record_event_object_flags(enum hdn_authority authority,
 	u64 sequence;
 	bool recorded = true;
 
+	if (event_flags & HDN_EVENT_DEFERRED_KERNEL) {
+		event.pid = 0;
+		event.uid = 0;
+		event.profile_id = 0;
+		event.subject_id = 0;
+	}
+
 	spin_lock_irqsave(&hdn_event_lock, flags);
 	if (!hdn_audit_flood_allowed_locked(&event, now_ns)) {
 		recorded = false;
@@ -969,6 +1014,8 @@ static int hdn_deny_object(enum hdn_authority authority,
 	bool kill = hdn_deny_should_kill(authority, reason);
 	u64 flags = kill ? HDN_EVENT_RESPONSE_KILL_TASK : 0;
 
+	if (current->mm && READ_ONCE(current->mm->hardening_compat_revoked))
+		reason = HDN_REASON_APPLICATION_RESTART_REQUIRED;
 	if (hdn_record_event_object_flags(authority, transition, reason,
 					  HDN_DECISION_DENY_AUDIT, error,
 					  object_id, flags))
@@ -1669,10 +1716,76 @@ static const struct hdn_profile_record *hdn_builtin_profile(u64 profile_id)
 	return &hdn_builtin_profiles[0];
 }
 
+static const struct hdn_profile_record hdn_revoked_profile = {
+	.profile_id = HDN_PROFILE_REVOKED,
+	.name = "application-restart-required",
+	.capability_deny = ~0ULL,
+	.umask = 0777,
+	.flags = HDN_PROFILE_SYSFS_MASK | HDN_PROFILE_ENFORCE_TRUSTED_EXEC |
+		 HDN_PROFILE_DENY_UNPRIVILEGED_PRIVEXEC |
+		 HDN_PROFILE_DENY_UNTRUSTED_USER_EXEC | HDN_PROFILE_CHROOT_CONTAINED |
+		 HDN_PROFILE_ENFORCE_READONLY_MOUNTS | HDN_PROFILE_PROTECT_SHM,
+};
+
+/* No allocation or name lookup: usable inside the policy's RCU read section. */
+static bool hdn_compat_path_matches(struct file *file, const char *expected)
+{
+	char buffer[HDN_POLICY_PATH_LEN];
+	char *path;
+
+	if (!file || d_unlinked(file->f_path.dentry))
+		return false;
+	path = d_absolute_path(&file->f_path, buffer, sizeof(buffer));
+	return !IS_ERR(path) && !strcmp(path, expected);
+}
+
+static bool hdn_mm_compat_valid(const struct mm_struct *mm)
+{
+	struct file *file;
+	struct inode *inode;
+	u64 epoch;
+	bool valid;
+
+	if (!mm)
+		return true;
+	epoch = smp_load_acquire(&mm->hardening_compat_epoch);
+	if (!epoch)
+		return true;
+	/* Interrupt diagnostics cannot walk a path whose writer they interrupted. */
+	if (in_interrupt())
+		return false;
+	if (READ_ONCE(mm->hardening_compat_revoked))
+		return false;
+	if (epoch != atomic64_read(&hdn_policy_epoch))
+		goto revoke;
+	file = get_mm_exe_file((struct mm_struct *)mm);
+	if (!file)
+		goto revoke;
+	inode = file_inode(file);
+	valid = IS_VERITY(inode) &&
+		inode->i_ino == READ_ONCE(mm->hardening_exec_ino) &&
+		MAJOR(inode->i_sb->s_dev) == READ_ONCE(mm->hardening_exec_dev_major) &&
+		MINOR(inode->i_sb->s_dev) == READ_ONCE(mm->hardening_exec_dev_minor) &&
+		hdn_compat_path_matches(file, mm->hardening_compat_path);
+	fput(file);
+	if (valid && epoch == atomic64_read(&hdn_policy_epoch))
+		return true;
+revoke:
+	/* Never revive a binding after rollback or a later matching rename. */
+	WRITE_ONCE(((struct mm_struct *)mm)->hardening_compat_revoked, true);
+	return false;
+}
+
 static const struct hdn_profile_record *
 hdn_policy_find_profile(const struct hdn_policy *policy, u64 profile_id)
 {
 	u32 i;
+
+	if (profile_id == HDN_PROFILE_REVOKED ||
+	    (current->mm &&
+	     profile_id == READ_ONCE(current->mm->hardening_profile_id) &&
+	     !hdn_mm_compat_valid(current->mm)))
+		return &hdn_revoked_profile;
 
 	if (!policy)
 		return hdn_builtin_profile(profile_id);
@@ -1702,6 +1815,36 @@ static const struct hdn_profile_record *hdn_profile_by_id(u64 profile_id)
 	policy = rcu_dereference(hdn_active_policy);
 	return hdn_policy_find_profile(policy, profile_id);
 }
+
+#ifdef CONFIG_SECURITY_HARDENING_SYSFS_VIEW
+static u64 hdn_sysfs_profile_mask(const struct hdn_policy *policy, u64 id)
+{
+	const struct hdn_profile_record *profile = hdn_policy_find_profile(policy, id);
+
+	/* Removing a profile must not turn its surviving tasks into base services. */
+	if (id && profile->profile_id != id)
+		return HDN_PROFILE_SYSFS_MASK;
+	return profile->flags & HDN_PROFILE_SYSFS_MASK;
+}
+
+u64 hdn_sysfs_hidden_classes(void)
+{
+	const struct hdn_policy *policy;
+	u64 mask;
+
+	if (!current->mm)
+		return 0;
+	/* One policy generation, no dentry, opener-credential or path cache. */
+	rcu_read_lock();
+	policy = rcu_dereference(hdn_active_policy);
+	mask = hdn_sysfs_profile_mask(policy, hdn_current_profile_id());
+	mask |= hdn_sysfs_profile_mask(policy, hdn_current_mntns_profile_id());
+	mask |= hdn_sysfs_profile_mask(policy,
+				       hdn_userns_profile_id(current_user_ns()));
+	rcu_read_unlock();
+	return mask;
+}
+#endif
 
 int hdn_current_umask(void)
 {
@@ -1827,7 +1970,7 @@ static u64 hdn_current_exec_memory_flags(void)
 {
 	struct mm_struct *mm = current->mm;
 
-	if (!mm)
+	if (!mm || !hdn_mm_compat_valid(mm))
 		return 0;
 
 	return READ_ONCE(mm->hardening_exec_memory_flags);
@@ -1904,6 +2047,8 @@ u64 hdn_mm_profile_id(const struct mm_struct *mm)
 
 	if (!mm)
 		return HDN_PROFILE_PRIVILEGED;
+	if (!hdn_mm_compat_valid(mm))
+		return HDN_PROFILE_REVOKED;
 
 	profile_id = READ_ONCE(mm->hardening_profile_id);
 	if (!profile_id)
@@ -2314,6 +2459,11 @@ static bool hdn_exec_rule_matches(const struct hdn_exec_rule_record *rule,
 				  const struct hdn_file_identity *file_id,
 				  u64 parent_profile)
 {
+	if ((rule->flags & HDN_EXEC_COMPAT_LEASE) &&
+	    (bprm->hardening_interpreted ||
+	     !hdn_compat_path_matches(bprm->file, rule->file_path)))
+		return false;
+
 	if (rule->parent_profile_id &&
 	    rule->parent_profile_id != parent_profile)
 		return false;
@@ -2366,7 +2516,8 @@ static int hdn_resolve_exec_rule_paths(struct hdn_exec_rule_record *rule)
 		rule->file_ino = id.ino;
 		rule->flags &= ~HDN_EXEC_RESOLVE_FILE_PATH;
 		rule->flags |= HDN_EXEC_MATCH_FILE_ID;
-		memset(rule->file_path, 0, sizeof(rule->file_path));
+		if (!(rule->flags & HDN_EXEC_COMPAT_LEASE))
+			memset(rule->file_path, 0, sizeof(rule->file_path));
 	}
 
 	if (rule->flags & HDN_EXEC_RESOLVE_ORIGINAL_PATH) {
@@ -3812,17 +3963,40 @@ static u64 hdn_exec_profile_id(struct linux_binprm *bprm)
 	struct hdn_policy *policy;
 	u64 parent_profile;
 	u64 profile_id = 0;
+	u64 epoch;
+	unsigned int sequence;
 	u32 i;
 
+retry:
+	profile_id = 0;
+	bprm->hardening_compat_epoch = 0;
+	bprm->hardening_compat_managed = false;
+	memset(bprm->hardening_compat_path, 0, sizeof(bprm->hardening_compat_path));
 	bprm->hardening_profile_pinned = false;
 	bprm->hardening_profile_inherit_audit = false;
 	hdn_file_identity_from_file(bprm->file, &file_id);
 	parent_profile = hdn_current_profile_id();
 
 	rcu_read_lock();
+	sequence = read_seqbegin(&hdn_policy_publication_lock);
+	epoch = atomic64_read(&hdn_policy_epoch);
 	policy = rcu_dereference(hdn_active_policy);
 	if (policy) {
 		for (i = 0; i < policy->exec_rule_count; i++) {
+			if (policy->exec_rules[i].flags & HDN_EXEC_COMPAT_LEASE) {
+				const struct hdn_exec_rule_record *rule = &policy->exec_rules[i];
+
+				/* Failed bindings cannot fall back to embedded ELF grants. */
+				if (hdn_compat_path_matches(bprm->file, rule->file_path) ||
+				    hdn_identity_matches(&file_id, rule->file_dev_major,
+						 rule->file_dev_minor, rule->file_ino) ||
+				    (file_id.verity_digest_size == rule->verity_digest_size &&
+				     file_id.verity_digest_algorithm == rule->verity_digest_algorithm &&
+				     !memcmp(file_id.verity_digest, rule->verity_digest, rule->verity_digest_size)))
+					bprm->hardening_compat_managed = true;
+				if (!READ_ONCE(hdn_compat_policy_enabled))
+					continue;
+			}
 			if (!hdn_exec_rule_matches(&policy->exec_rules[i],
 						   bprm, &file_id,
 						   parent_profile))
@@ -3838,8 +4012,18 @@ static u64 hdn_exec_profile_id(struct linux_binprm *bprm)
 					policy->exec_rules[i].target_profile_id;
 			}
 			bprm->hardening_profile_pinned = true;
+			if (policy->exec_rules[i].flags & HDN_EXEC_COMPAT_LEASE) {
+				bprm->hardening_compat_epoch = epoch;
+				memcpy(bprm->hardening_compat_path,
+				       policy->exec_rules[i].file_path,
+				       sizeof(bprm->hardening_compat_path));
+			}
 			break;
 		}
+	}
+	if (read_seqretry(&hdn_policy_publication_lock, sequence)) {
+		rcu_read_unlock();
+		goto retry;
 	}
 	rcu_read_unlock();
 
@@ -4334,6 +4518,9 @@ int hdn_authorize_exec(struct linux_binprm *bprm)
 	profile_id = bprm->hardening_profile_id;
 	bprm->hardening_exec_memory_flags =
 		hdn_file_elf_memory_flags(bprm->file);
+	/* Compatibility grants come solely from the approved profile. */
+	if (bprm->hardening_compat_managed)
+		bprm->hardening_exec_memory_flags = 0;
 	privileged = hdn_bprm_privileged(bprm);
 	bprm->hardening_privileged_exec = privileged;
 	bprm->hardening_privileged_lineage =
@@ -4426,6 +4613,10 @@ void hdn_exec_committed(struct linux_binprm *bprm)
 	WRITE_ONCE(mm->hardening_exec_dev_minor, id.dev_minor);
 	WRITE_ONCE(mm->hardening_exec_ino, id.ino);
 	WRITE_ONCE(mm->hardening_exec_profile_id, profile_id);
+	memcpy(mm->hardening_compat_path, bprm->hardening_compat_path,
+	       sizeof(mm->hardening_compat_path));
+	WRITE_ONCE(mm->hardening_compat_revoked, false);
+	smp_store_release(&mm->hardening_compat_epoch, bprm->hardening_compat_epoch);
 	WRITE_ONCE(mm->hardening_exec_memory_flags,
 		   bprm->hardening_exec_memory_flags);
 	WRITE_ONCE(mm->hardening_exec_privileged,
@@ -6600,6 +6791,7 @@ bool hdn_blackhole_remote_skb(const struct sk_buff *skb)
 
 	return !(skb->dev->flags & IFF_LOOPBACK);
 }
+EXPORT_SYMBOL_GPL(hdn_blackhole_remote_skb);
 
 #define HDN_TCP_LASTACK_RETRIES 4
 
@@ -6647,7 +6839,9 @@ static int hdn_validate_profile_ids(const struct hdn_policy *policy)
 				  HDN_PROFILE_DENY_UNTRUSTED_USER_EXEC |
 				  HDN_PROFILE_AUDIT_PROCESS_ACCOUNT |
 				  HDN_PROFILE_PROTECT_SHM |
-				  HDN_PROFILE_INHERIT_UNMATCHED_EXEC;
+				  HDN_PROFILE_INHERIT_UNMATCHED_EXEC |
+				  (IS_ENABLED(CONFIG_SECURITY_HARDENING_SYSFS_VIEW) ?
+				   HDN_PROFILE_SYSFS_MASK : 0);
 	u64 valid_capabilities = (1ULL << (CAP_LAST_CAP + 1)) - 1;
 	u64 valid_exec_flags = HDN_EXEC_MATCH_FILE_ID |
 			       HDN_EXEC_MATCH_ORIGINAL_ID |
@@ -6655,7 +6849,7 @@ static int hdn_validate_profile_ids(const struct hdn_policy *policy)
 			       HDN_EXEC_RESOLVE_FILE_PATH |
 			       HDN_EXEC_RESOLVE_ORIGINAL_PATH |
 			       HDN_EXEC_INHERIT_PROFILE |
-			       HDN_EXEC_AUDIT_INHERIT;
+			       HDN_EXEC_AUDIT_INHERIT | HDN_EXEC_COMPAT_LEASE;
 	u64 exec_match_flags = HDN_EXEC_MATCH_FILE_ID |
 			       HDN_EXEC_MATCH_ORIGINAL_ID |
 			       HDN_EXEC_MATCH_VERITY_DIGEST |
@@ -6729,7 +6923,8 @@ static int hdn_validate_profile_ids(const struct hdn_policy *policy)
 	u32 i, j;
 
 	for (i = 0; i < policy->profile_count; i++) {
-		if (!policy->profiles[i].profile_id)
+		if (!policy->profiles[i].profile_id ||
+		    policy->profiles[i].profile_id == HDN_PROFILE_REVOKED)
 			return -EINVAL;
 		if (policy->profiles[i].authority_allow & ~valid_authorities)
 			return -EINVAL;
@@ -6885,6 +7080,51 @@ static int hdn_validate_profile_ids(const struct hdn_policy *policy)
 
 	for (i = 0; i < policy->exec_rule_count; i++) {
 		const struct hdn_exec_rule_record *rule = &policy->exec_rules[i];
+
+		if (rule->flags & HDN_EXEC_COMPAT_LEASE) {
+			const struct hdn_profile_record *profile;
+
+			if (!IS_ENABLED(CONFIG_FS_VERITY))
+				return -EOPNOTSUPP;
+			if (!(rule->flags & HDN_EXEC_MATCH_VERITY_DIGEST) ||
+			    !(rule->flags & (HDN_EXEC_MATCH_FILE_ID | HDN_EXEC_RESOLVE_FILE_PATH)) ||
+			    rule->flags & (HDN_EXEC_INHERIT_PROFILE | HDN_EXEC_AUDIT_INHERIT |
+					   HDN_EXEC_MATCH_ORIGINAL_ID | HDN_EXEC_RESOLVE_ORIGINAL_PATH) ||
+			    !rule->parent_profile_id || !hdn_policy_path_valid(rule->file_path) ||
+			    rule->target_profile_id == policy->default_profile_id ||
+			    rule->target_profile_id == policy->privileged_profile_id)
+				return -EINVAL;
+			/* Leases cannot be selected through UID/GID or inheritance. */
+			for (j = 0; j < policy->subject_rule_count; j++)
+				if (policy->subject_rules[j].profile_id == rule->target_profile_id)
+					return -EINVAL;
+			/* v1 leases admit memory transitions, not scoped object ACLs.
+			 * Revocation must not turn a profile-specific deny into no rule.
+			 */
+			for (j = 0; j < policy->object_rule_count; j++)
+				if (policy->object_rules[j].profile_id == rule->target_profile_id)
+					return -EINVAL;
+			for (j = 0; j < policy->exec_rule_count; j++) {
+				const struct hdn_exec_rule_record *other = &policy->exec_rules[j];
+
+				if (!(other->flags & HDN_EXEC_COMPAT_LEASE) &&
+				    (other->target_profile_id == rule->target_profile_id ||
+				     ((other->flags & HDN_EXEC_INHERIT_PROFILE) &&
+				      (!other->parent_profile_id ||
+				       other->parent_profile_id == rule->target_profile_id))))
+					return -EINVAL;
+			}
+			profile = NULL;
+			for (j = 0; j < policy->profile_count; j++)
+				if (policy->profiles[j].profile_id == rule->target_profile_id)
+					profile = &policy->profiles[j];
+			if (!profile)
+				return -EINVAL;
+			if (profile->flags & HDN_PROFILE_INHERIT_UNMATCHED_EXEC ||
+			    profile->memory_flags & ~(HDN_MEM_ALLOW_FIXED_ANON_EXEC |
+						      HDN_MEM_ALLOW_JIT_EXEC_AFTER_WRITE))
+				return -EINVAL;
+		}
 
 		if (rule->flags & HDN_EXEC_INHERIT_PROFILE) {
 			if (rule->target_profile_id)
@@ -7047,49 +7287,177 @@ static bool hdn_policy_address_is_sealed(const struct hdn_policy *policy,
 					 address);
 }
 
-static bool hdn_address_is_sealed(unsigned long address)
+static u32 hdn_sealed_address_class(unsigned long address)
 {
 	const struct hdn_mitigation_state *mitigations;
 	const struct hdn_policy *policy;
-	bool sealed = false;
+	u32 type = 0;
 
 	mitigations = READ_ONCE(hdn_mitigations);
 	if (mitigations && READ_ONCE(mitigations->sealed) &&
 	    hdn_sealed_range_contains(mitigations, mitigations->sealed_pages,
 				      address))
-		return true;
+		return 2; /* mitigation state */
 
 	rcu_read_lock();
 	policy = rcu_dereference(hdn_active_policy);
 	if (hdn_policy_address_is_sealed(policy, address)) {
-		sealed = true;
+		type = 1; /* policy */
 		goto out_unlock;
 	}
 	policy = rcu_dereference(hdn_previous_policy);
 	if (hdn_policy_address_is_sealed(policy, address))
-		sealed = true;
+		type = 1;
 out_unlock:
 	rcu_read_unlock();
-	return sealed;
+	return type;
 }
 
 void hdn_report_sealed_write_fault(unsigned long address)
 {
-	if (!hdn_address_is_sealed(address))
+	u32 type = hdn_sealed_address_class(address);
+
+	if (!type)
 		return;
 
 	hdn_record_event_object_flags(HDN_AUTH_NONE, HDN_TRANS_SEALED_DATA,
 				      HDN_REASON_SEALED_DATA_WRITE,
 				      HDN_DECISION_DENY_AUDIT, -EFAULT,
-				      address, 0);
+				      type, 0);
 }
+
+void hdn_report_kernel_mapping_violation(int error)
+{
+	/* No virtual address, PFN, or caller address crosses the event ABI. */
+	hdn_record_event(HDN_AUTH_NONE, HDN_TRANS_KERNEL_MAPPING,
+			 error == -EPERM ? HDN_REASON_SEALED_DATA_WRITE :
+			 HDN_REASON_KERNEL_WX_MAPPING, HDN_DECISION_DENY_AUDIT, error);
+}
+
+void hdn_report_kernel_text_transition(u64 generation, enum hdn_reason reason,
+				       int error)
+{
+	/* A monotonic transition number is an audit identifier, never an address. */
+	hdn_record_event_object_flags(HDN_AUTH_NONE, HDN_TRANS_KERNEL_TEXT, reason,
+				      error ? HDN_DECISION_DENY_AUDIT :
+				      HDN_DECISION_ALLOW_AUDIT, error, generation, 0);
+}
+
+void hdn_report_kernel_deferred(enum hdn_transition transition, u64 generation,
+				enum hdn_reason reason)
+{
+	bool denied = reason == HDN_REASON_KERNEL_USER_ACCESS_DENIED;
+
+	hdn_record_event_object_flags(HDN_AUTH_NONE, transition, reason,
+				      denied ? HDN_DECISION_DENY_AUDIT : HDN_DECISION_ALLOW_AUDIT,
+				      denied ? -EFAULT : 0, generation,
+				      HDN_EVENT_DEFERRED_KERNEL);
+}
+
+void hdn_report_kernel_seal(u32 type, int error)
+{
+	hdn_record_event_object_flags(HDN_AUTH_NONE, HDN_TRANS_KERNEL_SEAL,
+				      HDN_REASON_KERNEL_SEAL_STATE,
+				      error ? HDN_DECISION_DENY_AUDIT : HDN_DECISION_ALLOW_AUDIT,
+				      error, type, 0);
+}
+
+void hdn_report_kernel_page_transition(u64 generation, enum hdn_reason reason, int error)
+{
+	hdn_record_event_object_flags(HDN_AUTH_NONE, HDN_TRANS_KERNEL_MAPPING, reason,
+				      error ? HDN_DECISION_DENY_AUDIT : HDN_DECISION_ALLOW_AUDIT,
+				      error, generation, 0);
+}
+
+void hdn_report_control_flow_failure(unsigned long kind)
+{
+	/* A closed six-class value, never a code address, target hash or stack
+	 * byte. This runs only after the architecture installed its fatal domain. */
+	if (kind < 1 || kind > 6)
+		kind = 6;
+	hdn_record_event_object_flags(HDN_AUTH_NONE, HDN_TRANS_KERNEL_TEXT,
+				      HDN_REASON_CONTROL_FLOW_VIOLATION,
+				      HDN_DECISION_DENY_AUDIT, -EPERM, kind, 0);
+}
+
+#ifdef CONFIG_SECURITY_HARDENING_KERNSEAL
+static int hdn_policy_seal_validate(const void *data, size_t size)
+{
+	const struct hdn_policy *policy = data;
+	size_t offset = sizeof(*policy), bytes;
+
+	if (policy->alloc_size != size || !policy->sealed || !policy->seal)
+		return -EINVAL;
+#define HDN_VALIDATE_ARRAY(array, count) do { \
+	if (check_mul_overflow((size_t)policy->count, sizeof(*policy->array), &bytes) || \
+	    offset > size || bytes > size - offset || \
+	    (const void *)policy->array != (const u8 *)data + offset) \
+		return -EINVAL; \
+	offset += bytes; \
+} while (0)
+	HDN_VALIDATE_ARRAY(profiles, profile_count);
+	HDN_VALIDATE_ARRAY(subject_rules, subject_rule_count);
+	HDN_VALIDATE_ARRAY(object_rules, object_rule_count);
+	HDN_VALIDATE_ARRAY(exec_rules, exec_rule_count);
+	HDN_VALIDATE_ARRAY(module_rules, module_rule_count);
+	HDN_VALIDATE_ARRAY(firmware_rules, firmware_rule_count);
+	HDN_VALIDATE_ARRAY(resource_rules, resource_rule_count);
+#undef HDN_VALIDATE_ARRAY
+	if (offset != size)
+		return -EINVAL;
+	return hdn_validate_profile_ids(policy);
+}
+
+static int hdn_mitigation_seal_validate(const void *data, size_t size)
+{
+	const struct hdn_mitigation_state *state = data;
+
+	return size == PAGE_SIZE && state->abi_version == HDN_POLICY_ABI_VERSION &&
+	       state->sealed_pages == 1 && state->sealed && state->seal &&
+	       state->flags == hdn_build_mitigation_flags() &&
+	       state->flags2 == hdn_build_mitigation_flags2() ? 0 : -EINVAL;
+}
+
+static struct hdn_seal *hdn_policy_seal_handle(const void *data)
+{
+	return ((const struct hdn_policy *)data)->seal;
+}
+
+static struct hdn_seal *hdn_mitigation_seal_handle(const void *data)
+{
+	return ((const struct hdn_mitigation_state *)data)->seal;
+}
+
+const struct hdn_seal_type hdn_policy_seal_type = {
+	.id = 1,
+	.minimum_size = sizeof(struct hdn_policy),
+	.maximum_size = HDN_MAX_POLICY_SIZE + sizeof(struct hdn_policy),
+	.alignment = __alignof__(struct hdn_policy),
+	.readers = HDN_SEAL_READER_RCU_REFCOUNT,
+	.replacement = HDN_SEAL_REPLACE_COPY_RCU,
+	.validate = hdn_policy_seal_validate,
+	.handle = hdn_policy_seal_handle,
+};
+const struct hdn_seal_type hdn_mitigation_seal_type = {
+	.id = 2,
+	.minimum_size = PAGE_SIZE,
+	.maximum_size = PAGE_SIZE,
+	.alignment = __alignof__(struct hdn_mitigation_state),
+	.readers = HDN_SEAL_READER_IMMORTAL,
+	.replacement = HDN_SEAL_REPLACE_NONE,
+	.validate = hdn_mitigation_seal_validate,
+	.handle = hdn_mitigation_seal_handle,
+};
+#endif
 
 static int hdn_policy_seal(struct hdn_policy *policy)
 {
 	int ret;
 
-	set_vm_flush_reset_perms(policy);
 	policy->sealed = true;
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNSEAL))
+		return hdn_seal_finish(policy->seal, &hdn_policy_seal_type);
+	set_vm_flush_reset_perms(policy);
 	ret = set_memory_ro((unsigned long)policy,
 			    hdn_policy_page_count(policy));
 	if (ret) {
@@ -7110,6 +7478,11 @@ static void hdn_policy_unseal(struct hdn_policy *policy)
 
 static void hdn_policy_free(struct hdn_policy *policy)
 {
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNSEAL)) {
+		if (policy)
+			WARN_ON_ONCE(hdn_seal_destroy(policy->seal, &hdn_policy_seal_type));
+		return;
+	}
 	hdn_policy_unseal(policy);
 	vfree(policy);
 }
@@ -7137,6 +7510,10 @@ static void hdn_policy_free_after_rcu(struct hdn_policy *policy)
 
 	if (!policy)
 		return;
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNSEAL)) {
+		WARN_ON_ONCE(hdn_seal_retire(policy->seal, &hdn_policy_seal_type));
+		return;
+	}
 
 	work = kmalloc_obj(*work, GFP_KERNEL);
 	if (!work) {
@@ -7155,6 +7532,48 @@ static u64 hdn_policy_generation(const struct hdn_policy *policy)
 	return policy ? policy->generation : 0;
 }
 
+/* Paired with exec selection; rollback also consumes a fresh, never reused epoch. */
+static struct hdn_policy *hdn_publish_policy(struct hdn_policy *policy, bool rollback)
+{
+	struct hdn_policy *old;
+	unsigned long flags;
+
+	lockdep_assert_held(&hdn_policy_mutex);
+	write_seqlock_irqsave(&hdn_policy_publication_lock, flags);
+	if (!atomic64_inc_return(&hdn_policy_epoch))
+		panic("HDN policy epoch exhausted");
+	WRITE_ONCE(hdn_compat_policy_enabled, policy && !rollback &&
+		   (policy->generation > hdn_compat_generation_highwater ||
+		    (!hdn_compat_after_rollback && policy->generation == hdn_compat_generation_highwater)));
+	if (policy && policy->generation > hdn_compat_generation_highwater)
+		hdn_compat_after_rollback = false;
+	if (rollback)
+		hdn_compat_after_rollback = true;
+	if (policy && policy->generation > hdn_compat_generation_highwater)
+		hdn_compat_generation_highwater = policy->generation;
+	old = rcu_replace_pointer(hdn_active_policy, policy,
+				  lockdep_is_held(&hdn_policy_mutex));
+	write_sequnlock_irqrestore(&hdn_policy_publication_lock, flags);
+	return old;
+}
+
+struct hdn_policy_replace_context {
+	bool retain_active_as_previous;
+};
+
+static const void *hdn_policy_replace_publish(void *context, const void *next)
+{
+	const struct hdn_policy_replace_context *replace = context;
+	struct hdn_policy *old;
+
+	lockdep_assert_held(&hdn_policy_mutex);
+	old = hdn_publish_policy((struct hdn_policy *)next, false);
+	if (!replace->retain_active_as_previous)
+		return old;
+	return rcu_replace_pointer(hdn_previous_policy, old,
+				   lockdep_is_held(&hdn_policy_mutex));
+}
+
 static bool hdn_policy_base_matches(const struct hdn_policy *policy,
 				    const struct hdn_policy *active)
 {
@@ -7165,9 +7584,14 @@ static bool hdn_policy_base_matches(const struct hdn_policy *policy,
 static int hdn_refresh_policy(struct hdn_policy *policy)
 {
 	struct hdn_policy *active;
+	const struct hdn_policy_replace_context replace = {};
+	u64 generation = policy->generation;
 	enum hdn_reason reason = HDN_REASON_NONE;
 	int ret = 0;
 
+	ret = hdn_capabilities_require(policy->required_capabilities);
+	if (ret)
+		return ret;
 	mutex_lock(&hdn_policy_mutex);
 	if (hdn_phase != HDN_PHASE_RUNTIME) {
 		ret = -EPERM;
@@ -7190,8 +7614,17 @@ static int hdn_refresh_policy(struct hdn_policy *policy)
 		goto out_unlock;
 	}
 
-	active = rcu_replace_pointer(hdn_active_policy, policy,
-				     lockdep_is_held(&hdn_policy_mutex));
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNSEAL)) {
+		ret = hdn_seal_replace(policy->seal, &hdn_policy_seal_type,
+				       hdn_policy_replace_publish, (void *)&replace);
+		if (ret) {
+			reason = HDN_REASON_INVALID_POLICY;
+			goto out_unlock;
+		}
+		active = NULL; /* KERNSEAL retired the evicted publication. */
+	} else {
+		active = hdn_publish_policy(policy, false);
+	}
 	mutex_unlock(&hdn_policy_mutex);
 
 	hdn_policy_free_after_rcu(active);
@@ -7199,7 +7632,7 @@ static int hdn_refresh_policy(struct hdn_policy *policy)
 				      HDN_TRANS_POLICY_REFRESH,
 				      HDN_REASON_NONE,
 				      HDN_DECISION_ALLOW_AUDIT, 0,
-				      policy->generation, 0);
+				      generation, 0);
 	return 0;
 
 out_unlock:
@@ -7213,6 +7646,7 @@ static int hdn_stage_policy(struct hdn_policy *policy)
 {
 	struct hdn_policy *active;
 	struct hdn_policy *old_staged;
+	u64 generation = policy->generation;
 	enum hdn_phase phase;
 	int ret = 0;
 
@@ -7245,7 +7679,7 @@ static int hdn_stage_policy(struct hdn_policy *policy)
 	hdn_record_event_object_flags(HDN_AUTH_POLICY_ADMIN,
 				      HDN_TRANS_POLICY_LOAD, HDN_REASON_NONE,
 				      HDN_DECISION_ALLOW_AUDIT, 0,
-				      policy->generation, 0);
+				      generation, 0);
 
 	return 0;
 
@@ -7267,6 +7701,10 @@ static int hdn_commit_policy(void)
 	struct hdn_policy *policy = NULL;
 	struct hdn_policy *old;
 	struct hdn_policy *older;
+	const struct hdn_policy_replace_context replace = {
+		.retain_active_as_previous = true,
+	};
+	u64 generation = 0;
 	enum hdn_reason reason;
 	enum hdn_phase phase;
 	int ret = 0;
@@ -7284,9 +7722,16 @@ static int hdn_commit_policy(void)
 	}
 
 	policy = hdn_staged_policy;
+	if (policy)
+		generation = policy->generation;
 	if (!policy) {
 		ret = -ENODATA;
 		reason = HDN_REASON_NO_STAGED_POLICY;
+		goto out_unlock;
+	}
+	ret = hdn_capabilities_require(policy->required_capabilities);
+	if (ret) {
+		reason = HDN_REASON_INVALID_POLICY;
 		goto out_unlock;
 	}
 
@@ -7303,18 +7748,28 @@ static int hdn_commit_policy(void)
 		goto out_unlock;
 	}
 
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNSEAL)) {
+		ret = hdn_seal_replace(policy->seal, &hdn_policy_seal_type,
+				       hdn_policy_replace_publish, (void *)&replace);
+		if (ret) {
+			reason = HDN_REASON_INVALID_POLICY;
+			goto out_unlock;
+		}
+		old = NULL;
+		older = NULL; /* KERNSEAL retired the displaced previous policy. */
+	} else {
+		old = hdn_publish_policy(policy, false);
+		older = rcu_replace_pointer(hdn_previous_policy, old,
+					    lockdep_is_held(&hdn_policy_mutex));
+	}
 	hdn_staged_policy = NULL;
-	old = rcu_replace_pointer(hdn_active_policy, policy,
-				  lockdep_is_held(&hdn_policy_mutex));
-	older = rcu_replace_pointer(hdn_previous_policy, old,
-				    lockdep_is_held(&hdn_policy_mutex));
 	mutex_unlock(&hdn_policy_mutex);
 
 	hdn_policy_free_after_rcu(older);
 	hdn_record_event_object_flags(HDN_AUTH_POLICY_ADMIN,
 				      HDN_TRANS_POLICY_COMMIT, HDN_REASON_NONE,
 				      HDN_DECISION_ALLOW_AUDIT, 0,
-				      policy->generation, 0);
+				      generation, 0);
 
 	return 0;
 
@@ -7322,7 +7777,7 @@ out_unlock:
 	mutex_unlock(&hdn_policy_mutex);
 	return hdn_deny_object(HDN_AUTH_POLICY_ADMIN, HDN_TRANS_POLICY_COMMIT,
 			       reason, ret,
-			       policy ? policy->generation : 0);
+			       generation);
 }
 
 static int hdn_rollback_policy(void)
@@ -7330,6 +7785,7 @@ static int hdn_rollback_policy(void)
 	struct hdn_policy *active;
 	struct hdn_policy *previous;
 	struct hdn_policy *staged;
+	u64 generation;
 	enum hdn_phase phase;
 	int ret;
 
@@ -7351,9 +7807,16 @@ static int hdn_rollback_policy(void)
 					   lockdep_is_held(&hdn_policy_mutex));
 	previous = rcu_dereference_protected(hdn_previous_policy,
 					     lockdep_is_held(&hdn_policy_mutex));
+	ret = hdn_capabilities_require(previous ? previous->required_capabilities : 0);
+	if (ret) {
+		mutex_unlock(&hdn_policy_mutex);
+		return hdn_deny(HDN_AUTH_POLICY_ADMIN, HDN_TRANS_POLICY_ROLLBACK,
+				HDN_REASON_INVALID_POLICY, ret);
+	}
 	staged = hdn_staged_policy;
+	generation = previous ? previous->generation : 0;
 	hdn_staged_policy = NULL;
-	rcu_assign_pointer(hdn_active_policy, previous);
+	hdn_publish_policy(previous, true);
 	rcu_assign_pointer(hdn_previous_policy, active);
 	mutex_unlock(&hdn_policy_mutex);
 
@@ -7361,7 +7824,7 @@ static int hdn_rollback_policy(void)
 	hdn_record_event_object_flags(HDN_AUTH_POLICY_ADMIN,
 				      HDN_TRANS_POLICY_ROLLBACK,
 				      HDN_REASON_NONE, HDN_DECISION_ALLOW_AUDIT,
-				      0, previous ? previous->generation : 0, 0);
+				      0, generation, 0);
 
 	return 0;
 }
@@ -7376,6 +7839,7 @@ static int hdn_load_policy_blob(const char __user *buf, size_t count,
 {
 	const struct hdn_policy_header *header;
 	struct hdn_policy *policy;
+	struct hdn_seal *seal = NULL;
 	enum hdn_transition transition;
 	u8 *blob;
 	size_t payload_len;
@@ -7438,8 +7902,12 @@ static int hdn_load_policy_blob(const char __user *buf, size_t count,
 		goto out_blob;
 	if (header->resource_rule_size < sizeof(struct hdn_resource_rule_record))
 		goto out_blob;
-	if (header->flags)
+	if (header->flags & ~HDN_CAP_KNOWN_MASK)
 		goto out_blob;
+	if (hdn_capabilities_require(header->flags)) {
+		ret = -EOPNOTSUPP;
+		goto out_blob;
+	}
 	if (!header->profile_count ||
 	    header->profile_count > HDN_MAX_PROFILES)
 		goto out_blob;
@@ -7531,13 +7999,26 @@ static int hdn_load_policy_blob(const char __user *buf, size_t count,
 					  sizeof(struct hdn_resource_rule_record)),
 			       &alloc_size))
 		goto out_blob;
-	policy = vzalloc(alloc_size);
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNSEAL)) {
+		seal = hdn_seal_create(&hdn_policy_seal_type, alloc_size, NUMA_NO_NODE);
+		if (IS_ERR(seal)) {
+			ret = PTR_ERR(seal);
+			goto out_blob;
+		}
+		policy = hdn_seal_write(seal, &hdn_policy_seal_type);
+	} else {
+		policy = vzalloc(alloc_size);
+	}
 	if (!policy) {
+		if (seal)
+			hdn_seal_destroy(seal, &hdn_policy_seal_type);
 		ret = -ENOMEM;
 		goto out_blob;
 	}
 
+	policy->seal = seal;
 	policy->alloc_size = alloc_size;
+	policy->required_capabilities = header->flags;
 	policy->profile_count = header->profile_count;
 	policy->subject_rule_count = header->subject_rule_count;
 	policy->object_rule_count = header->object_rule_count;
@@ -7970,6 +8451,8 @@ static int hdn_status_show(struct seq_file *m, void *v)
 	struct hdn_policy *policy;
 	struct hdn_policy *previous;
 	struct hdn_policy *staged;
+	struct hdn_seal_stats seal_stats;
+	struct hdn_stack_stats stack_stats;
 	enum hdn_phase phase;
 	unsigned long event_flags;
 	u64 audit_flood_window_ns;
@@ -7980,6 +8463,203 @@ static int hdn_status_show(struct seq_file *m, void *v)
 	u32 audit_flood_last_transition;
 	u32 audit_flood_last_reason;
 
+	hdn_seal_get_stats(&seal_stats);
+	hdn_stack_get_stats(&stack_stats);
+
+#ifdef CONFIG_SECURITY_HARDENING_KERNEL_WX
+	struct hdn_text_window_stats text_stats;
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_EXECMEM
+	struct hdn_execmem_stats page_stats;
+	struct execmem_bpf_stats bpf_stats;
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+	struct hdn_slab_layout_stats slab_stats;
+
+	hdn_slab_layout_stats(&slab_stats);
+	seq_printf(m, "slab_layout_state: %s\n", slab_stats.active ? "active" : "initializing");
+	seq_printf(m, "slab_layout_test_interface: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_SLAB_LAYOUT_TEST));
+	if (ns_capable(&init_user_ns, CAP_SYS_ADMIN)) {
+		seq_printf(m, "slab_layout_allocation_attempts: %llu\n",
+			   slab_stats.allocation_attempts);
+		seq_printf(m, "slab_layout_allocation_failures: %llu\n",
+			   slab_stats.allocation_failures);
+		seq_printf(m, "slab_layout_slabs: %llu\n", slab_stats.slabs);
+		seq_printf(m, "slab_layout_fallbacks: %llu\n", slab_stats.fallback);
+		seq_printf(m, "slab_layout_no_offset_room: %llu\n", slab_stats.no_offset_room);
+		seq_printf(m, "slab_layout_offset_slabs: %llu\n", slab_stats.offset_slabs);
+		seq_printf(m, "slab_layout_offset_bytes: %llu\n", slab_stats.offset_bytes);
+		seq_printf(m, "slab_layout_original_objects: %llu\n",
+			   slab_stats.original_objects);
+		seq_printf(m, "slab_layout_placed_objects: %llu\n",
+			   slab_stats.placed_objects);
+		seq_printf(m, "slab_layout_displaced_objects: %llu\n",
+			   slab_stats.displaced_objects);
+	}
+#else
+	seq_puts(m, "slab_layout_state: disabled\nslab_layout_test_interface: 0\n");
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	{
+		struct hdn_alloc_stats stats;
+
+		hdn_alloc_get_stats(&stats);
+		seq_printf(m, "autoslab_state: %s\n", stats.ready ? "active" : "initializing");
+		seq_printf(m, "autoslab_metadata_version: 1\nautoslab_cache_budget: 2048\n");
+		seq_printf(m, "autoslab_caches: %u\n", stats.caches);
+		if (ns_capable(&init_user_ns, CAP_SYS_ADMIN)) {
+			seq_printf(m, "autoslab_typed: %llu\n", stats.typed);
+			seq_printf(m, "autoslab_successful: %llu\n", stats.successful);
+			seq_printf(m, "autoslab_failed: %llu\n", stats.failed);
+			seq_printf(m, "autoslab_mandatory: %llu\n", stats.mandatory);
+			seq_printf(m, "autoslab_early: %llu\n", stats.early);
+			seq_printf(m, "autoslab_rejected: %llu\n", stats.rejected);
+		}
+	}
+#else
+	seq_puts(m, "autoslab_state: disabled\n");
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_JITTER
+	{
+		struct hdn_jitter_stats stats;
+
+		hdn_jitter_get_stats(&stats);
+		seq_printf(m, "critical_jitter_state: %s\n", !stats.entropy_ready ? "initializing" :
+			   stats.early_live ? "degraded-entropy" : "active");
+		seq_puts(m, "critical_jitter_metadata_version: 1\n");
+		seq_puts(m, "critical_jitter_classes: credentials,files,backing-files\n");
+		seq_puts(m, "critical_jitter_placement_slots: 8\n");
+		seq_puts(m, "critical_jitter_queue_limit_per_class: 128\n");
+		if (ns_capable(&init_user_ns, CAP_SYS_ADMIN)) {
+			seq_printf(m, "critical_jitter_allocations: %llu\n", stats.allocations);
+			seq_printf(m, "critical_jitter_allocation_failures: %llu\n",
+				   stats.allocation_failures);
+			seq_printf(m, "critical_jitter_retired: %llu\n", stats.retired);
+			seq_printf(m, "critical_jitter_released: %llu\n", stats.released);
+			seq_printf(m, "critical_jitter_quarantined: %u\n", stats.quarantined);
+			seq_printf(m, "critical_jitter_pressure: %llu\n", stats.pressure);
+			seq_printf(m, "critical_jitter_early_live: %llu\n", stats.early_live);
+			seq_printf(m, "critical_jitter_failures: %llu\n", stats.integrity_failures);
+			seq_printf(m, "critical_jitter_cred_allocations: %llu\n",
+				   stats.classes[HDN_JITTER_CRED].allocations);
+			seq_printf(m, "critical_jitter_cred_allocation_failures: %llu\n",
+				   stats.classes[HDN_JITTER_CRED].allocation_failures);
+			seq_printf(m, "critical_jitter_cred_retired: %llu\n",
+				   stats.classes[HDN_JITTER_CRED].retired);
+			seq_printf(m, "critical_jitter_cred_released: %llu\n",
+				   stats.classes[HDN_JITTER_CRED].released);
+			seq_printf(m, "critical_jitter_cred_quarantined: %u\n",
+				   stats.classes[HDN_JITTER_CRED].quarantined);
+			seq_printf(m, "critical_jitter_cred_pressure: %llu\n",
+				   stats.classes[HDN_JITTER_CRED].pressure);
+			seq_printf(m, "critical_jitter_file_allocations: %llu\n",
+				   stats.classes[HDN_JITTER_FILE].allocations);
+			seq_printf(m, "critical_jitter_file_allocation_failures: %llu\n",
+				   stats.classes[HDN_JITTER_FILE].allocation_failures);
+			seq_printf(m, "critical_jitter_file_retired: %llu\n",
+				   stats.classes[HDN_JITTER_FILE].retired);
+			seq_printf(m, "critical_jitter_file_released: %llu\n",
+				   stats.classes[HDN_JITTER_FILE].released);
+			seq_printf(m, "critical_jitter_file_quarantined: %u\n",
+				   stats.classes[HDN_JITTER_FILE].quarantined);
+			seq_printf(m, "critical_jitter_file_pressure: %llu\n",
+				   stats.classes[HDN_JITTER_FILE].pressure);
+			seq_printf(m, "critical_jitter_backing_file_allocations: %llu\n",
+				   stats.classes[HDN_JITTER_BACKING_FILE].allocations);
+			seq_printf(m, "critical_jitter_backing_file_allocation_failures: %llu\n",
+				   stats.classes[HDN_JITTER_BACKING_FILE].allocation_failures);
+			seq_printf(m, "critical_jitter_backing_file_retired: %llu\n",
+				   stats.classes[HDN_JITTER_BACKING_FILE].retired);
+			seq_printf(m, "critical_jitter_backing_file_released: %llu\n",
+				   stats.classes[HDN_JITTER_BACKING_FILE].released);
+			seq_printf(m, "critical_jitter_backing_file_quarantined: %u\n",
+				   stats.classes[HDN_JITTER_BACKING_FILE].quarantined);
+			seq_printf(m, "critical_jitter_backing_file_pressure: %llu\n",
+				   stats.classes[HDN_JITTER_BACKING_FILE].pressure);
+		}
+	}
+#else
+	seq_puts(m, "critical_jitter_state: disabled\n");
+#endif
+	seq_printf(m, "kernexec_page_tables: %s\n", hdn_pt_state());
+	seq_printf(m, "kernexec_firmware_wx: %s\n", hdn_pt_firmware_state());
+	seq_printf(m, "kernexec_terminal_handoff: %s\n", hdn_pt_terminal_state());
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	if (ns_capable(&init_user_ns, CAP_SYS_ADMIN)) {
+		struct hdn_pt_stats stats;
+
+		hdn_pt_get_stats(&stats);
+		seq_printf(m, "kernexec_page_table_allocations: %llu\n", stats.allocated);
+		seq_printf(m, "kernexec_page_table_retirements: %llu\n", stats.retired);
+		seq_printf(m, "kernexec_page_table_owned_pages: %llu\n", stats.active_pages);
+		seq_printf(m, "kernexec_page_table_reserve_pages: %llu\n", stats.reserve_pages);
+		seq_printf(m, "kernexec_page_table_allocation_failures: %llu\n", stats.allocation_failures);
+		seq_printf(m, "kernexec_foreign_code_ranges: %llu\n", stats.foreign_code_ranges);
+		seq_printf(m, "kernexec_foreign_code_pages: %llu\n", stats.foreign_code_pages);
+	}
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_EXECMEM
+	hdn_execmem_get_stats(&page_stats);
+	execmem_bpf_get_stats(&bpf_stats);
+	seq_printf(m, "kernexec_allocations: %llu\n", page_stats.allocations);
+	seq_printf(m, "kernexec_owned_pages: %llu\n", page_stats.live_pages);
+	seq_printf(m, "kernexec_finalized: %llu\n", page_stats.finalized);
+	seq_printf(m, "kernexec_retired: %llu\n", page_stats.retired);
+	seq_printf(m, "kernexec_failed_retirements: %llu\n", page_stats.failed_retirements);
+	seq_printf(m, "bpf_execmem_state: %s\n",
+		   !IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM) ? "disabled" :
+		   bpf_stats.exhausted && page_stats.bpf_live_pages >=
+		   (execmem_bpf_capacity() >> PAGE_SHIFT) * 3 / 4 ? "exhausted" :
+		   bpf_stats.exhausted || page_stats.bpf_failed_retirements ? "degraded" :
+		   execmem_bpf_capacity() ? "active" : "initializing");
+	seq_printf(m, "bpf_execmem_test_interface: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM_TEST));
+	if (ns_capable(&init_user_ns, CAP_SYS_ADMIN)) {
+		seq_printf(m, "bpf_execmem_capacity_bytes: %lu\n", execmem_bpf_capacity());
+		seq_printf(m, "bpf_execmem_live_pages: %llu\n", page_stats.bpf_live_pages);
+		seq_printf(m, "bpf_execmem_quarantined_pages: %llu\n", page_stats.bpf_quarantined_pages);
+		seq_printf(m, "bpf_execmem_failed_retirements: %llu\n",
+			   page_stats.bpf_failed_retirements);
+		seq_printf(m, "bpf_execmem_quarantine_limit_pages: %llu\n",
+			   page_stats.bpf_quarantine_limit_pages);
+		seq_printf(m, "bpf_execmem_quarantine_pressure_releases: %llu\n",
+			   page_stats.bpf_quarantine_pressure_releases);
+		seq_printf(m, "bpf_execmem_allocation_attempts: %llu\n",
+			   bpf_stats.allocation_attempts);
+		seq_printf(m, "bpf_execmem_allocation_successes: %llu\n",
+			   bpf_stats.allocation_successes);
+		seq_printf(m, "bpf_execmem_allocation_failures: %llu\n",
+			   bpf_stats.allocation_failures);
+		seq_printf(m, "bpf_execmem_requested_bytes: %llu\n",
+			   bpf_stats.requested_bytes);
+		seq_printf(m, "bpf_execmem_reserved_bytes: %llu\n",
+			   bpf_stats.reserved_bytes);
+		seq_printf(m, "bpf_execmem_internal_slack_bytes: %llu\n",
+			   bpf_stats.reserved_bytes - bpf_stats.requested_bytes);
+	}
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_KERNEL_WX
+	hdn_text_get_stats(&text_stats);
+	seq_puts(m, "kernexec_text_windows: active\n");
+	seq_printf(m, "kernexec_text_started: %llu\n", text_stats.started);
+	seq_printf(m, "kernexec_text_completed: %llu\n", text_stats.completed);
+	seq_printf(m, "kernexec_text_rejected: %llu\n", text_stats.rejected);
+	seq_printf(m, "kernexec_deferred_kernel_overflow: %llu\n",
+		   text_stats.audit_omitted);
+	seq_printf(m, "kernexec_deferred_kernel_events: %llu\n",
+		   text_stats.audit_deferred);
+	seq_printf(m, "kernexec_gdt: %s\n", hdn_gdt_state());
+	seq_printf(m, "kernexec_idt: %s\n", hdn_idt_sealed() ? "active" :
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_GDT) ? "initializing" : "disabled");
+	seq_printf(m, "kernexec_ldt: %s\n", !IS_ENABLED(CONFIG_MODIFY_LDT_SYSCALL) ?
+		   "not-applicable" : IS_ENABLED(CONFIG_SECURITY_HARDENING_LDT) ? "active" : "disabled");
+	seq_printf(m, "kernexec_text_active: %u\n", text_stats.active);
+#else
+	seq_puts(m, "kernexec_text_windows: disabled\n");
+	seq_puts(m, "kernexec_gdt: disabled\n");
+	seq_puts(m, "kernexec_idt: disabled\nkernexec_ldt: disabled\n");
+#endif
 	mutex_lock(&hdn_policy_mutex);
 	policy = rcu_dereference_protected(hdn_active_policy,
 					   lockdep_is_held(&hdn_policy_mutex));
@@ -7987,7 +8667,145 @@ static int hdn_status_show(struct seq_file *m, void *v)
 					     lockdep_is_held(&hdn_policy_mutex));
 	staged = hdn_staged_policy;
 	phase = READ_ONCE(hdn_phase);
+	seq_puts(m, "compatibility_intent_version: 1\n");
+	seq_printf(m, "compatibility_binding_version: %u\n", IS_ENABLED(CONFIG_FS_VERITY) ? 1 : 0);
+	seq_printf(m, "application_compatibility: %s\n",
+		   !IS_ENABLED(CONFIG_FS_VERITY) ? "unsupported" :
+		   hdn_compat_policy_enabled ? "available" : "approval-required");
+	seq_puts(m, "application_remediation: restart-then-update-application\n");
+	seq_puts(m, "legacy_emulation: no-supported-patterns\n");
+	seq_printf(m, "respectre_state: %s\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_RESPECTRE) ? "compiler-instrumented" : "disabled");
+	seq_printf(m, "respectre_coverage: %s\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_RESPECTRE) ?
+		   "selected-c-dataflow" : "none");
+	seq_printf(m, "respectre_report_schema: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_RESPECTRE) ? 1 : 0);
+	seq_printf(m, "respectre_analyzer_version: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_RESPECTRE) ? 1 : 0);
+	seq_printf(m, "respectre_compiler_abi: %s\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_RESPECTRE) ? "gcc-16" : "none");
+	seq_printf(m, "respectre_store_bypass: %s\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_RESPECTRE) ?
+		   "software-serialization" : "disabled");
+	seq_printf(m, "respectre_test_interface: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_RESPECTRE_TEST));
 	seq_printf(m, "abi_version: %u\n", HDN_POLICY_ABI_VERSION);
+	hdn_capabilities_show(m);
+	seq_printf(m, "capability_required_mask: 0x%x\n",
+		   policy ? policy->required_capabilities : 0);
+	seq_printf(m, "capability_requirements: %s\n",
+		   !policy ? "no-policy" : !policy->required_capabilities ? "unconstrained" :
+		   hdn_capabilities_require(policy->required_capabilities) ?
+		   "unsatisfied" : "satisfied");
+	seq_printf(m, "latent_entropy_mixing: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_LATENT_ENTROPY));
+	seq_printf(m, "kernexec_private_allocations: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_EXECMEM));
+	seq_printf(m, "kernseal_typed_objects: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNSEAL));
+	seq_printf(m, "kernseal_state: %s\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNSEAL) ? "active" : "disabled");
+	if (ns_capable(&init_user_ns, CAP_SYS_ADMIN)) {
+		seq_printf(m, "kernseal_allocations: %llu\n", seal_stats.allocations);
+		seq_printf(m, "kernseal_live_objects: %llu\n", seal_stats.live_objects);
+		seq_printf(m, "kernseal_live_pages: %llu\n", seal_stats.live_pages);
+		seq_printf(m, "kernseal_live_payload_bytes: %llu\n",
+			   seal_stats.live_payload_bytes);
+		seq_printf(m, "kernseal_live_granule_bytes: %llu\n",
+			   seal_stats.live_granule_bytes);
+		seq_printf(m, "kernseal_fragmentation_bytes: %llu\n",
+			   seal_stats.live_granule_bytes - seal_stats.live_payload_bytes);
+		seq_printf(m, "kernseal_seal_operations: %llu\n", seal_stats.seal_operations);
+		seq_printf(m, "kernseal_publications: %llu\n", seal_stats.publications);
+		seq_printf(m, "kernseal_replacements: %llu\n", seal_stats.replacements);
+		seq_printf(m, "kernseal_retirements: %llu\n", seal_stats.retirements);
+		seq_printf(m, "kernseal_discards: %llu\n", seal_stats.discards);
+		seq_printf(m, "kernseal_rejections: %llu\n", seal_stats.rejections);
+		seq_printf(m, "kernseal_allocation_failures: %llu\n",
+			   seal_stats.allocation_failures);
+		seq_printf(m, "kernseal_replacement_total_ns: %llu\n",
+			   seal_stats.replacement_total_ns);
+		seq_printf(m, "kernseal_replacement_max_ns: %llu\n",
+			   seal_stats.replacement_max_ns);
+	}
+	seq_printf(m, "initify_image_aliases: %s\n",
+		   !IS_ENABLED(CONFIG_SECURITY_HARDENING_INITIFY) ? "disabled" :
+		   hdn_init_aliases_retired() ? "retired" : "initializing");
+	seq_printf(m, "initify_reclaimed_bytes: %lu\n", hdn_init_reclaimed_bytes());
+	seq_printf(m, "static_lifetime_analysis: %u\n",
+		   IS_ENABLED(CONFIG_GCC_PLUGIN_HDN_LIFETIME));
+	seq_printf(m, "constify_test_interface: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_CONSTIFY_TEST));
+	seq_printf(m, "rap_state: %s\n", hdn_rap_state());
+	seq_printf(m, "rap_metadata_version: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP) ? HDN_RAP_VERSION : 0);
+	seq_printf(m, "rap_transfer_abi: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP) ? HDN_RAP_ABI : 0);
+	seq_printf(m, "rap_failure_classes: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP) ? HDN_RAP_FAILURE_CLASSES : 0);
+	seq_printf(m, "rap_build_identity: %s\n", hdn_rap_build_identity());
+	seq_printf(m, "rap_xor_state: %s\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP) ? "base-only" : "disabled");
+	seq_printf(m, "private_stacks_state: %s\n", hdn_stack_state());
+	seq_printf(m, "private_stacks_test_interface: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS_TEST));
+	seq_printf(m, "kvm_state_test_interface: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_KVM_STATE_TEST));
+	if (ns_capable(&init_user_ns, CAP_SYS_ADMIN)) {
+		seq_printf(m, "private_stacks_allocation_attempts: %llu\n",
+			   stack_stats.allocation_attempts);
+		seq_printf(m, "private_stacks_allocations: %llu\n", stack_stats.allocations);
+		seq_printf(m, "private_stacks_allocation_failures: %llu\n",
+			   stack_stats.allocation_failures);
+		seq_printf(m, "private_stacks_live: %llu\n", stack_stats.live_stacks);
+		seq_printf(m, "private_stacks_publications: %llu\n", stack_stats.publications);
+		seq_printf(m, "private_stacks_retirements: %llu\n", stack_stats.retirements);
+		seq_printf(m, "private_stacks_diagnostic_reads: %llu\n",
+			   stack_stats.diagnostic_reads);
+		seq_printf(m, "private_stacks_diagnostic_read_failures: %llu\n",
+			   stack_stats.diagnostic_read_failures);
+		seq_printf(m, "private_stacks_construction_bytes: %llu\n",
+			   stack_stats.construction_bytes);
+		seq_printf(m, "private_stacks_task_switches: %llu\n", stack_stats.task_switches);
+		seq_printf(m, "private_stacks_async_root_entries: %llu\n",
+			   stack_stats.async_root_entries);
+	}
+	seq_printf(m, "rap_error_test_interface: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP_ERROR_TEST));
+	seq_printf(m, "rap_test_interface: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP_TEST));
+	seq_printf(m, "uderef_state: %s\n", hdn_uderef_state());
+#ifdef CONFIG_SECURITY_HARDENING_UDEREF
+	seq_printf(m, "uderef_build_id: %20phN\n", vmlinux_build_id);
+	seq_puts(m, "uderef_site_scheme: buildid-fnv1a64-v1\n");
+#endif
+	seq_printf(m, "sysfs_visibility_version: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_SYSFS_VIEW) ?
+		   HDN_SYSFS_VISIBILITY_VERSION : 0);
+	seq_printf(m, "sysfs_discovery_view: %s\n",
+		   !IS_ENABLED(CONFIG_SECURITY_HARDENING_SYSFS_VIEW) ? "disabled" :
+		   hdn_sysfs_hidden_classes() ? "restricted" : "base");
+	seq_printf(m, "uderef_smap_repairs: %llu\n", hdn_uderef_repairs());
+	seq_puts(m, "latent_entropy_credited_bits: 0\n");
+	seq_printf(m, "latent_entropy_test_interface: %u\n",
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_LATENT_ENTROPY_TEST));
+#ifdef CONFIG_X86_64
+	seq_printf(m, "constify_state: %s\n",
+		   !IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNEL_WX) ? "upstream-rodata" :
+		   READ_ONCE(kernel_set_to_readonly) ? "active" : "initializing");
+	seq_printf(m, "kernexec_cpa_wx: %u\n", kernel_wx_enforced());
+	seq_printf(m, "kernexec_cpa_state: %s\n",
+		   !IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNEL_WX) ? "disabled" :
+		   kernel_wx_enforced() ? "active" : "unsupported");
+	seq_printf(m, "kernexec_static_alias_guard: %s\n",
+		   !IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNEL_WX) ? "disabled" :
+		   READ_ONCE(kernel_set_to_readonly) ? "active" : "unsealed");
+#else
+	seq_puts(m, "constify_state: upstream-rodata\n");
+	seq_puts(m, "kernexec_cpa_wx: 0\nkernexec_cpa_state: unsupported\n");
+	seq_puts(m, "kernexec_static_alias_guard: unsupported\n");
+#endif
 	seq_printf(m, "phase: %s\n", hdn_phase_name(phase));
 	seq_printf(m, "phase_id: %u\n", phase);
 	seq_printf(m, "policy_loaded: %u\n", policy ? 1 : 0);
@@ -8148,7 +8966,7 @@ static int hdn_status_show(struct seq_file *m, void *v)
 	seq_printf(m, "mitigation_rofs_harden: %u\n",
 		   hdn_mitigation_enabled(HDN_MITIGATION_ROFS_HARDEN));
 	seq_printf(m, "mitigation_sysfs_restrict: %u\n",
-		   IS_ENABLED(CONFIG_SYSFS));
+		   IS_ENABLED(CONFIG_SECURITY_HARDENING_SYSFS_VIEW));
 	seq_printf(m, "mitigation_proc_hide: %u\n",
 		   hdn_mitigation_enabled(HDN_MITIGATION_PROC_HIDE));
 	seq_printf(m, "proc_task_gid: %d\n", READ_ONCE(hdn_proc_task_gid));
@@ -8370,9 +9188,6 @@ static int hdn_probe_sealed_write_fault(void)
 	u32 value = HDN_POLICY_ABI_VERSION;
 	long ret;
 
-	if (!IS_ENABLED(CONFIG_X86))
-		return -EOPNOTSUPP;
-
 	mitigations = READ_ONCE(hdn_mitigations);
 	if (!mitigations || !READ_ONCE(mitigations->sealed))
 		return -ENODEV;
@@ -8457,11 +9272,24 @@ static const struct file_operations hdn_kernel_lockout_probe_fops = {
 
 static int __init hdn_securityfs_init(void)
 {
+	/* Only initialization and its rollback need these construction handles. */
+	struct dentry *hdn_fs_dir;
+	struct dentry *hdn_fs_policy = NULL, *hdn_fs_refresh = NULL;
+	struct dentry *hdn_fs_commit = NULL, *hdn_fs_rollback = NULL;
+	struct dentry *hdn_fs_phase = NULL, *hdn_fs_profiles = NULL;
+	struct dentry *hdn_fs_status = NULL, *hdn_fs_events = NULL;
+	struct dentry *hdn_fs_sealed_write_probe = NULL;
+	struct dentry *hdn_fs_kernel_lockout_probe = NULL;
+	struct dentry *hdn_fs_audit_flood_burst = NULL;
+	struct dentry *hdn_fs_audit_flood_window_ms = NULL;
 	int ret;
 
 	ret = hdn_mitigations_init();
-	if (ret)
+	if (ret) {
+		if (IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNSEAL))
+			panic("HDN could not construct immutable mitigation state");
 		return ret;
+	}
 
 	hdn_fs_dir = securityfs_create_dir("hardening", NULL);
 	if (IS_ERR(hdn_fs_dir))

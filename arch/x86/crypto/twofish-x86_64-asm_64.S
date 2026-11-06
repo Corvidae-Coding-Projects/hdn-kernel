@@ -8,6 +8,7 @@
 .text
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <linux/cfi_types.h>
 #include <asm/asm-offsets.h>
 
@@ -204,6 +205,7 @@
 	ror	$1,		d ## D;
 
 SYM_TYPED_FUNC_START(twofish_enc_blk)
+	HDN_ASM_FUNCTION twofish_enc_blk, 1
 	pushq    R1
 
 	/* %rdi contains the ctx address */
@@ -253,10 +255,12 @@ SYM_TYPED_FUNC_START(twofish_enc_blk)
 
 	popq	R1
 	movl	$1,%eax
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END twofish_enc_blk
 SYM_FUNC_END(twofish_enc_blk)
 
 SYM_TYPED_FUNC_START(twofish_dec_blk)
+	HDN_ASM_FUNCTION twofish_dec_blk, 1
 	pushq    R1
 
 	/* %rdi contains the ctx address */
@@ -305,5 +309,6 @@ SYM_TYPED_FUNC_START(twofish_dec_blk)
 
 	popq	R1
 	movl	$1,%eax
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END twofish_dec_blk
 SYM_FUNC_END(twofish_dec_blk)

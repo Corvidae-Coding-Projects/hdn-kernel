@@ -6,6 +6,7 @@
 #include <asm/frame.h>
 #include <asm/kvm_vcpu_regs.h>
 #include <asm/nospec-branch.h>
+#include <asm/hdn_rap.h>
 #include "kvm-asm-offsets.h"
 
 #define WORD_SIZE (BITS_PER_LONG / 8)
@@ -125,6 +126,7 @@
  * @spec_ctrl_intercepted: bool
  */
 SYM_FUNC_START(__svm_vcpu_run)
+	HDN_DIRECT_FUNC_ENTER __svm_vcpu_run
 	push %_ASM_BP
 	mov  %_ASM_SP, %_ASM_BP
 #ifdef CONFIG_X86_64
@@ -147,7 +149,7 @@ SYM_FUNC_START(__svm_vcpu_run)
 	push %_ASM_ARG2
 
 	/* Needed to restore access to percpu variables.  */
-	__ASM_SIZE(push) PER_CPU_VAR(svm_data + SD_save_area_pa)
+	push %_ASM_ARG3
 
 	/* Finally save @svm. */
 	push %_ASM_ARG1
@@ -293,7 +295,7 @@ SYM_FUNC_START(__svm_vcpu_run)
 	pop %edi
 #endif
 	pop %_ASM_BP
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 	RESTORE_GUEST_SPEC_CTRL_BODY
 	RESTORE_HOST_SPEC_CTRL_BODY (%_ASM_SP)
@@ -339,8 +341,32 @@ SYM_FUNC_END(__svm_vcpu_run)
  * @spec_ctrl_intercepted: bool
  */
 SYM_FUNC_START(__svm_sev_es_vcpu_run)
+	HDN_DIRECT_FUNC_ENTER __svm_sev_es_vcpu_run
 	FRAME_BEGIN
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* Capture the original callee registers and arguments on this task's
+	 * private stack. The fixed-field writer never exposes a host-save alias.
+	 * It runs before guest speculation controls are installed. */
+	push %r15
+	push %r14
+	push %r13
+	push %r12
+	push %rbp
+	push %rbx
+	push %rsi
+	push %rdi
+	mov %rsp, %rdi
+	HDN_C_CALL hdn_svm_set_gprs
+	pop %rdi
+	pop %rsi
+	pop %rbx
+	pop %rbp
+	pop %r12
+	pop %r13
+	pop %r14
+	pop %r15
+#else
 	/*
 	 * Save non-volatile (callee-saved) registers to the host save area.
 	 * Except for RAX and RSP, all GPRs are restored on #VMEXIT, but not
@@ -359,6 +385,7 @@ SYM_FUNC_START(__svm_sev_es_vcpu_run)
 	 */
 	mov %rdi, SEV_ES_RDI (%rdx)
 	mov %rsi, SEV_ES_RSI (%rdx)
+#endif
 
 	/* Clobbers RAX, RCX, and RDX (@hostsa), consumes RDI (@svm). */
 	RESTORE_GUEST_SPEC_CTRL
@@ -389,7 +416,7 @@ SYM_FUNC_START(__svm_sev_es_vcpu_run)
 	UNTRAIN_RET_VM
 
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 	RESTORE_GUEST_SPEC_CTRL_BODY
 	RESTORE_HOST_SPEC_CTRL_BODY %sil

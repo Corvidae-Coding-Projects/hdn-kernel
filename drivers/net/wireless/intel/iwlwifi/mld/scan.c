@@ -1559,7 +1559,13 @@ out:
 	return ret;
 }
 
-static int
+/*
+ * Keep iwl_mld_send_cmd()'s recoverable WARN path out of the much larger
+ * KMSAN-instrumented iwl_mld_scan_stop() frame.  If this helper is inlined,
+ * Clang can place the warning trap at the end of the caller, leaving no return
+ * path after the trap is handled.
+ */
+static noinline int
 iwl_mld_scan_abort(struct iwl_mld *mld, int type, int uid, bool *wait)
 {
 	enum iwl_umac_scan_abort_status status;

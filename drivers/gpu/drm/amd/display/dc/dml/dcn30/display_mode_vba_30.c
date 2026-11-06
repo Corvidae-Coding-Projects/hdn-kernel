@@ -67,6 +67,29 @@ typedef struct {
 static void DisplayPipeConfiguration(struct display_mode_lib *mode_lib);
 static void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPerformanceCalculation(
 		struct display_mode_lib *mode_lib);
+static noinline_for_stack void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2(
+		struct display_mode_lib *mode_lib);
+static noinline_for_stack void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2Watermarks(
+		struct display_mode_lib *mode_lib);
+static noinline_for_stack void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart3(
+		struct display_mode_lib *mode_lib);
+static noinline_for_stack void dml30_ModeSupportAndSystemConfigurationPart2(
+		struct display_mode_lib *mode_lib, int MinPrefetchMode,
+		int MaxPrefetchMode, int start_state,
+		bool EnoughWritebackUnits, bool WritebackModeSupport);
+static noinline_for_stack void dml30_ModeSupportAndSystemConfigurationPrefetch(
+		struct display_mode_lib *mode_lib, int MinPrefetchMode,
+		int MaxPrefetchMode, int start_state, long ReorderingBytes,
+		bool EnoughWritebackUnits, bool WritebackModeSupport);
+static noinline_for_stack void dml30_ModeSupportAndSystemConfigurationSchedulePlane(
+		struct display_mode_lib *mode_lib, int i, unsigned int j,
+		unsigned int k);
+static noinline_for_stack void dml30_ModeSupportAndSystemConfigurationScheduleInvoke(
+		struct display_mode_lib *mode_lib, int i, unsigned int j,
+		unsigned int k, Pipe *myPipe);
+static noinline_for_stack void dml30_ModeSupportAndSystemConfigurationTail(
+		struct display_mode_lib *mode_lib, int start_state,
+		bool EnoughWritebackUnits, bool WritebackModeSupport);
 static unsigned int dscceComputeDelay(
 		unsigned int bpc,
 		double BPP,
@@ -1749,13 +1772,6 @@ static void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPerforman
 {
 	struct vba_vars_st *v = &mode_lib->vba;
 	unsigned int j, k;
-	long ReorderBytes = 0;
-	unsigned int PrefetchMode = v->PrefetchModePerState[v->VoltageLevel][v->maxMpcComb];
-	double MaxTotalRDBandwidth = 0;
-	double MaxTotalRDBandwidthNoUrgentBurst = 0;
-	bool DestinationLineTimesForPrefetchLessThan2 = false;
-	bool VRatioPrefetchMoreThan4 = false;
-	double TWait;
 
 	v->WritebackDISPCLK = 0.0;
 	v->DISPCLKWithRamping = 0;
@@ -2064,6 +2080,22 @@ static void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPerforman
 			if (j != k && v->BlendingAndTiming[k] == j
 					&& v->DSCEnabled[j])
 				v->DSCDelay[k] = v->DSCDelay[j];
+
+	DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2(mode_lib);
+}
+
+static noinline_for_stack void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2(
+		struct display_mode_lib *mode_lib)
+{
+	struct vba_vars_st *v = &mode_lib->vba;
+	unsigned int j, k;
+	unsigned int PrefetchMode = v->PrefetchModePerState[v->VoltageLevel][v->maxMpcComb];
+	long ReorderBytes = 0;
+	double MaxTotalRDBandwidth = 0;
+	double MaxTotalRDBandwidthNoUrgentBurst = 0;
+	bool DestinationLineTimesForPrefetchLessThan2 = false;
+	bool VRatioPrefetchMoreThan4 = false;
+	double TWait;
 
 	// Prefetch
 	for (k = 0; k < v->NumberOfActivePlanes; ++k) {
@@ -2601,6 +2633,16 @@ static void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPerforman
 	} while (!v->PrefetchModeSupported && v->VStartupLines <= v->MaximumMaxVStartupLines);
 	ASSERT(v->PrefetchModeSupported);
 
+	DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2Watermarks(mode_lib);
+}
+
+static noinline_for_stack void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart2Watermarks(
+		struct display_mode_lib *mode_lib)
+{
+	struct vba_vars_st *v = &mode_lib->vba;
+	unsigned int j, k;
+	unsigned int PrefetchMode = v->PrefetchModePerState[v->VoltageLevel][v->maxMpcComb];
+
 	//Watermarks and NB P-State/DRAM Clock Change Support
 	{
 		enum clock_change_support   DRAMClockChangeSupport = 0; // dummy
@@ -2645,6 +2687,16 @@ static void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPerforman
 
 	}
 
+
+	DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart3(mode_lib);
+}
+
+static noinline_for_stack void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchPart3(
+		struct display_mode_lib *mode_lib)
+{
+	struct vba_vars_st *v = &mode_lib->vba;
+	unsigned int k;
+	unsigned int PrefetchMode = v->PrefetchModePerState[v->VoltageLevel][v->maxMpcComb];
 
 	//Display Pipeline Delivery Time in Prefetch, Groups
 	CalculatePixelDeliveryTimes(
@@ -3368,14 +3420,10 @@ void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 {
 	struct vba_vars_st *v = &mode_lib->vba;
 	int MinPrefetchMode, MaxPrefetchMode;
-	int i, start_state;
-	unsigned int j, k, m;
-	bool   EnoughWritebackUnits = true;
-	bool   WritebackModeSupport = true;
-	bool   ViewportExceedsSurface = false;
-	double MaxTotalVActiveRDBandwidth = 0;
-	long ReorderingBytes = 0;
-	bool NotUrgentLatencyHiding[DC__NUM_DPP__MAX] = { 0 };
+	int start_state;
+	unsigned int k;
+	bool EnoughWritebackUnits = true;
+	bool WritebackModeSupport = true;
 
 	/*MODE SUPPORT, VOLTAGE STATE AND SOC CONFIGURATION*/
 
@@ -3563,6 +3611,23 @@ void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 			}
 		}
 	}
+	dml30_ModeSupportAndSystemConfigurationPart2(
+			mode_lib, MinPrefetchMode, MaxPrefetchMode, start_state,
+			EnoughWritebackUnits, WritebackModeSupport);
+}
+
+static noinline_for_stack void dml30_ModeSupportAndSystemConfigurationPart2(
+		struct display_mode_lib *mode_lib, int MinPrefetchMode,
+		int MaxPrefetchMode, int start_state,
+		bool EnoughWritebackUnits, bool WritebackModeSupport)
+{
+	struct vba_vars_st *v = &mode_lib->vba;
+	int i;
+	unsigned int j, k, m;
+	double MaxTotalVActiveRDBandwidth = 0;
+	long ReorderingBytes = 0;
+	bool NotUrgentLatencyHiding[DC__NUM_DPP__MAX] = { 0 };
+
 	/*Maximum DISPCLK/DPPCLK Support check*/
 
 	v->WritebackRequiredDISPCLK = 0.0;
@@ -4532,6 +4597,94 @@ void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 		}
 	}
 
+	dml30_ModeSupportAndSystemConfigurationPrefetch(
+			mode_lib, MinPrefetchMode, MaxPrefetchMode, start_state,
+			ReorderingBytes, EnoughWritebackUnits, WritebackModeSupport);
+}
+
+static noinline_for_stack void dml30_ModeSupportAndSystemConfigurationSchedulePlane(
+		struct display_mode_lib *mode_lib, int i, unsigned int j,
+		unsigned int k)
+{
+	struct vba_vars_st *v = &mode_lib->vba;
+	Pipe myPipe = { 0 };
+
+	myPipe.DPPCLK = v->RequiredDPPCLK[i][j][k];
+	myPipe.DISPCLK = v->RequiredDISPCLK[i][j];
+	myPipe.PixelClock = v->PixelClock[k];
+	myPipe.DCFCLKDeepSleep = v->ProjectedDCFCLKDeepSleep[i][j];
+	myPipe.DPPPerPlane = v->NoOfDPP[i][j][k];
+	myPipe.ScalerEnabled = v->ScalerEnabled[k];
+	myPipe.SourceScan = v->SourceScan[k];
+	myPipe.BlockWidth256BytesY = v->Read256BlockWidthY[k];
+	myPipe.BlockHeight256BytesY = v->Read256BlockHeightY[k];
+	myPipe.BlockWidth256BytesC = v->Read256BlockWidthC[k];
+	myPipe.BlockHeight256BytesC = v->Read256BlockHeightC[k];
+	myPipe.InterlaceEnable = v->Interlace[k];
+	myPipe.NumberOfCursors = v->NumberOfCursors[k];
+	myPipe.VBlank = v->VTotal[k] - v->VActive[k];
+	myPipe.HTotal = v->HTotal[k];
+	myPipe.DCCEnable = v->DCCEnable[k];
+	myPipe.ODMCombineEnabled = !!v->ODMCombineEnabled[k];
+
+	dml30_ModeSupportAndSystemConfigurationScheduleInvoke(
+			mode_lib, i, j, k, &myPipe);
+}
+
+static noinline_for_stack void dml30_ModeSupportAndSystemConfigurationScheduleInvoke(
+		struct display_mode_lib *mode_lib, int i, unsigned int j,
+		unsigned int k, Pipe *myPipe)
+{
+	struct vba_vars_st *v = &mode_lib->vba;
+
+	v->NoTimeForPrefetch[i][j][k] = CalculatePrefetchSchedule(
+			mode_lib,
+			k,
+			myPipe,
+			v->DSCDelayPerState[i][k],
+			v->SwathWidthYThisState[k] / v->HRatio[k],
+			dml_min(v->MaxVStartup, v->MaximumVStartup[i][j][k]),
+			v->MaximumVStartup[i][j][k],
+			v->UrgLatency[i],
+			v->ExtraLatency,
+			v->TimeCalc,
+			v->PDEAndMetaPTEBytesPerFrame[i][j][k],
+			v->MetaRowBytes[i][j][k],
+			v->DPTEBytesPerRow[i][j][k],
+			v->PrefetchLinesY[i][j][k],
+			v->SwathWidthYThisState[k],
+			v->BytePerPixelY[k],
+			v->PrefillY[k],
+			v->MaxNumSwY[k],
+			v->PrefetchLinesC[i][j][k],
+			v->SwathWidthCThisState[k],
+			v->PrefillC[k],
+			v->MaxNumSwC[k],
+			v->swath_width_luma_ub_this_state[k],
+			v->swath_width_chroma_ub_this_state[k],
+			v->SwathHeightYThisState[k],
+			v->SwathHeightCThisState[k],
+			v->TWait,
+			&v->LineTimesForPrefetch[k],
+			&v->PrefetchBW[k],
+			&v->LinesForMetaPTE[k],
+			&v->LinesForMetaAndDPTERow[k],
+			&v->VRatioPreY[i][j][k],
+			&v->VRatioPreC[i][j][k],
+			&v->RequiredPrefetchPixelDataBWLuma[i][j][k],
+			&v->RequiredPrefetchPixelDataBWChroma[i][j][k],
+			&v->NoTimeForDynamicMetadata[i][j][k]);
+}
+
+static noinline_for_stack void dml30_ModeSupportAndSystemConfigurationPrefetch(
+		struct display_mode_lib *mode_lib, int MinPrefetchMode,
+		int MaxPrefetchMode, int start_state, long ReorderingBytes,
+		bool EnoughWritebackUnits, bool WritebackModeSupport)
+{
+	struct vba_vars_st *v = &mode_lib->vba;
+	int i;
+	unsigned int j, k;
+
 	//Prefetch Check
 
 	for (i = start_state; i < mode_lib->soc.num_states; ++i) {
@@ -4586,63 +4739,8 @@ void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 				v->TWait = CalculateTWait(v->PrefetchModePerState[i][j], v->FinalDRAMClockChangeLatency, v->UrgLatency[i], v->SREnterPlusExitTime);
 
 				for (k = 0; k <= v->NumberOfActivePlanes - 1; k++) {
-					Pipe myPipe = { 0 };
-
-					myPipe.DPPCLK = v->RequiredDPPCLK[i][j][k];
-					myPipe.DISPCLK = v->RequiredDISPCLK[i][j];
-					myPipe.PixelClock = v->PixelClock[k];
-					myPipe.DCFCLKDeepSleep = v->ProjectedDCFCLKDeepSleep[i][j];
-					myPipe.DPPPerPlane = v->NoOfDPP[i][j][k];
-					myPipe.ScalerEnabled = v->ScalerEnabled[k];
-					myPipe.SourceScan = v->SourceScan[k];
-					myPipe.BlockWidth256BytesY = v->Read256BlockWidthY[k];
-					myPipe.BlockHeight256BytesY = v->Read256BlockHeightY[k];
-					myPipe.BlockWidth256BytesC = v->Read256BlockWidthC[k];
-					myPipe.BlockHeight256BytesC = v->Read256BlockHeightC[k];
-					myPipe.InterlaceEnable = v->Interlace[k];
-					myPipe.NumberOfCursors = v->NumberOfCursors[k];
-					myPipe.VBlank = v->VTotal[k] - v->VActive[k];
-					myPipe.HTotal = v->HTotal[k];
-					myPipe.DCCEnable = v->DCCEnable[k];
-					myPipe.ODMCombineEnabled = !!v->ODMCombineEnabled[k];
-
-					v->NoTimeForPrefetch[i][j][k] = CalculatePrefetchSchedule(
-							mode_lib,
-							k,
-							&myPipe,
-							v->DSCDelayPerState[i][k],
-							v->SwathWidthYThisState[k] / v->HRatio[k],
-							dml_min(v->MaxVStartup, v->MaximumVStartup[i][j][k]),
-							v->MaximumVStartup[i][j][k],
-							v->UrgLatency[i],
-							v->ExtraLatency,
-							v->TimeCalc,
-							v->PDEAndMetaPTEBytesPerFrame[i][j][k],
-							v->MetaRowBytes[i][j][k],
-							v->DPTEBytesPerRow[i][j][k],
-							v->PrefetchLinesY[i][j][k],
-							v->SwathWidthYThisState[k],
-							v->BytePerPixelY[k],
-							v->PrefillY[k],
-							v->MaxNumSwY[k],
-							v->PrefetchLinesC[i][j][k],
-							v->SwathWidthCThisState[k],
-							v->PrefillC[k],
-							v->MaxNumSwC[k],
-							v->swath_width_luma_ub_this_state[k],
-							v->swath_width_chroma_ub_this_state[k],
-							v->SwathHeightYThisState[k],
-							v->SwathHeightCThisState[k],
-							v->TWait,
-							&v->LineTimesForPrefetch[k],
-							&v->PrefetchBW[k],
-							&v->LinesForMetaPTE[k],
-							&v->LinesForMetaAndDPTERow[k],
-							&v->VRatioPreY[i][j][k],
-							&v->VRatioPreC[i][j][k],
-							&v->RequiredPrefetchPixelDataBWLuma[i][j][k],
-							&v->RequiredPrefetchPixelDataBWChroma[i][j][k],
-							&v->NoTimeForDynamicMetadata[i][j][k]);
+					dml30_ModeSupportAndSystemConfigurationSchedulePlane(
+							mode_lib, i, j, k);
 				}
 
 				for (k = 0; k <= v->NumberOfActivePlanes - 1; k++) {
@@ -4836,6 +4934,19 @@ void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 					&v->DRAMClockChangeSupport[i][j]);
 		}
 	}
+
+	dml30_ModeSupportAndSystemConfigurationTail(
+			mode_lib, start_state, EnoughWritebackUnits, WritebackModeSupport);
+}
+
+static noinline_for_stack void dml30_ModeSupportAndSystemConfigurationTail(
+		struct display_mode_lib *mode_lib, int start_state,
+		bool EnoughWritebackUnits, bool WritebackModeSupport)
+{
+	struct vba_vars_st *v = &mode_lib->vba;
+	int i;
+	unsigned int j, k;
+	bool ViewportExceedsSurface = false;
 
 	/*PTE Buffer Size Check*/
 

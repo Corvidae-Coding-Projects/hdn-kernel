@@ -17,6 +17,7 @@
 #include <linux/security.h>
 #include <linux/cred.h>
 #include <linux/hardening.h>
+#include <linux/hdn_alloc.h>
 #include <linux/idr.h>
 #include <linux/init.h>		/* init_rootfs */
 #include <linux/fs_struct.h>	/* get_fs_root et.al. */
@@ -6362,7 +6363,8 @@ void __init mnt_init(void)
 	int err;
 
 	mnt_cache = kmem_cache_create("mnt_cache", sizeof(struct mount),
-			0, SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT, NULL);
+			0, SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT|SLAB_HDN_DOMAIN, NULL);
+	hdn_cache_domain(mnt_cache, HDN_ALLOC_MOUNT);
 
 	mount_hashtable = alloc_large_system_hash("Mount-cache",
 				sizeof(struct hlist_head),

@@ -7,6 +7,7 @@
 #include <asm/errno.h>
 #include <asm/cpufeatures.h>
 #include <asm/alternative.h>
+#include <asm/hdn_rap.h>
 
 .section .noinstr.text, "ax"
 
@@ -31,20 +32,30 @@
  * which the compiler could/should do much better anyway.
  */
 SYM_TYPED_FUNC_START(__memcpy)
+	HDN_TYPED_FUNC_ENTER __memcpy, 5
 	ALTERNATIVE "jmp memcpy_orig", "", X86_FEATURE_FSRM
 
 	movq %rdi, %rax
 	movq %rdx, %rcx
 	rep movsb
-	RET
+	HDN_ENTRY_ROOT_RETURN
+#ifndef HDN_RAP_ASM_ACTIVE
 SYM_FUNC_END(__memcpy)
+#endif
 EXPORT_SYMBOL(__memcpy)
 
 SYM_FUNC_ALIAS_MEMFUNC(memcpy, __memcpy)
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 SYM_PIC_ALIAS(memcpy)
+#endif
 EXPORT_SYMBOL(memcpy)
 
+#ifdef HDN_RAP_ASM_ACTIVE
+memcpy_orig:
+#else
 SYM_FUNC_START_LOCAL(memcpy_orig)
+	HDN_BOOTSTRAP_FUNC memcpy_orig
+#endif
 	movq %rdi, %rax
 
 	cmpq $0x20, %rdx
@@ -125,7 +136,7 @@ SYM_FUNC_START_LOCAL(memcpy_orig)
 	movq %r9,	1*8(%rdi)
 	movq %r10,	-2*8(%rdi, %rdx)
 	movq %r11,	-1*8(%rdi, %rdx)
-	RET
+	HDN_ENTRY_ROOT_RETURN
 	.p2align 4
 .Lless_16bytes:
 	cmpl $8,	%edx
@@ -137,7 +148,7 @@ SYM_FUNC_START_LOCAL(memcpy_orig)
 	movq -1*8(%rsi, %rdx),	%r9
 	movq %r8,	0*8(%rdi)
 	movq %r9,	-1*8(%rdi, %rdx)
-	RET
+	HDN_ENTRY_ROOT_RETURN
 	.p2align 4
 .Lless_8bytes:
 	cmpl $4,	%edx
@@ -150,7 +161,7 @@ SYM_FUNC_START_LOCAL(memcpy_orig)
 	movl -4(%rsi, %rdx), %r8d
 	movl %ecx, (%rdi)
 	movl %r8d, -4(%rdi, %rdx)
-	RET
+	HDN_ENTRY_ROOT_RETURN
 	.p2align 4
 .Lless_3bytes:
 	subl $1, %edx
@@ -168,6 +179,10 @@ SYM_FUNC_START_LOCAL(memcpy_orig)
 	movb %cl, (%rdi)
 
 .Lend:
-	RET
+	HDN_ENTRY_ROOT_RETURN
+#ifdef HDN_RAP_ASM_ACTIVE
+SYM_FUNC_END(__memcpy)
+#else
 SYM_FUNC_END(memcpy_orig)
+#endif
 

@@ -449,8 +449,8 @@ int ptep_test_and_clear_young(struct vm_area_struct *vma,
 	int ret = 0;
 
 	if (pte_young(*ptep))
-		ret = test_and_clear_bit(_PAGE_BIT_ACCESSED,
-					 (unsigned long *) &ptep->pte);
+		ret = hdn_pt_test_clear_bit(_PAGE_BIT_ACCESSED,
+					 (unsigned long *) &ptep->pte, 1);
 
 	return ret;
 }
@@ -462,8 +462,8 @@ int pmdp_test_and_clear_young(struct vm_area_struct *vma,
 	int ret = 0;
 
 	if (pmd_young(*pmdp))
-		ret = test_and_clear_bit(_PAGE_BIT_ACCESSED,
-					 (unsigned long *)pmdp);
+		ret = hdn_pt_test_clear_bit(_PAGE_BIT_ACCESSED,
+					 (unsigned long *)pmdp, 2);
 
 	return ret;
 }
@@ -476,8 +476,8 @@ int pudp_test_and_clear_young(struct vm_area_struct *vma,
 	int ret = 0;
 
 	if (pud_young(*pudp))
-		ret = test_and_clear_bit(_PAGE_BIT_ACCESSED,
-					 (unsigned long *)pudp);
+		ret = hdn_pt_test_clear_bit(_PAGE_BIT_ACCESSED,
+					 (unsigned long *)pudp, 3);
 
 	return ret;
 }
@@ -644,7 +644,7 @@ int pud_set_huge(pud_t *pud, phys_addr_t addr, pgprot_t prot)
 	if (pud_present(*pud) && !pud_leaf(*pud))
 		return 0;
 
-	set_pte((pte_t *)pud, pfn_pte(
+	set_pud(pud, pfn_pud(
 		(u64)addr >> PAGE_SHIFT,
 		__pgprot(protval_4k_2_large(pgprot_val(prot)) | _PAGE_PSE)));
 
@@ -676,7 +676,7 @@ int pmd_set_huge(pmd_t *pmd, phys_addr_t addr, pgprot_t prot)
 	if (pmd_present(*pmd) && !pmd_leaf(*pmd))
 		return 0;
 
-	set_pte((pte_t *)pmd, pfn_pte(
+	set_pmd(pmd, pfn_pmd(
 		(u64)addr >> PAGE_SHIFT,
 		__pgprot(protval_4k_2_large(pgprot_val(prot)) | _PAGE_PSE)));
 

@@ -83,7 +83,12 @@ union acpi_subtable_headers;
 int __init acpi_parse_mp_wake(union acpi_subtable_headers *header,
 			      const unsigned long end);
 
-void asm_acpi_mp_play_dead(u64 reset_vector, u64 pgd_pa);
+void __noreturn asm_acpi_mp_play_dead(u64 reset_vector, u64 pgd_pa);
+#ifdef CONFIG_ACPI_MADT_WAKEUP
+void hdn_acpi_mp_seal(void);
+#else
+static inline void hdn_acpi_mp_seal(void) { }
+#endif
 
 /*
  * Check if the CPU can handle C2 and deeper

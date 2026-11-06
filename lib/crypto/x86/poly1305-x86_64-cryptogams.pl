@@ -109,6 +109,7 @@ sub declare_function() {
 	my ($name, $align, $nargs) = @_;
 	if($kernel) {
 		$code .= "SYM_FUNC_START($name)\n";
+		$code .= "HDN_ASM_FUNCTION $name\n";
 		$code .= ".L$name:\n";
 	} else {
 		$code .= ".globl	$name\n";
@@ -121,6 +122,7 @@ sub declare_function() {
 sub end_function() {
 	my ($name) = @_;
 	if($kernel) {
+		$code .= "HDN_ASM_FUNCTION_END $name\n";
 		$code .= "SYM_FUNC_END($name)\n";
 	} else {
 		$code .= ".size   $name,.-$name\n";
@@ -129,6 +131,7 @@ sub end_function() {
 
 $code.=<<___ if $kernel;
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 ___
 
 if ($avx) {
@@ -4223,6 +4226,8 @@ while(<SELF>) {
 }
 close SELF;
 
+my $hdn_private = 0;
+my $hdn_branch = 0;
 foreach (split('\n',$code)) {
 	s/\`([^\`]*)\`/eval($1)/ge;
 	s/%r([a-z]+)#d/%e$1/g;
@@ -4230,6 +4235,32 @@ foreach (split('\n',$code)) {
 	s/%x#%[yz]/%x/g or s/%y#%z/%y/g or s/%z#%[yz]/%z/g;
 
 	if ($kernel) {
+		# These two helpers pass hash/key limbs in R10/R11. Their paired
+		# register ABI preserves inputs, outputs and flags around RAP.
+		if (/^\.type\s+(__poly1305_(?:block|init_avx)),/) {
+			next;
+		}
+		if (/^(__poly1305_(?:block|init_avx)):/) {
+			$hdn_private = 1;
+			$_ = "SYM_FUNC_START_LOCAL($1)\nHDN_REGS_FUNC $1";
+		} elsif (/^\.size\s+(__poly1305_(?:block|init_avx)),/) {
+			$hdn_private = 0;
+			$_ = "HDN_ASM_FUNCTION_END $1\nSYM_FUNC_END($1)";
+		}
+		s/\bcall\s+(__poly1305_(?:block|init_avx))\b/HDN_REGS_CALL $1/;
+		if (/^\s*RET\s*$/) {
+			$_ = $hdn_private ? "\tHDN_REGS_RETURN" : "\tHDN_ASM_RETURN";
+		}
+		# Scalar fallback labels live inside OTHER functions. Use a real
+		# protected call and return instead of crossing their entry records.
+		if (/^\s*j(?:z|e)\s+\.L(blocks|emit)\s*$/) {
+			my $target = "poly1305_${1}_x86_64";
+			my $skip = ".Lhdn_poly_fallback_" . $hdn_branch++;
+			$_ = "#ifdef HDN_RAP_ASM_ACTIVE\n" .
+			     "\tjnz $skip\n\tsubq \$8, %rsp\n" .
+			     "\tHDN_C_CALL $target\n\taddq \$8, %rsp\n" .
+			     "\tHDN_ASM_RETURN\n$skip:\n#else\n$_\n#endif";
+		}
 		s/(^\.type.*),[0-9]+$/\1/;
 		s/(^\.type.*),\@abi-omnipotent+$/\1,\@function/;
 		next if /^\.cfi.*/;

@@ -13,6 +13,6 @@ TEST_PROGS := \
 	test-syscall.sh \
 	test-kprobe.sh
 
-TEST_FILES := settings
+TEST_FILES := settings make-hdn-relocs.py test-hdn-relocs.sh
 
 include ../lib.mk

@@ -391,6 +391,12 @@ int arch_prepare_optimized_kprobe(struct optimized_kprobe *op,
 	int ret, len;
 	long rel;
 
+	/* RAP uses the authenticated two-breakpoint instruction adapter. The
+	 * generic kprobe core retains the ordinary probe when optimization is
+	 * unavailable; no generated detour bypasses that adapter. */
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_RAP))
+		return -EOPNOTSUPP;
+
 	if (!can_optimize((unsigned long)op->kp.addr))
 		return -EILSEQ;
 

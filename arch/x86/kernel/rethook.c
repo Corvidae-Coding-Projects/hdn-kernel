@@ -6,6 +6,7 @@
 #include <linux/rethook.h>
 #include <linux/kprobes.h>
 #include <linux/objtool.h>
+#include <linux/hdn_rap.h>
 
 #include "kprobes/common.h"
 
@@ -35,7 +36,17 @@ asm(
 	"	pushfq\n"
 	SAVE_REGS_STRING
 	"	movq %rsp, %rdi\n"
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	"	leaq .Lhdn_rethook_callback_return(%rip), %r10\n"
+#endif
 	"	call arch_rethook_trampoline_callback\n"
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	".Lhdn_rethook_callback_return:\n"
+	".pushsection .hdn.rap.sites, \"a\", @progbits\n"
+	".balign 8\n"
+	".quad .Lhdn_rethook_callback_return, 0\n"
+	".popsection\n"
+#endif
 	RESTORE_REGS_STRING
 	/* In the callback function, 'regs->flags' is copied to 'regs->ss'. */
 	"	addq $16, %rsp\n"
@@ -56,8 +67,19 @@ asm(
 	"	addl $8, %esp\n"
 	"	popfl\n"
 #endif
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	"	movq (%rsp), %r11\n"
+	"	jmp __hdn_rap_rethook_return\n"
+#else
 	ASM_RET
+#endif
 	".size arch_rethook_trampoline, .-arch_rethook_trampoline\n"
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	".pushsection .discard.hdn_rap.functions, \"\", @progbits\n"
+	".balign 8\n"
+	".quad arch_rethook_trampoline, 4, 0\n"
+	".popsection\n"
+#endif
 );
 NOKPROBE_SYMBOL(arch_rethook_trampoline);
 
@@ -118,10 +140,16 @@ void arch_rethook_prepare(struct rethook_node *rh, struct pt_regs *regs, bool mc
 {
 	unsigned long *stack = (unsigned long *)regs->sp;
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	rh->ret_addr = hdn_rap_hook_arm((unsigned long)stack, HDN_RAP_HOOK_RETHOOK);
+#else
 	rh->ret_addr = stack[0];
+#endif
 	rh->frame = regs->sp;
 
 	/* Replace the return addr with trampoline addr */
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 	stack[0] = (unsigned long) arch_rethook_trampoline;
+#endif
 }
 NOKPROBE_SYMBOL(arch_rethook_prepare);

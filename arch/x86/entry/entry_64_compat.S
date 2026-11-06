@@ -13,6 +13,7 @@
 #include <asm/asm.h>
 #include <asm/smap.h>
 #include <asm/nospec-branch.h>
+#include <asm/hdn_rap.h>
 #include <linux/linkage.h>
 #include <linux/err.h>
 
@@ -48,6 +49,7 @@
  * 0(%ebp) arg6
  */
 SYM_CODE_START(entry_SYSENTER_compat)
+	HDN_KEXEC_FUNC entry_SYSENTER_compat, 44
 	UNWIND_HINT_ENTRY
 	ENDBR
 	/* Interrupts are off on entry. */
@@ -123,7 +125,7 @@ SYM_INNER_LABEL(entry_SYSENTER_compat_after_hwframe, SYM_L_GLOBAL)
 	CLEAR_BRANCH_HISTORY
 
 	movq	%rsp, %rdi
-	call	do_SYSENTER_32
+	HDN_C_CALL do_SYSENTER_32
 	jmp	sysret32_from_system_call
 
 .Lsysenter_fix_flags:
@@ -181,6 +183,7 @@ SYM_CODE_END(entry_SYSENTER_compat)
  * 0(%esp) arg6
  */
 SYM_CODE_START(entry_SYSCALL_compat)
+	HDN_KEXEC_FUNC entry_SYSCALL_compat, 45
 	UNWIND_HINT_ENTRY
 	ENDBR
 	/* Interrupts are off on entry. */
@@ -215,12 +218,18 @@ SYM_INNER_LABEL(entry_SYSCALL_compat_after_hwframe, SYM_L_GLOBAL)
 	CLEAR_BRANCH_HISTORY
 
 	movq	%rsp, %rdi
-	call	do_fast_syscall_32
+	HDN_C_CALL do_fast_syscall_32
 
 sysret32_from_system_call:
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+SYM_INNER_LABEL(__hdn_rap_sysret32, SYM_L_GLOBAL)
+	testb %al, %al
+	jz swapgs_restore_regs_and_return_to_usermode
+#else
 	/* XEN PV guests always use IRET path */
 	ALTERNATIVE "testb %al, %al; jz swapgs_restore_regs_and_return_to_usermode", \
 		    "jmp swapgs_restore_regs_and_return_to_usermode", X86_FEATURE_XENPV
+#endif
 
 	/*
 	 * Opportunistic SYSRET
@@ -294,6 +303,12 @@ SYM_CODE_END(entry_SYSCALL_compat)
 SYM_CODE_START(int80_emulation)
 	ANNOTATE_NOENDBR
 	UNWIND_HINT_FUNC
+	HDN_DIRECT_FUNC_ENTER int80_emulation
 	CLEAR_BRANCH_HISTORY
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	HDN_C_CALL do_int80_emulation
+	HDN_ENTRY_ROOT_RETURN
+#else
 	jmp do_int80_emulation
+#endif
 SYM_CODE_END(int80_emulation)

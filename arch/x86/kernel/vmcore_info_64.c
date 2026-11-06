@@ -2,6 +2,7 @@
 
 #include <linux/vmcore_info.h>
 #include <linux/pgtable.h>
+#include <linux/hdn_stack.h>
 
 #include <asm/setup.h>
 
@@ -21,4 +22,5 @@ void arch_crash_save_vmcoreinfo(void)
 	vmcoreinfo_append_str("KERNELOFFSET=%lx\n", kaslr_offset());
 	VMCOREINFO_NUMBER(KERNEL_IMAGE_SIZE);
 	VMCOREINFO_NUMBER(sme_mask);
+	hdn_stack_vmcoreinfo();
 }

@@ -7,6 +7,7 @@
 // The code in this file supports 32-bit and 64-bit CPUs, and it doesn't require
 // AVX.  It does use up to SSE4.1, which all CPUs with AES-NI have.
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 .section .rodata
 #ifdef __x86_64__
@@ -180,19 +181,23 @@
 	pop		%esi
 	pop		%ebx
 #endif
-	RET
+	HDN_ASM_RETURN
 .endm
 
 // void aes128_expandkey_aesni(u32 rndkeys[], u32 *inv_rndkeys,
 //			       const u8 in_key[AES_KEYSIZE_128]);
 SYM_FUNC_START(aes128_expandkey_aesni)
+	HDN_ASM_FUNCTION aes128_expandkey_aesni
 	_aes_expandkey_aesni	1
+	HDN_ASM_FUNCTION_END aes128_expandkey_aesni
 SYM_FUNC_END(aes128_expandkey_aesni)
 
 // void aes256_expandkey_aesni(u32 rndkeys[], u32 *inv_rndkeys,
 //			       const u8 in_key[AES_KEYSIZE_256]);
 SYM_FUNC_START(aes256_expandkey_aesni)
+	HDN_ASM_FUNCTION aes256_expandkey_aesni
 	_aes_expandkey_aesni	0
+	HDN_ASM_FUNCTION_END aes256_expandkey_aesni
 SYM_FUNC_END(aes256_expandkey_aesni)
 
 .macro	_aes_crypt_aesni	enc
@@ -245,17 +250,21 @@ SYM_FUNC_END(aes256_expandkey_aesni)
 #ifdef __i386__
 	pop		%ebx
 #endif
-	RET
+	HDN_ASM_RETURN
 .endm
 
 // void aes_encrypt_aesni(const u32 rndkeys[], int nrounds,
 //			  u8 out[AES_BLOCK_SIZE], const u8 in[AES_BLOCK_SIZE]);
 SYM_FUNC_START(aes_encrypt_aesni)
+	HDN_ASM_FUNCTION aes_encrypt_aesni
 	_aes_crypt_aesni	1
+	HDN_ASM_FUNCTION_END aes_encrypt_aesni
 SYM_FUNC_END(aes_encrypt_aesni)
 
 // void aes_decrypt_aesni(const u32 inv_rndkeys[], int nrounds,
 //			  u8 out[AES_BLOCK_SIZE], const u8 in[AES_BLOCK_SIZE]);
 SYM_FUNC_START(aes_decrypt_aesni)
+	HDN_ASM_FUNCTION aes_decrypt_aesni
 	_aes_crypt_aesni	0
+	HDN_ASM_FUNCTION_END aes_decrypt_aesni
 SYM_FUNC_END(aes_decrypt_aesni)

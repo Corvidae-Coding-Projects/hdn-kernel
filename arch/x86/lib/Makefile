@@ -36,6 +36,9 @@ lib-$(CONFIG_ARCH_HAS_COPY_MC) += copy_mc.o copy_mc_64.o
 lib-$(CONFIG_INSTRUCTION_DECODER) += insn.o inat.o insn-eval.o
 lib-$(CONFIG_RANDOMIZE_BASE) += kaslr.o
 lib-$(CONFIG_FUNCTION_ERROR_INJECTION)	+= error-inject.o
+ifeq ($(CONFIG_SECURITY_HARDENING_RAP),y)
+lib-$(CONFIG_FUNCTION_ERROR_INJECTION) += hdn_error_return.o
+endif
 lib-$(CONFIG_MITIGATION_RETPOLINE) += retpoline.o
 
 obj-y += msr.o msr-reg.o msr-reg-export.o hweight.o
@@ -60,5 +63,8 @@ endif
         lib-y += memmove_64.o memset_64.o
         lib-y += copy_user_64.o copy_user_uncached_64.o
         lib-y += cmpxchg16b_emu.o
+ifneq ($(CONFIG_SECURITY_HARDENING_RAP),y)
+        # FineIBT argument thunks belong to Clang CFI, not the RAP ABI.
         lib-y += bhi.o
+endif
 endif

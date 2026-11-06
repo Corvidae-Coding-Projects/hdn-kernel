@@ -5,6 +5,7 @@
 #include <linux/sched.h>
 #include <linux/ftrace.h>
 #include <linux/rethook.h>
+#include <linux/hdn_stack.h>
 #include <asm/ptrace.h>
 #include <asm/stacktrace.h>
 
@@ -132,6 +133,19 @@ unsigned long unwind_recover_ret_addr(struct unwind_state *state,
  * since the other task could be running on another CPU and could have poisoned
  * the stack in the meantime.
  */
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+#define READ_ONCE_TASK_STACK(task, x)			\
+({							\
+	unsigned long val = 0;				\
+	BUILD_BUG_ON(sizeof(x) > sizeof(val));		\
+	if (hdn_stack_address((unsigned long)&(x))) {	\
+		if (hdn_stack_read(task, (unsigned long)&(x), &val, sizeof(x))) \
+			val = 0;				\
+	} else						\
+		val = READ_ONCE_NOCHECK(x);		\
+	val;						\
+})
+#else
 #define READ_ONCE_TASK_STACK(task, x)			\
 ({							\
 	unsigned long val;				\
@@ -141,6 +155,7 @@ unsigned long unwind_recover_ret_addr(struct unwind_state *state,
 		val = READ_ONCE_NOCHECK(x);		\
 	val;						\
 })
+#endif
 
 static inline bool task_on_another_cpu(struct task_struct *task)
 {

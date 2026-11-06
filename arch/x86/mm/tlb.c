@@ -16,6 +16,7 @@
 
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
+#include <asm/hdn_stack_mm.h>
 #include <asm/nospec-branch.h>
 #include <asm/cache.h>
 #include <asm/cacheflush.h>
@@ -579,7 +580,7 @@ static void load_new_mm_cr3(pgd_t *pgdir, u16 new_asid, unsigned long lam,
 	 * that load_cr3() is serializing and orders TLB
 	 * fills with respect to the mm_cpumask writes.
 	 */
-	write_cr3(new_mm_cr3);
+	write_cr3(hdn_stack_mm_route(new_mm_cr3));
 }
 
 void leave_mm(void)
@@ -806,8 +807,8 @@ void switch_mm_irqs_off(struct mm_struct *unused, struct mm_struct *next,
 	 * isn't free.
 	 */
 #ifdef CONFIG_DEBUG_VM
-	if (WARN_ON_ONCE(__read_cr3() != build_cr3(prev->pgd, prev_asid,
-						   tlbstate_lam_cr3_mask()))) {
+	if (WARN_ON_ONCE(!hdn_stack_mm_matches(build_cr3(prev->pgd, prev_asid,
+						   tlbstate_lam_cr3_mask()), __read_cr3()))) {
 		/*
 		 * If we were to BUG here, we'd be very likely to kill
 		 * the system so hard that we don't see the call trace.
@@ -1085,7 +1086,7 @@ void initialize_tlbstate_and_flush(void)
 	unsigned long cr3 = __read_cr3();
 
 	/* Assert that CR3 already references the right mm. */
-	WARN_ON((cr3 & CR3_ADDR_MASK) != __pa(mm->pgd));
+	WARN_ON(!hdn_stack_mm_matches(__pa(mm->pgd) | (cr3 & ~CR3_ADDR_MASK), cr3));
 
 	/* LAM expected to be disabled */
 	WARN_ON(cr3 & (X86_CR3_LAM_U48 | X86_CR3_LAM_U57));
@@ -1100,7 +1101,7 @@ void initialize_tlbstate_and_flush(void)
 		!(cr4_read_shadow() & X86_CR4_PCIDE));
 
 	/* Disable LAM, force ASID 0 and force a TLB flush. */
-	write_cr3(build_cr3(mm->pgd, 0, 0));
+	write_cr3(hdn_stack_mm_route(build_cr3(mm->pgd, 0, 0)));
 
 	/* Reinitialize tlbstate. */
 	this_cpu_write(cpu_tlbstate.last_user_mm_spec, LAST_USER_MM_INIT);
@@ -1580,6 +1581,7 @@ unsigned long __get_current_cr3_fast(void)
 	/* For now, be very restrictive about when this can be called. */
 	VM_WARN_ON(in_nmi() || preemptible());
 
+	cr3 = hdn_stack_mm_expected(cr3);
 	VM_BUG_ON(cr3 != __read_cr3());
 	return cr3;
 }

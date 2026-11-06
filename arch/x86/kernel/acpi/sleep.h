@@ -4,6 +4,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/suspend.h>
 
 extern unsigned long saved_video_mode;
 extern long saved_magic;
@@ -13,8 +14,6 @@ extern int wakeup_pmode_return;
 extern u8 wake_sleep_flags;
 
 extern void wakeup_long64(void);
-
-extern void do_suspend_lowlevel(void);
 
 extern int x86_acpi_suspend_lowlevel(void);
 

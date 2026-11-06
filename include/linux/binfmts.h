@@ -6,6 +6,7 @@
 #include <linux/unistd.h>
 #include <asm/exec.h>
 #include <uapi/linux/binfmts.h>
+#include <uapi/linux/hardening.h>
 
 struct filename;
 struct coredump_params;
@@ -70,6 +71,9 @@ struct linux_binprm {
 	u64 hardening_original_dev_minor;
 	u64 hardening_original_ino;
 	u64 hardening_exec_memory_flags;
+	u64 hardening_compat_epoch;
+	bool hardening_compat_managed;
+	char hardening_compat_path[HDN_POLICY_PATH_LEN];
 	bool hardening_interpreted;
 	bool hardening_privileged_exec;
 	bool hardening_privileged_lineage;

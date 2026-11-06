@@ -36,4 +36,14 @@ config GCC_PLUGIN_LATENT_ENTROPY
 	   * https://grsecurity.net/
 	   * https://pax.grsecurity.net/
 
+config GCC_PLUGIN_HDN_NULL_ANALYSIS
+	bool "Report optimized potential null dereferences"
+	default y
+	help
+	  Run the HDN reporting-only null analysis after the optimizing GIMPLE
+	  passes. The analyzer records reachable dereferences and indirect calls
+	  whose optimized dataflow still admits a null base. Findings are written
+	  as structured records for the external HDN verification gate; this
+	  option does not change generated kernel code or fault handling.
+
 endif

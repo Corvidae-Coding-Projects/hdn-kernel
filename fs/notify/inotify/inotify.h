@@ -9,6 +9,9 @@ struct inotify_event_info {
 	int wd;
 	u32 sync_cookie;
 	int name_len;
+#ifdef CONFIG_SECURITY_HARDENING_SYSFS_VIEW
+	u64 hdn_disclosure;
+#endif
 	char name[];
 };
 
@@ -20,6 +23,15 @@ struct inotify_inode_mark {
 static inline struct inotify_event_info *INOTIFY_E(struct fsnotify_event *fse)
 {
 	return container_of(fse, struct inotify_event_info, fse);
+}
+
+static inline u64 inotify_event_disclosure(struct fsnotify_event *fse)
+{
+#ifdef CONFIG_SECURITY_HARDENING_SYSFS_VIEW
+	return INOTIFY_E(fse)->hdn_disclosure;
+#else
+	return 0;
+#endif
 }
 
 /*

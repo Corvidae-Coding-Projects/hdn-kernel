@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+#include <asm/hdn_rap.h>
 #include <linux/export.h>
 #include <linux/linkage.h>
 #include <linux/objtool.h>
@@ -11,6 +12,7 @@
  */
 SYM_FUNC_START(__sw_hweight32)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER __sw_hweight32, 1
 
 #ifdef CONFIG_X86_64
 	movl %edi, %eax				# w
@@ -34,7 +36,7 @@ SYM_FUNC_START(__sw_hweight32)
 	imull $0x01010101, %eax, %eax		# w_tmp *= 0x01010101
 	shrl $24, %eax				# w = w_tmp >> 24
 	__ASM_SIZE(pop,) %__ASM_REG(dx)
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(__sw_hweight32)
 EXPORT_SYMBOL(__sw_hweight32)
 
@@ -45,6 +47,7 @@ EXPORT_SYMBOL(__sw_hweight32)
 #ifdef CONFIG_X86_64
 SYM_FUNC_START(__sw_hweight64)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER __sw_hweight64, 1
 	pushq   %rdi
 	pushq   %rdx
 
@@ -72,7 +75,7 @@ SYM_FUNC_START(__sw_hweight64)
 
 	popq    %rdx
 	popq    %rdi
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(__sw_hweight64)
 EXPORT_SYMBOL(__sw_hweight64)
 #endif

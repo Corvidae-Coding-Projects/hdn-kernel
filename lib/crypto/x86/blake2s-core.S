@@ -5,6 +5,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 .section .rodata.cst32.iv, "aM", @progbits, 32
 .align 32
@@ -66,6 +67,7 @@
 //	u32 f[2];	(in)
 //
 SYM_FUNC_START(blake2s_compress_ssse3)
+	HDN_ASM_FUNCTION blake2s_compress_ssse3
 	movdqu		(CTX),%xmm0		// Load h[0..3]
 	movdqu		16(CTX),%xmm1		// Load h[4..7]
 	movdqa		.Lror16(%rip),%xmm12
@@ -194,7 +196,8 @@ SYM_FUNC_START(blake2s_compress_ssse3)
 	movdqu		%xmm0,(CTX)		// Store new h[0..3]
 	movdqu		%xmm1,16(CTX)		// Store new h[4..7]
 	movq		%xmm14,32(CTX)		// Store new t (f is unchanged)
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END blake2s_compress_ssse3
 SYM_FUNC_END(blake2s_compress_ssse3)
 
 //
@@ -207,6 +210,7 @@ SYM_FUNC_END(blake2s_compress_ssse3)
 //	u32 f[2];	(in)
 //
 SYM_FUNC_START(blake2s_compress_avx512)
+	HDN_ASM_FUNCTION blake2s_compress_avx512
 	vmovdqu		(CTX),%xmm0		// Load h[0..3]
 	vmovdqu		16(CTX),%xmm1		// Load h[4..7]
 	vmovdqu		32(CTX),%xmm4		// Load t and f
@@ -287,5 +291,6 @@ SYM_FUNC_START(blake2s_compress_avx512)
 	vmovdqu		%xmm1,16(CTX)		// Store new h[4..7]
 	vmovq		%xmm4,32(CTX)		// Store new t (f is unchanged)
 	vzeroupper
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END blake2s_compress_avx512
 SYM_FUNC_END(blake2s_compress_avx512)

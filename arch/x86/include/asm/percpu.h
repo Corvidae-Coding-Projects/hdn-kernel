@@ -385,6 +385,23 @@ do {									\
 #endif /* defined(CONFIG_X86_32) && !defined(CONFIG_UML) */
 
 #ifdef CONFIG_X86_64
+#include <asm/hdn_rap_call.h>
+
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+/* Keep the bound call outside alternative replacement bytes. Both paths
+ * leave the hardware/emulated ZF intact for try_cmpxchg's flag output. */
+#define __PCPU_CMPXCHG128_ASM \
+	ALTERNATIVE("jmp 990f", "", X86_FEATURE_CX16) \
+	"cmpxchg16b " __percpu_arg([var]) "\n\tjmp 992f\n\t" \
+	"990:\n\t" HDN_ASM_C_CALL("this_cpu_cmpxchg16b_emu") "992:\n\t"
+#define __PCPU_CMPXCHG128_CLOBBERS "memory", "r10", "r11"
+#else
+#define __PCPU_CMPXCHG128_ASM \
+	ALTERNATIVE("call this_cpu_cmpxchg16b_emu", \
+		    "cmpxchg16b " __percpu_arg([var]), X86_FEATURE_CX16)
+#define __PCPU_CMPXCHG128_CLOBBERS "memory"
+#endif
+
 #define raw_cpu_cmpxchg64(pcp, oval, nval)		percpu_cmpxchg_op(8,         , pcp, oval, nval);
 #define this_cpu_cmpxchg64(pcp, oval, nval)		percpu_cmpxchg_op(8, volatile, pcp, oval, nval);
 
@@ -404,13 +421,12 @@ do {									\
 	new__.var = _nval;						\
 									\
 	asm_inline qual (						\
-		ALTERNATIVE("call this_cpu_cmpxchg16b_emu",		\
-			    "cmpxchg16b " __percpu_arg([var]), X86_FEATURE_CX16) \
+		__PCPU_CMPXCHG128_ASM					\
 		: ALT_OUTPUT_SP([var] "+m" (__my_cpu_var(_var)),	\
 				"+a" (old__.low), "+d" (old__.high))	\
 		: "b" (new__.low), "c" (new__.high),			\
 		  "S" (&(_var))						\
-		: "memory");						\
+		: __PCPU_CMPXCHG128_CLOBBERS);				\
 									\
 	old__.var;							\
 })
@@ -433,14 +449,13 @@ do {									\
 	new__.var = _nval;						\
 									\
 	asm_inline qual (						\
-		ALTERNATIVE("call this_cpu_cmpxchg16b_emu",		\
-			    "cmpxchg16b " __percpu_arg([var]), X86_FEATURE_CX16) \
+		__PCPU_CMPXCHG128_ASM					\
 		: ALT_OUTPUT_SP("=@ccz" (success),			\
 				[var] "+m" (__my_cpu_var(_var)),	\
 				"+a" (old__.low), "+d" (old__.high))	\
 		: "b" (new__.low), "c" (new__.high),			\
 		  "S" (&(_var))						\
-		: "memory");						\
+		: __PCPU_CMPXCHG128_CLOBBERS);				\
 	if (unlikely(!success))						\
 		*_oval = old__.var;					\
 									\

@@ -7,6 +7,7 @@
 #include <linux/mmdebug.h>
 #include <linux/gfp.h>
 #include <linux/pgalloc_tag.h>
+#include <linux/hdn_pgtable.h>
 #include <linux/bug.h>
 #include <linux/list.h>
 #include <linux/mmzone.h>
@@ -3401,7 +3402,11 @@ static inline bool ptdesc_test_kernel(const struct ptdesc *ptdesc)
  */
 static inline struct ptdesc *pagetable_alloc_noprof(gfp_t gfp, unsigned int order)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	struct page *page = hdn_pt_alloc(gfp, order, false);
+#else
 	struct page *page = alloc_pages_noprof(gfp | __GFP_COMP, order);
+#endif
 
 	return page_ptdesc(page);
 }
@@ -3411,6 +3416,8 @@ static inline void __pagetable_free(struct ptdesc *pt)
 {
 	struct page *page = ptdesc_page(pt);
 
+	if (hdn_pt_free(page, compound_order(page)))
+		return;
 	__free_pages(page, compound_order(page));
 }
 

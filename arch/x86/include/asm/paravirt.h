@@ -133,7 +133,12 @@ static inline unsigned long __read_cr3(void)
 
 static inline void write_cr3(unsigned long x)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	/* Native CR3 publication must retain the ownership/private-stack guard. */
+	PVOP_VCALL1(pv_ops, mmu.write_cr3, x);
+#else
 	PVOP_ALT_VCALL1(pv_ops, mmu.write_cr3, x, "mov %%rdi, %%cr3", ALT_NOT_XEN);
+#endif
 }
 
 static inline void __write_cr4(unsigned long x)
@@ -334,87 +339,139 @@ static inline void paravirt_release_p4d(unsigned long pfn)
 
 static inline pte_t __pte(pteval_t val)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return HDN_PV_MAKE(pte, val);
+#else
 	return (pte_t) { PVOP_ALT_CALLEE1(pteval_t, pv_ops, mmu.make_pte, val,
 					  "mov %%rdi, %%rax", ALT_NOT_XEN) };
+#endif
 }
 
 static inline pteval_t pte_val(pte_t pte)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return HDN_PV_VALUE(pte, pte);
+#else
 	return PVOP_ALT_CALLEE1(pteval_t, pv_ops, mmu.pte_val, pte.pte,
 				"mov %%rdi, %%rax", ALT_NOT_XEN);
+#endif
 }
 
 static inline pgd_t __pgd(pgdval_t val)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return HDN_PV_MAKE(pgd, val);
+#else
 	return (pgd_t) { PVOP_ALT_CALLEE1(pgdval_t, pv_ops, mmu.make_pgd, val,
 					  "mov %%rdi, %%rax", ALT_NOT_XEN) };
+#endif
 }
 
 static inline pgdval_t pgd_val(pgd_t pgd)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return HDN_PV_VALUE(pgd, pgd);
+#else
 	return PVOP_ALT_CALLEE1(pgdval_t, pv_ops, mmu.pgd_val, pgd.pgd,
 				"mov %%rdi, %%rax", ALT_NOT_XEN);
+#endif
 }
 
 #define  __HAVE_ARCH_PTEP_MODIFY_PROT_TRANSACTION
 static inline pte_t ptep_modify_prot_start(struct vm_area_struct *vma, unsigned long addr,
 					   pte_t *ptep)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return PVOP_CALL3(pte_t, pv_ops, mmu.ptep_modify_prot_start, vma, addr, ptep);
+#else
 	pteval_t ret;
 
 	ret = PVOP_CALL3(pteval_t, pv_ops, mmu.ptep_modify_prot_start, vma, addr, ptep);
 
 	return (pte_t) { .pte = ret };
+#endif
 }
 
 static inline void ptep_modify_prot_commit(struct vm_area_struct *vma, unsigned long addr,
 					   pte_t *ptep, pte_t old_pte, pte_t pte)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	PVOP_VCALL4(pv_ops, mmu.ptep_modify_prot_commit, vma, addr, ptep, pte);
+#else
 
 	PVOP_VCALL4(pv_ops, mmu.ptep_modify_prot_commit, vma, addr, ptep, pte.pte);
+#endif
 }
 
 static inline void set_pte(pte_t *ptep, pte_t pte)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	PVOP_VCALL2(pv_ops, mmu.set_pte, ptep, pte);
+#else
 	PVOP_VCALL2(pv_ops, mmu.set_pte, ptep, pte.pte);
+#endif
 }
 
 static inline void set_pmd(pmd_t *pmdp, pmd_t pmd)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	PVOP_VCALL2(pv_ops, mmu.set_pmd, pmdp, pmd);
+#else
 	PVOP_VCALL2(pv_ops, mmu.set_pmd, pmdp, native_pmd_val(pmd));
+#endif
 }
 
 static inline pmd_t __pmd(pmdval_t val)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return HDN_PV_MAKE(pmd, val);
+#else
 	return (pmd_t) { PVOP_ALT_CALLEE1(pmdval_t, pv_ops, mmu.make_pmd, val,
 					  "mov %%rdi, %%rax", ALT_NOT_XEN) };
+#endif
 }
 
 static inline pmdval_t pmd_val(pmd_t pmd)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return HDN_PV_VALUE(pmd, pmd);
+#else
 	return PVOP_ALT_CALLEE1(pmdval_t, pv_ops, mmu.pmd_val, pmd.pmd,
 				"mov %%rdi, %%rax", ALT_NOT_XEN);
+#endif
 }
 
 static inline void set_pud(pud_t *pudp, pud_t pud)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	PVOP_VCALL2(pv_ops, mmu.set_pud, pudp, pud);
+#else
 	PVOP_VCALL2(pv_ops, mmu.set_pud, pudp, native_pud_val(pud));
+#endif
 }
 
 static inline pud_t __pud(pudval_t val)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return HDN_PV_MAKE(pud, val);
+#else
 	pudval_t ret;
 
 	ret = PVOP_ALT_CALLEE1(pudval_t, pv_ops, mmu.make_pud, val,
 			       "mov %%rdi, %%rax", ALT_NOT_XEN);
 
 	return (pud_t) { ret };
+#endif
 }
 
 static inline pudval_t pud_val(pud_t pud)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return HDN_PV_VALUE(pud, pud);
+#else
 	return PVOP_ALT_CALLEE1(pudval_t, pv_ops, mmu.pud_val, pud.pud,
 				"mov %%rdi, %%rax", ALT_NOT_XEN);
+#endif
 }
 
 static inline void pud_clear(pud_t *pudp)
@@ -424,28 +481,44 @@ static inline void pud_clear(pud_t *pudp)
 
 static inline void set_p4d(p4d_t *p4dp, p4d_t p4d)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	PVOP_VCALL2(pv_ops, mmu.set_p4d, p4dp, p4d);
+#else
 	p4dval_t val = native_p4d_val(p4d);
 
 	PVOP_VCALL2(pv_ops, mmu.set_p4d, p4dp, val);
+#endif
 }
 
 static inline p4d_t __p4d(p4dval_t val)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return HDN_PV_MAKE(p4d, val);
+#else
 	p4dval_t ret = PVOP_ALT_CALLEE1(p4dval_t, pv_ops, mmu.make_p4d, val,
 					"mov %%rdi, %%rax", ALT_NOT_XEN);
 
 	return (p4d_t) { ret };
+#endif
 }
 
 static inline p4dval_t p4d_val(p4d_t p4d)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return HDN_PV_VALUE(p4d, p4d);
+#else
 	return PVOP_ALT_CALLEE1(p4dval_t, pv_ops, mmu.p4d_val, p4d.p4d,
 				"mov %%rdi, %%rax", ALT_NOT_XEN);
+#endif
 }
 
 static inline void __set_pgd(pgd_t *pgdp, pgd_t pgd)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	PVOP_VCALL2(pv_ops, mmu.set_pgd, pgdp, pgd);
+#else
 	PVOP_VCALL2(pv_ops, mmu.set_pgd, pgdp, native_pgd_val(pgd));
+#endif
 }
 
 #define set_pgd(pgdp, pgdval) do {					\

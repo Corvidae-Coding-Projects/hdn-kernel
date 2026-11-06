@@ -429,10 +429,26 @@ static void *kfence_guarded_alloc(struct kmem_cache *cache, size_t size, gfp_t g
 
 	/* Try to obtain a free object. */
 	raw_spin_lock_irqsave(&kfence_freelist_lock, flags);
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	{
+		struct kfence_metadata *candidate;
+		unsigned int domain = cache->hdn_alloc_domain + 1;
+
+		list_for_each_entry(candidate, &kfence_freelist, list) {
+			if (candidate->hdn_domain && candidate->hdn_domain != domain)
+				continue;
+			candidate->hdn_domain = domain;
+			meta = candidate;
+			list_del_init(&meta->list);
+			break;
+		}
+	}
+#else
 	if (!list_empty(&kfence_freelist)) {
 		meta = list_entry(kfence_freelist.next, struct kfence_metadata, list);
 		list_del_init(&meta->list);
 	}
+#endif
 	raw_spin_unlock_irqrestore(&kfence_freelist_lock, flags);
 	if (!meta) {
 		atomic_long_inc(&counters[KFENCE_COUNTER_SKIP_CAPACITY]);

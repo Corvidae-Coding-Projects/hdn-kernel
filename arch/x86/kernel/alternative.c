@@ -8,6 +8,12 @@
 #include <linux/execmem.h>
 
 #include <asm/text-patching.h>
+#include <asm/hdn_text.h>
+#include <asm/hdn_rap_patch.h>
+#include <linux/hdn_rap.h>
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+#include "../mm/hdn_pgtable_internal.h"
+#endif
 #include <asm/insn.h>
 #include <asm/insn-eval.h>
 #include <asm/ibt.h>
@@ -122,11 +128,16 @@ struct its_array its_pages;
 static void *__its_alloc(struct its_array *pages)
 {
 	void *page __free(execmem) = execmem_alloc_rw(EXECMEM_MODULE_TEXT, PAGE_SIZE);
-	if (!page)
+	if (!page || pages->num == INT_MAX)
 		return NULL;
 
-	void *tmp = krealloc(pages->pages, (pages->num+1) * sizeof(void *),
-			     GFP_KERNEL);
+	/* Finalize before any call site can point into this page. */
+	memset(page, INT3_INSN_OPCODE, PAGE_SIZE);
+	if (set_memory_rox((unsigned long)page, 1))
+		return NULL;
+
+	void *tmp = krealloc_array(pages->pages, (size_t)pages->num + 1,
+				  sizeof(void *), GFP_KERNEL);
 	if (!tmp)
 		return NULL;
 
@@ -139,7 +150,7 @@ static void *__its_alloc(struct its_array *pages)
 /* Initialize a thunk with the "jmp *reg; int3" instructions. */
 static void *its_init_thunk(void *thunk, int reg)
 {
-	u8 *bytes = thunk;
+	u8 bytes[7];
 	int offset = 0;
 	int i = 0;
 
@@ -167,22 +178,26 @@ static void *its_init_thunk(void *thunk, int reg)
 	bytes[i++] = 0xe0 + reg; /* JMP *reg */
 	bytes[i++] = 0xcc;
 
-	return thunk + offset;
-}
+	/* The target is unused RX storage; only the temporary poking alias writes. */
+#ifdef CONFIG_MODULES
+	if (its_mod) {
+		lockdep_assert_held(&text_mutex);
+		if (!text_poke_copy_locked(thunk, bytes, i, false))
+			return NULL;
+	} else
+#endif
+	if (!text_poke_copy(thunk, bytes, i))
+		return NULL;
 
-static void its_pages_protect(struct its_array *pages)
-{
-	for (int i = 0; i < pages->num; i++) {
-		void *page = pages->pages[i];
-		execmem_restore_rox(page, PAGE_SIZE);
-	}
+	return thunk + offset;
 }
 
 static void its_fini_core(void)
 {
-	if (IS_ENABLED(CONFIG_STRICT_KERNEL_RWX))
-		its_pages_protect(&its_pages);
 	kfree(its_pages.pages);
+	its_pages.pages = NULL;
+	its_pages.num = 0;
+	its_page = NULL;
 }
 
 #ifdef CONFIG_MODULES
@@ -206,9 +221,6 @@ void its_fini_mod(struct module *mod)
 	its_mod = NULL;
 	its_page = NULL;
 	mutex_unlock(&text_mutex);
-
-	if (IS_ENABLED(CONFIG_STRICT_MODULE_RWX))
-		its_pages_protect(&mod->arch.its_pages);
 }
 
 void its_free_mod(struct module *mod)
@@ -238,9 +250,6 @@ static void *its_alloc(void)
 	if (!page)
 		return NULL;
 
-	if (pages == &its_pages)
-		set_memory_x((unsigned long)page, 1);
-
 	return page;
 }
 
@@ -266,7 +275,6 @@ static void *its_allocate_thunk(int reg)
 			pr_err("ITS page allocation failed\n");
 			return NULL;
 		}
-		memset(its_page, INT3_INSN_OPCODE, PAGE_SIZE);
 		its_offset = 32;
 	}
 
@@ -525,7 +533,11 @@ void text_poke_apply_relocation(u8 *buf, const u8 * const instr, size_t instrlen
 }
 
 /* Low-level backend functions usable from alternative code replacements. */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+noinstr void nop_func(void) { }
+#else
 DEFINE_ASM_FUNC(nop_func, "", .entry.text);
+#endif
 EXPORT_SYMBOL_GPL(nop_func);
 
 noinstr void BUG_func(void)
@@ -2531,15 +2543,22 @@ static void text_poke_memset(void *dst, const void *src, size_t len)
 
 typedef void text_poke_f(void *dst, const void *src, size_t len);
 
-static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t len)
+static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t len,
+			 enum hdn_text_kind kind)
 {
-	bool cross_page_boundary = offset_in_page(addr) + len > PAGE_SIZE;
+	bool cross_page_boundary = len > PAGE_SIZE - offset_in_page(addr);
+	struct hdn_text_token token = {};
 	struct page *pages[2] = {NULL};
 	struct mm_struct *prev_mm;
 	unsigned long flags;
 	pte_t pte, *ptep;
 	spinlock_t *ptl;
 	pgprot_t pgprot;
+
+	if (!len)
+		return addr;
+	BUG_ON(len > 2 * PAGE_SIZE - offset_in_page(addr));
+	BUG_ON((unsigned long)addr > ULONG_MAX - len);
 
 	/*
 	 * While boot memory allocator is running we cannot use struct pages as
@@ -2580,6 +2599,7 @@ static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t l
 	VM_BUG_ON(!ptep);
 
 	local_irq_save(flags);
+	hdn_text_prepare(&token, addr, len, pages, ptep, kind);
 
 	pte = mk_pte(pages[0], pgprot);
 	set_pte_at(text_poke_mm, text_poke_mm_addr, ptep, pte);
@@ -2588,6 +2608,7 @@ static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t l
 		pte = mk_pte(pages[1], pgprot);
 		set_pte_at(text_poke_mm, text_poke_mm_addr + PAGE_SIZE, ptep + 1, pte);
 	}
+	hdn_text_open(&token, ptep, addr, len, kind);
 
 	/*
 	 * Loading the temporary mm behaves as a compiler barrier, which
@@ -2623,6 +2644,7 @@ static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t l
 	flush_tlb_mm_range(text_poke_mm, text_poke_mm_addr, text_poke_mm_addr +
 			   (cross_page_boundary ? 2 : 1) * PAGE_SIZE,
 			   PAGE_SHIFT, false);
+	hdn_text_close(&token, ptep);
 
 	if (func == text_poke_memcpy) {
 		/*
@@ -2634,6 +2656,7 @@ static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t l
 
 	local_irq_restore(flags);
 	pte_unmap_unlock(ptep, ptl);
+	hdn_text_report(&token, kind);
 	return addr;
 }
 
@@ -2657,7 +2680,7 @@ void *text_poke(void *addr, const void *opcode, size_t len)
 {
 	lockdep_assert_held(&text_mutex);
 
-	return __text_poke(text_poke_memcpy, addr, opcode, len);
+	return __text_poke(text_poke_memcpy, addr, opcode, len, HDN_TEXT_LIVE_PATCH);
 }
 
 /**
@@ -2676,7 +2699,7 @@ void *text_poke(void *addr, const void *opcode, size_t len)
  */
 void *text_poke_kgdb(void *addr, const void *opcode, size_t len)
 {
-	return __text_poke(text_poke_memcpy, addr, opcode, len);
+	return __text_poke(text_poke_memcpy, addr, opcode, len, HDN_TEXT_DEBUGGER);
 }
 
 void *text_poke_copy_locked(void *addr, const void *opcode, size_t len,
@@ -2694,7 +2717,8 @@ void *text_poke_copy_locked(void *addr, const void *opcode, size_t len,
 
 		s = min_t(size_t, PAGE_SIZE * 2 - offset_in_page(ptr), len - patched);
 
-		__text_poke(text_poke_memcpy, (void *)ptr, opcode + patched, s);
+		__text_poke(text_poke_memcpy, (void *)ptr, opcode + patched, s,
+			    HDN_TEXT_UNUSED_CODE);
 		patched += s;
 	}
 	return addr;
@@ -2744,7 +2768,8 @@ void *text_poke_set(void *addr, int c, size_t len)
 
 		s = min_t(size_t, PAGE_SIZE * 2 - offset_in_page(ptr), len - patched);
 
-		__text_poke(text_poke_memset, (void *)ptr, (void *)&c, s);
+		__text_poke(text_poke_memset, (void *)ptr, (void *)&c, s,
+			    HDN_TEXT_TRAP_FILL);
 		patched += s;
 	}
 	mutex_unlock(&text_mutex);
@@ -2766,23 +2791,42 @@ void smp_text_poke_sync_each_cpu(void)
  * this thing. When len == 6 everything is prefixed with 0x0f and we map
  * opcode to Jcc.d8, using len to distinguish.
  */
-struct smp_text_poke_loc {
-	/* addr := _stext + rel_addr */
-	s32 rel_addr;
-	s32 disp;
-	u8 len;
-	u8 opcode;
-	const u8 text[TEXT_POKE_MAX_OPCODE_SIZE];
-	/* see smp_text_poke_batch_finish() */
-	u8 old;
-};
+static struct smp_text_poke_array text_poke_array;
 
-#define TEXT_POKE_ARRAY_MAX (PAGE_SIZE / sizeof(struct smp_text_poke_loc))
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+/* The ordinary producer array remains writable while a batch is assembled.
+ * Both the patch writer and the exception adapter consume this frozen copy.
+ * References from the preceding batch are drained before it is overwritten. */
+struct smp_text_poke_array hdn_rap_text_patches __aligned(PAGE_SIZE) __ro_after_init;
 
-static struct smp_text_poke_array {
-	struct smp_text_poke_loc vec[TEXT_POKE_ARRAY_MAX];
-	int nr_entries;
-} text_poke_array;
+static const struct smp_text_poke_array *rap_text_poke_publish(void)
+{
+	unsigned long *to = (void *)&hdn_rap_text_patches;
+	const unsigned long *from = (const void *)&text_poke_array;
+	unsigned int i;
+
+	BUILD_BUG_ON(sizeof(text_poke_array) % sizeof(unsigned long));
+	if (!text_poke_array.nr_entries || text_poke_array.nr_entries > TEXT_POKE_ARRAY_MAX)
+		__hdn_rap_fail(HDN_RAP_FAIL_ASYNC);
+	for (i = 0; i < text_poke_array.nr_entries; i++) {
+		const struct smp_text_poke_loc *p = &text_poke_array.vec[i];
+
+		/* A transient RET can be redirected to the authenticated adapter,
+		 * but the final image must never install a raw return instruction. */
+		if (!p->len || p->len > TEXT_POKE_MAX_OPCODE_SIZE + 1 ||
+		    p->text[0] == RET_INSN_OPCODE)
+			__hdn_rap_fail(HDN_RAP_FAIL_ASYNC);
+	}
+	for (i = 0; i < sizeof(text_poke_array) / sizeof(*to); i++) {
+		if (hdn_pt_active())
+			hdn_pt_window_update(__pa_symbol(&to[i]) >> PAGE_SHIFT,
+				offset_in_page(&to[i]), from[i], 0, HDN_PT_STORE);
+		else
+			WRITE_ONCE(to[i], from[i]);
+	}
+	return &hdn_rap_text_patches;
+}
+#endif
 
 static DEFINE_PER_CPU(atomic_t, text_poke_array_refs);
 
@@ -2825,9 +2869,11 @@ static __always_inline int patch_cmp(const void *tpl_a, const void *tpl_b)
 
 noinstr int smp_text_poke_int3_handler(struct pt_regs *regs)
 {
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 	struct smp_text_poke_loc *tpl;
-	int ret = 0;
 	void *ip;
+#endif
+	int ret = 0;
 
 	if (user_mode(regs))
 		return 0;
@@ -2844,6 +2890,10 @@ noinstr int smp_text_poke_int3_handler(struct pt_regs *regs)
 
 	if (!try_get_text_poke_array())
 		return 0;
+
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	ret = hdn_rap_text_poke(regs);
+#else
 
 	/*
 	 * Discount the INT3. See smp_text_poke_batch_finish().
@@ -2899,6 +2949,7 @@ noinstr int smp_text_poke_int3_handler(struct pt_regs *regs)
 	ret = 1;
 
 out_put:
+#endif
 	put_text_poke_array();
 	return ret;
 }
@@ -2931,11 +2982,17 @@ void smp_text_poke_batch_finish(void)
 	unsigned char int3 = INT3_INSN_OPCODE;
 	unsigned int i;
 	int do_sync;
+	const struct smp_text_poke_array *batch = &text_poke_array;
 
 	if (!text_poke_array.nr_entries)
 		return;
 
 	lockdep_assert_held(&text_mutex);
+	for (i = 0; i < text_poke_array.nr_entries; i++)
+		text_poke_array.vec[i].old = *(u8 *)text_poke_addr(&text_poke_array.vec[i]);
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	batch = rap_text_poke_publish();
+#endif
 
 	/*
 	 * Corresponds to the implicit memory barrier in try_get_text_poke_array() to
@@ -2956,16 +3013,15 @@ void smp_text_poke_batch_finish(void)
 
 	/*
 	 * Corresponding read barrier in INT3 notifier for making sure the
-	 * text_poke_array.nr_entries and handler are correctly ordered wrt. patching.
+	 * batch->nr_entries and handler are correctly ordered wrt. patching.
 	 */
 	smp_wmb();
 
 	/*
 	 * First step: add a INT3 trap to the address that will be patched.
 	 */
-	for (i = 0; i < text_poke_array.nr_entries; i++) {
-		text_poke_array.vec[i].old = *(u8 *)text_poke_addr(&text_poke_array.vec[i]);
-		text_poke(text_poke_addr(&text_poke_array.vec[i]), &int3, INT3_INSN_SIZE);
+	for (i = 0; i < batch->nr_entries; i++) {
+		text_poke(text_poke_addr(&batch->vec[i]), &int3, INT3_INSN_SIZE);
 	}
 
 	smp_text_poke_sync_each_cpu();
@@ -2973,15 +3029,15 @@ void smp_text_poke_batch_finish(void)
 	/*
 	 * Second step: update all but the first byte of the patched range.
 	 */
-	for (do_sync = 0, i = 0; i < text_poke_array.nr_entries; i++) {
-		u8 old[TEXT_POKE_MAX_OPCODE_SIZE+1] = { text_poke_array.vec[i].old, };
+	for (do_sync = 0, i = 0; i < batch->nr_entries; i++) {
+		u8 old[TEXT_POKE_MAX_OPCODE_SIZE+1] = { batch->vec[i].old, };
 		u8 _new[TEXT_POKE_MAX_OPCODE_SIZE+1];
-		const u8 *new = text_poke_array.vec[i].text;
-		int len = text_poke_array.vec[i].len;
+		const u8 *new = batch->vec[i].text;
+		int len = batch->vec[i].len;
 
 		if (len - INT3_INSN_SIZE > 0) {
 			memcpy(old + INT3_INSN_SIZE,
-			       text_poke_addr(&text_poke_array.vec[i]) + INT3_INSN_SIZE,
+			       text_poke_addr(&batch->vec[i]) + INT3_INSN_SIZE,
 			       len - INT3_INSN_SIZE);
 
 			if (len == 6) {
@@ -2990,7 +3046,7 @@ void smp_text_poke_batch_finish(void)
 				new = _new;
 			}
 
-			text_poke(text_poke_addr(&text_poke_array.vec[i]) + INT3_INSN_SIZE,
+			text_poke(text_poke_addr(&batch->vec[i]) + INT3_INSN_SIZE,
 				  new + INT3_INSN_SIZE,
 				  len - INT3_INSN_SIZE);
 
@@ -3021,7 +3077,7 @@ void smp_text_poke_batch_finish(void)
 		 * The old instruction is recorded so that the event can be
 		 * processed forwards or backwards.
 		 */
-		perf_event_text_poke(text_poke_addr(&text_poke_array.vec[i]), old, len, new, len);
+		perf_event_text_poke(text_poke_addr(&batch->vec[i]), old, len, new, len);
 	}
 
 	if (do_sync) {
@@ -3037,16 +3093,16 @@ void smp_text_poke_batch_finish(void)
 	 * Third step: replace the first byte (INT3) by the first byte of the
 	 * replacing opcode.
 	 */
-	for (do_sync = 0, i = 0; i < text_poke_array.nr_entries; i++) {
-		u8 byte = text_poke_array.vec[i].text[0];
+	for (do_sync = 0, i = 0; i < batch->nr_entries; i++) {
+		u8 byte = batch->vec[i].text[0];
 
-		if (text_poke_array.vec[i].len == 6)
+		if (batch->vec[i].len == 6)
 			byte = 0x0f;
 
 		if (byte == INT3_INSN_OPCODE)
 			continue;
 
-		text_poke(text_poke_addr(&text_poke_array.vec[i]), &byte, INT3_INSN_SIZE);
+		text_poke(text_poke_addr(&batch->vec[i]), &byte, INT3_INSN_SIZE);
 		do_sync++;
 	}
 

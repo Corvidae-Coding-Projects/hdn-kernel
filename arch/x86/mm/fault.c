@@ -20,6 +20,7 @@
 #include <linux/mm.h>			/* find_and_lock_vma() */
 #include <linux/vmalloc.h>
 #include <linux/hardening.h>
+#include <linux/hdn_uaccess.h>
 
 #include <asm/cpufeature.h>		/* boot_cpu_has, ...		*/
 #include <asm/traps.h>			/* dotraplinkage, ...		*/
@@ -686,8 +687,8 @@ page_fault_oops(struct pt_regs *regs, unsigned long error_code,
 	 * this happens, EFI has a special OOPS path that will try to
 	 * avoid hanging the system.
 	 */
-	if (IS_ENABLED(CONFIG_EFI))
-		efi_crash_gracefully_on_page_fault(address, regs);
+	if (IS_ENABLED(CONFIG_EFI) && efi_crash_gracefully_on_page_fault(address, regs))
+		return;
 
 	/* Only not-present faults should be handled by KFENCE. */
 	if (!(error_code & X86_PF_PROT) &&
@@ -1259,6 +1260,7 @@ void do_user_addr_fault(struct pt_regs *regs,
 	if (unlikely(cpu_feature_enabled(X86_FEATURE_SMAP) &&
 		     !(error_code & X86_PF_USER) &&
 		     !(regs->flags & X86_EFLAGS_AC))) {
+		hdn_uderef_report_fault(regs->ip);
 		/*
 		 * No extable entry here.  This was a kernel access to an
 		 * invalid pointer.  get_kernel_nofault() will not get here.

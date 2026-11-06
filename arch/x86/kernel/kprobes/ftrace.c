@@ -70,7 +70,13 @@ NOKPROBE_SYMBOL(kprobe_ftrace_handler);
 
 int arch_prepare_kprobe_ftrace(struct kprobe *p)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* Entry probes are redirected to the first body instruction by
+	 * arch_adjust_kprobe_addr(). Never accept an unbound synthetic frame. */
+	return -EOPNOTSUPP;
+#else
 	p->ainsn.insn = NULL;
 	p->ainsn.boostable = false;
 	return 0;
+#endif
 }

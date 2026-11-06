@@ -458,39 +458,27 @@ out_open:
 
 
 /**
- * vmw_host_printf: Sends a log message to the host
+ * vmw_host_log: Sends a log message to the host
  *
- * @fmt: Regular printf format string and arguments
+ * @log: NUL-terminated log message
  *
  * Returns: 0 on success
  */
-__printf(1, 2)
-int vmw_host_printf(const char *fmt, ...)
+int vmw_host_log(const char *log)
 {
-	va_list ap;
 	struct rpc_channel channel;
 	char *msg;
-	char *log;
 	int ret = 0;
 
 	if (!vmw_msg_enabled)
 		return -ENODEV;
 
-	if (!fmt)
+	if (!log)
 		return ret;
-
-	va_start(ap, fmt);
-	log = kvasprintf(GFP_KERNEL, fmt, ap);
-	va_end(ap);
-	if (!log) {
-		DRM_ERROR("Cannot allocate memory for the log message.\n");
-		return -ENOMEM;
-	}
 
 	msg = kasprintf(GFP_KERNEL, "log %s", log);
 	if (!msg) {
 		DRM_ERROR("Cannot allocate memory for host log message.\n");
-		kfree(log);
 		return -ENOMEM;
 	}
 
@@ -502,7 +490,6 @@ int vmw_host_printf(const char *fmt, ...)
 
 	vmw_close_channel(&channel);
 	kfree(msg);
-	kfree(log);
 
 	return 0;
 
@@ -510,7 +497,6 @@ out_msg:
 	vmw_close_channel(&channel);
 out_open:
 	kfree(msg);
-	kfree(log);
 	DRM_ERROR("Failed to send host log message.\n");
 
 	return -EINVAL;

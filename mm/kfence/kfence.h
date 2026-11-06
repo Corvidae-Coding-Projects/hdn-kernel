@@ -56,6 +56,10 @@ struct kfence_track {
 /* KFENCE metadata per guarded allocation. */
 struct kfence_metadata {
 	struct list_head list __guarded_by(&kfence_freelist_lock);	/* Freelist node. */
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	/* Domain + 1; assigned once under freelist_lock, retained after free. */
+	unsigned int hdn_domain;
+#endif
 	struct rcu_head rcu_head;	/* For delayed freeing. */
 
 	/*

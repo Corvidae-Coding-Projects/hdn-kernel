@@ -8,6 +8,8 @@
 
 #include <linux/string.h>
 #include <linux/slab.h>
+#include <linux/hdn_alloc.h>
+#include <linux/hdn_jitter.h>
 #include <linux/file.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -85,11 +87,12 @@ static inline void backing_file_free(struct backing_file *ff)
 {
 	security_backing_file_free(&ff->file);
 	path_put(&ff->user_path);
-	kmem_cache_free(bfilp_cachep, ff);
+	hdn_jitter_free(bfilp_cachep, ff);
 }
 
 static inline void file_free(struct file *f)
 {
+	hdn_jitter_check_file(f);
 	security_file_free(f);
 	if (likely(!(f->f_mode & FMODE_NOACCOUNT)))
 		percpu_counter_dec(&nr_files);
@@ -97,7 +100,7 @@ static inline void file_free(struct file *f)
 	if (unlikely(f->f_mode & FMODE_BACKING)) {
 		backing_file_free(backing_file(f));
 	} else {
-		kmem_cache_free(filp_cachep, f);
+		hdn_jitter_free(filp_cachep, f);
 	}
 }
 
@@ -255,13 +258,13 @@ struct file *alloc_empty_file(int flags, const struct cred *cred)
 			goto over;
 	}
 
-	f = kmem_cache_alloc(filp_cachep, GFP_KERNEL);
+	f = hdn_jitter_alloc(filp_cachep, GFP_KERNEL);
 	if (unlikely(!f))
 		return ERR_PTR(-ENOMEM);
 
 	error = init_file(f, flags, cred);
 	if (unlikely(error)) {
-		kmem_cache_free(filp_cachep, f);
+		hdn_jitter_free(filp_cachep, f);
 		return ERR_PTR(error);
 	}
 
@@ -289,13 +292,13 @@ struct file *alloc_empty_file_noaccount(int flags, const struct cred *cred)
 	struct file *f;
 	int error;
 
-	f = kmem_cache_alloc(filp_cachep, GFP_KERNEL);
+	f = hdn_jitter_alloc(filp_cachep, GFP_KERNEL);
 	if (unlikely(!f))
 		return ERR_PTR(-ENOMEM);
 
 	error = init_file(f, flags, cred);
 	if (unlikely(error)) {
-		kmem_cache_free(filp_cachep, f);
+		hdn_jitter_free(filp_cachep, f);
 		return ERR_PTR(error);
 	}
 
@@ -325,13 +328,13 @@ struct file *alloc_empty_backing_file(int flags, const struct cred *cred,
 	struct backing_file *ff;
 	int error;
 
-	ff = kmem_cache_alloc(bfilp_cachep, GFP_KERNEL);
+	ff = hdn_jitter_alloc(bfilp_cachep, GFP_KERNEL);
 	if (unlikely(!ff))
 		return ERR_PTR(-ENOMEM);
 
 	error = init_file(&ff->file, flags, cred);
 	if (unlikely(error)) {
-		kmem_cache_free(bfilp_cachep, ff);
+		hdn_jitter_free(bfilp_cachep, ff);
 		return ERR_PTR(error);
 	}
 
@@ -579,6 +582,7 @@ static void __fput_deferred(struct file *file)
 
 void fput(struct file *file)
 {
+	hdn_jitter_check_file(file);
 	if (unlikely(file_ref_put(&file->f_ref)))
 		__fput_deferred(file);
 }
@@ -594,6 +598,7 @@ EXPORT_SYMBOL(fput);
  */
 void __fput_sync(struct file *file)
 {
+	hdn_jitter_check_file(file);
 	if (file_ref_put(&file->f_ref))
 		__fput(file);
 }
@@ -607,6 +612,7 @@ EXPORT_SYMBOL(__fput_sync);
  */
 void fput_close_sync(struct file *file)
 {
+	hdn_jitter_check_file(file);
 	if (likely(file_ref_put_close(&file->f_ref)))
 		__fput(file);
 }
@@ -619,12 +625,20 @@ void fput_close_sync(struct file *file)
  */
 void fput_close(struct file *file)
 {
+	hdn_jitter_check_file(file);
 	if (file_ref_put_close(&file->f_ref))
 		__fput_deferred(file);
 }
 
 void __init files_init(void)
 {
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_JITTER
+	filp_cachep = hdn_jitter_create(HDN_JITTER_FILE, "filp", sizeof(struct file),
+				      __alignof__(struct file), HDN_ALLOC_FILE);
+	bfilp_cachep = hdn_jitter_create(HDN_JITTER_BACKING_FILE, "bfilp",
+				       sizeof(struct backing_file), __alignof__(struct backing_file),
+				       HDN_ALLOC_BACKING_FILE);
+#else
 	struct kmem_cache_args args = {
 		.use_freeptr_offset = true,
 		.freeptr_offset = offsetof(struct file, f_freeptr),
@@ -632,12 +646,15 @@ void __init files_init(void)
 
 	filp_cachep = kmem_cache_create("filp", sizeof(struct file), &args,
 				SLAB_HWCACHE_ALIGN | SLAB_PANIC |
-				SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU);
+				SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU | SLAB_HDN_DOMAIN);
+	hdn_cache_domain(filp_cachep, HDN_ALLOC_FILE);
 
 	args.freeptr_offset = offsetof(struct backing_file, bf_freeptr);
 	bfilp_cachep = kmem_cache_create("bfilp", sizeof(struct backing_file),
 				&args, SLAB_HWCACHE_ALIGN | SLAB_PANIC |
-				SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU);
+				SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU | SLAB_HDN_DOMAIN);
+	hdn_cache_domain(bfilp_cachep, HDN_ALLOC_BACKING_FILE);
+#endif
 	percpu_counter_init(&nr_files, 0, GFP_KERNEL);
 }
 

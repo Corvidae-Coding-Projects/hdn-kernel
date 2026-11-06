@@ -16,6 +16,10 @@
 #include <linux/set_memory.h>
 #include <linux/moduleloader.h>
 #include <linux/text-patching.h>
+#include <linux/overflow.h>
+#include <linux/hdn_execmem.h>
+#include <linux/hash.h>
+#include <linux/random.h>
 
 #include <asm/tlbflush.h>
 
@@ -23,6 +27,71 @@
 
 static struct execmem_info *execmem_info __ro_after_init;
 static struct execmem_info default_execmem_info __ro_after_init;
+static atomic64_t execmem_bpf_attempts;
+static atomic64_t execmem_bpf_successes;
+static atomic64_t execmem_bpf_failures;
+static atomic64_t execmem_bpf_requested_bytes;
+static atomic64_t execmem_bpf_reserved_bytes;
+static atomic_t execmem_bpf_exhausted;
+
+unsigned long execmem_bpf_capacity(void)
+{
+	struct execmem_range *range;
+
+	if (!IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM) || !execmem_info)
+		return 0;
+	range = &execmem_info->ranges[EXECMEM_BPF];
+	return range->end - range->start;
+}
+
+u64 execmem_bpf_allocation_failures(void)
+{
+	return atomic64_read(&execmem_bpf_failures);
+}
+
+void execmem_bpf_get_stats(struct execmem_bpf_stats *stats)
+{
+	stats->allocation_attempts = atomic64_read(&execmem_bpf_attempts);
+	stats->allocation_successes = atomic64_read(&execmem_bpf_successes);
+	stats->allocation_failures = atomic64_read(&execmem_bpf_failures);
+	stats->requested_bytes = atomic64_read(&execmem_bpf_requested_bytes);
+	stats->reserved_bytes = atomic64_read(&execmem_bpf_reserved_bytes);
+	stats->exhausted = atomic_read(&execmem_bpf_exhausted);
+}
+
+bool execmem_bpf_contains(const void *address, size_t size)
+{
+	const struct execmem_range *range;
+	unsigned long start = (unsigned long)address;
+
+	if (!IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM) || !execmem_info || !size)
+		return false;
+	range = &execmem_info->ranges[EXECMEM_BPF];
+	return start >= range->start && start < range->end &&
+		size <= range->end - start;
+}
+
+#if IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM_TEST)
+u64 execmem_bpf_test_base_token(void)
+{
+	if (!execmem_info)
+		return 0;
+	return hash_long(execmem_info->ranges[EXECMEM_BPF].start, BITS_PER_LONG);
+}
+
+int execmem_bpf_test_bucket(const void *address)
+{
+	const struct execmem_range *range;
+	unsigned long width, offset;
+
+	if (!execmem_bpf_contains(address, 1))
+		return -ERANGE;
+	range = &execmem_info->ranges[EXECMEM_BPF];
+	width = max_t(unsigned long, (range->end - range->start) / 64, PAGE_SIZE);
+	offset = (unsigned long)address - range->start;
+	return min_t(unsigned long, offset / width, 63);
+}
+#endif
 
 #ifdef CONFIG_MMU
 static void *execmem_vmalloc(struct execmem_range *range, size_t size,
@@ -33,14 +102,34 @@ static void *execmem_vmalloc(struct execmem_range *range, size_t size,
 	unsigned int align = range->alignment;
 	unsigned long start = range->start;
 	unsigned long end = range->end;
+	unsigned long pivot = start;
 	void *p;
 
 	if (kasan)
 		vm_flags |= VM_DEFER_KMEMLEAK;
 
-	p = __vmalloc_node_range(size, align, start, end, gfp_flags,
+	if (range->flags & EXECMEM_RANDOMIZE) {
+		unsigned long stride = max_t(unsigned long, align, PAGE_SIZE);
+		unsigned long first = ALIGN(start, stride);
+		unsigned long slots;
+
+		/* Account for vmalloc's trailing guard; keep both searches in-domain. */
+		if (first >= end || end - first <= PAGE_SIZE || size > end - first - PAGE_SIZE)
+			return NULL;
+		slots = (end - first - PAGE_SIZE - size) / stride + 1;
+		if (slots > U32_MAX)
+			return NULL;
+		pivot = first + get_random_u32_below(slots) * stride;
+	}
+
+	p = __vmalloc_node_range(size, align, pivot, end, gfp_flags,
 				 pgprot, vm_flags, NUMA_NO_NODE,
 				 __builtin_return_address(0));
+	if (!p && pivot != start)
+		p = __vmalloc_node_range(size, align, start,
+					 min(end, pivot + size + PAGE_SIZE), gfp_flags,
+					 pgprot, vm_flags, NUMA_NO_NODE,
+					 __builtin_return_address(0));
 	if (!p && range->fallback_start) {
 		start = range->fallback_start;
 		end = range->fallback_end;
@@ -64,9 +153,12 @@ static void *execmem_vmalloc(struct execmem_range *range, size_t size,
 
 struct vm_struct *execmem_vmap(size_t size)
 {
-	struct execmem_range *range = &execmem_info->ranges[EXECMEM_MODULE_DATA];
+	struct execmem_range *range;
 	struct vm_struct *area;
 
+	if (!execmem_info || !size || size > ((size_t)INT_MAX << PAGE_SHIFT))
+		return NULL;
+	range = &execmem_info->ranges[EXECMEM_MODULE_DATA];
 	area = __get_vm_area_node(size, range->alignment, PAGE_SHIFT, VM_ALLOC,
 				  range->start, range->end, NUMA_NO_NODE,
 				  GFP_KERNEL, __builtin_return_address(0));
@@ -112,28 +204,6 @@ static inline unsigned long mas_range_len(struct ma_state *mas)
 	return mas->last - mas->index + 1;
 }
 
-static int execmem_set_direct_map_valid(struct vm_struct *vm, bool valid)
-{
-	unsigned int nr = (1 << get_vm_area_page_order(vm));
-	unsigned int updated = 0;
-	int err = 0;
-
-	for (int i = 0; i < vm->nr_pages; i += nr) {
-		err = set_direct_map_valid_noflush(vm->pages[i], nr, valid);
-		if (err)
-			goto err_restore;
-		updated += nr;
-	}
-
-	return 0;
-
-err_restore:
-	for (int i = 0; i < updated; i += nr)
-		set_direct_map_valid_noflush(vm->pages[i], nr, !valid);
-
-	return err;
-}
-
 static int execmem_force_rw(void *ptr, size_t size)
 {
 	unsigned int nr = PAGE_ALIGN(size) >> PAGE_SHIFT;
@@ -149,9 +219,14 @@ static int execmem_force_rw(void *ptr, size_t size)
 
 int execmem_restore_rox(void *ptr, size_t size)
 {
-	unsigned int nr = PAGE_ALIGN(size) >> PAGE_SHIFT;
+	unsigned int nr;
 	unsigned long addr = (unsigned long)ptr;
 
+	if (!size)
+		return 0;
+	if (!PAGE_ALIGNED(addr) || size > ((size_t)INT_MAX << PAGE_SHIFT))
+		return -EINVAL;
+	nr = PAGE_ALIGN(size) >> PAGE_SHIFT;
 	return set_memory_rox(addr, nr);
 }
 
@@ -170,8 +245,12 @@ static void execmem_cache_clean(struct work_struct *work)
 		    IS_ALIGNED(mas.index, PMD_SIZE)) {
 			struct vm_struct *vm = find_vm_area(area);
 
-			execmem_set_direct_map_valid(vm, true);
+			/* A free PMD-sized slice need not own the entire vmalloc. */
+			if (WARN_ON_ONCE(!vm) || vm->addr != area ||
+			    ((size_t)vm->nr_pages << PAGE_SHIFT) != size)
+				continue;
 			mas_store_gfp(&mas, NULL, GFP_KERNEL);
+			/* VM_FLUSH_RESET_PERMS unmaps and flushes before restoring RW. */
 			vfree(area);
 		}
 	}
@@ -215,11 +294,13 @@ static bool within_range(struct execmem_range *range, struct ma_state *mas,
 {
 	unsigned long addr = mas->index;
 
-	if (addr >= range->start && addr + size < range->end)
+	if (addr >= range->start && addr < range->end &&
+	    size <= range->end - addr)
 		return true;
 
 	if (range->fallback_start &&
-	    addr >= range->fallback_start && addr + size < range->fallback_end)
+	    addr >= range->fallback_start && addr < range->fallback_end &&
+	    size <= range->fallback_end - addr)
 		return true;
 
 	return false;
@@ -280,13 +361,15 @@ out_unlock:
 
 static int execmem_cache_populate(struct execmem_range *range, size_t size)
 {
-	unsigned long vm_flags = VM_ALLOW_HUGE_VMAP;
+	unsigned long vm_flags = VM_ALLOW_HUGE_VMAP | VM_FLUSH_RESET_PERMS;
 	struct vm_struct *vm;
 	size_t alloc_size;
 	int err = -ENOMEM;
 	void *p;
 
-	alloc_size = round_up(size, PMD_SIZE);
+	if (check_add_overflow(size, PMD_SIZE - 1, &alloc_size))
+		return -EOVERFLOW;
+	alloc_size &= PMD_MASK;
 	p = execmem_vmalloc(range, alloc_size, PAGE_KERNEL, vm_flags);
 	if (!p) {
 		alloc_size = size;
@@ -309,12 +392,10 @@ static int execmem_cache_populate(struct execmem_range *range, size_t size)
 
 	err = execmem_cache_add(p, alloc_size, GFP_KERNEL);
 	if (err)
-		goto err_reset_direct_map;
+		goto err_free_mem;
 
 	return 0;
 
-err_reset_direct_map:
-	execmem_set_direct_map_valid(vm, true);
 err_free_mem:
 	vfree(p);
 	return err;
@@ -361,7 +442,9 @@ static int __execmem_cache_free(struct ma_state *mas, void *ptr, gfp_t gfp_mask)
 		return err;
 
 	execmem_fill_trapping_insns(ptr, size);
-	execmem_restore_rox(ptr, size);
+	err = execmem_restore_rox(ptr, size);
+	if (err)
+		return err;
 
 	err = execmem_cache_add_locked(ptr, size, gfp_mask);
 	if (err)
@@ -415,6 +498,9 @@ static bool execmem_cache_free(void *ptr)
 	area = mas_walk(&mas);
 	if (!area)
 		return false;
+	/* Only the allocation base owns the range; never consume an interior free. */
+	if (WARN_ON_ONCE(addr != mas.index || is_pending_free(area)))
+		return true;
 
 	err = __execmem_cache_free(&mas, area, GFP_KERNEL | __GFP_NORETRY);
 	if (err) {
@@ -458,15 +544,62 @@ static bool execmem_cache_free(void *ptr)
 }
 #endif /* CONFIG_ARCH_HAS_EXECMEM_ROX */
 
-void *execmem_alloc(enum execmem_type type, size_t size)
+static void *__execmem_alloc(enum execmem_type type, size_t size, bool writable)
 {
-	struct execmem_range *range = &execmem_info->ranges[type];
-	bool use_cache = range->flags & EXECMEM_ROX_CACHE;
+	struct execmem_range *range;
+	size_t requested = size;
+	bool bpf = IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM) && execmem_is_bpf(type);
+	bool use_cache;
 	unsigned long vm_flags = VM_FLUSH_RESET_PERMS;
-	pgprot_t pgprot = range->pgprot;
+	pgprot_t pgprot;
 	void *p = NULL;
 
+	if (!execmem_info || (unsigned int)type >= EXECMEM_TYPE_MAX || !size ||
+	    size > ((size_t)INT_MAX << PAGE_SHIFT))
+		return NULL;
+	range = &execmem_info->ranges[type];
+	if (bpf)
+		atomic64_inc(&execmem_bpf_attempts);
+	use_cache = range->flags & EXECMEM_ROX_CACHE;
+	pgprot = range->pgprot;
 	size = PAGE_ALIGN(size);
+
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_EXECMEM) && type != EXECMEM_MODULE_DATA) {
+		bool initial_rox = !writable && (use_cache || type == EXECMEM_KPROBES);
+
+		p = execmem_vmalloc(range, size, PAGE_KERNEL, vm_flags);
+		if (!p) {
+			if (bpf) {
+				atomic64_inc(&execmem_bpf_failures);
+				atomic_set(&execmem_bpf_exhausted, 1);
+			}
+			return NULL;
+		}
+		if (hdn_execmem_claim_type(p, type)) {
+			vfree(p);
+			if (bpf) {
+				atomic64_inc(&execmem_bpf_failures);
+				atomic_set(&execmem_bpf_exhausted, 1);
+			}
+			return NULL;
+		}
+		if (initial_rox) {
+#ifdef CONFIG_ARCH_HAS_EXECMEM_ROX
+			execmem_fill_trapping_insns(p, size);
+#endif
+			if (set_memory_rox((unsigned long)p, size >> PAGE_SHIFT)) {
+				execmem_free(p);
+				return NULL;
+			}
+		}
+		if (bpf) {
+			atomic64_inc(&execmem_bpf_successes);
+			atomic64_add(requested, &execmem_bpf_requested_bytes);
+			atomic64_add(size, &execmem_bpf_reserved_bytes);
+			atomic_set(&execmem_bpf_exhausted, 0);
+		}
+		return kasan_reset_tag(p);
+	}
 
 	if (use_cache)
 		p = execmem_cache_alloc(range, size);
@@ -476,13 +609,20 @@ void *execmem_alloc(enum execmem_type type, size_t size)
 	return kasan_reset_tag(p);
 }
 
+void *execmem_alloc(enum execmem_type type, size_t size)
+{
+	return __execmem_alloc(type, size, false);
+}
+
 void *execmem_alloc_rw(enum execmem_type type, size_t size)
 {
-	void *p __free(execmem) = execmem_alloc(type, size);
+	void *p __free(execmem) = __execmem_alloc(type, size, true);
 	int err;
 
 	if (!p)
 		return NULL;
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_EXECMEM) && type != EXECMEM_MODULE_DATA)
+		return no_free_ptr(p);
 
 	err = execmem_force_rw(p, size);
 	if (err)
@@ -499,12 +639,16 @@ void execmem_free(void *ptr)
 	 */
 	WARN_ON(in_interrupt());
 
+	if (hdn_execmem_free(ptr))
+		return;
 	if (!execmem_cache_free(ptr))
 		vfree(ptr);
 }
 
 bool execmem_is_rox(enum execmem_type type)
 {
+	if (!execmem_info || (unsigned int)type >= EXECMEM_TYPE_MAX)
+		return false;
 	return !!(execmem_info->ranges[type].flags & EXECMEM_ROX_CACHE);
 }
 
@@ -539,6 +683,10 @@ static void execmem_init_missing(struct execmem_info *info)
 		struct execmem_range *r = &info->ranges[i];
 
 		if (!r->start) {
+			if (execmem_is_bpf(i) && i != EXECMEM_BPF) {
+				*r = info->ranges[EXECMEM_BPF];
+				continue;
+			}
 			if (i == EXECMEM_MODULE_DATA)
 				r->pgprot = PAGE_KERNEL;
 			else

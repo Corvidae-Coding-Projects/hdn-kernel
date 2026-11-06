@@ -12,3 +12,5 @@ extern unsigned long relocated_restore_code __visible;
 extern int relocate_restore_code(void);
 /* Defined in hibernate_asm_32/64.S */
 extern asmlinkage __visible int restore_image(void);
+/* ACPI assembly entry, also consumed by the canonical RAP type producer. */
+extern void do_suspend_lowlevel(void);

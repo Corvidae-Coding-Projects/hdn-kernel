@@ -6,6 +6,7 @@
 #include <linux/task_work.h>
 #include <linux/bitmap.h>
 #include <linux/llist.h>
+#include <linux/refcount_types.h>
 #include <uapi/linux/io_uring.h>
 
 enum {
@@ -732,7 +733,7 @@ struct io_kiocb {
 
 	struct io_rsrc_node		*file_node;
 
-	atomic_t			refs;
+	refcount_t			refs;
 	bool				cancel_seq_set;
 
 	union {

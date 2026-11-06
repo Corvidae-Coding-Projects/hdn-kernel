@@ -193,7 +193,7 @@ extern s64 uv_bios_enum_ports(u64 nasid, u64 obj_id, u64 sz, u64 *portbuf);
 extern s64 uv_bios_get_geoinfo(u64 nasid, u64 sz, u64 *geo);
 extern s64 uv_bios_get_pci_topology(u64 sz, u64 *buf);
 
-extern int uv_bios_init(void);
+extern int __init uv_bios_init(void);
 extern unsigned long get_uv_systab_phys(bool msg);
 
 extern unsigned long sn_rtc_cycles_per_second;

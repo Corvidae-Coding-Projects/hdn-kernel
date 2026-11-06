@@ -200,6 +200,10 @@ static int write_relocate_add(Elf64_Shdr *sechdrs,
 	bool early = me->state == MODULE_STATE_UNFORMED;
 	void *(*write)(void *, const void *, size_t) = memcpy;
 
+	/* Hardened delayed relocations use the frozen object transaction. */
+	if (!early && IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE))
+		return -EPERM;
+
 	if (!early) {
 		write = text_poke;
 		mutex_lock(&text_mutex);

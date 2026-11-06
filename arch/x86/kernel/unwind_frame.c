@@ -52,7 +52,7 @@ static void unwind_dump(struct unwind_state *state)
 
 		for (; sp < stack_info.end; sp++) {
 
-			word = READ_ONCE_NOCHECK(*sp);
+			word = READ_ONCE_TASK_STACK(state->task, *sp);
 
 			prev_zero = zero;
 			zero = word == 0;
@@ -126,7 +126,8 @@ static bool is_last_aligned_frame(struct unwind_state *state)
 	 * After aligning the stack, it pushes a duplicate copy of the return
 	 * address before pushing the frame pointer.
 	 */
-	return (state->bp == aligned_bp && *(aligned_bp + 1) == *(last_bp + 1));
+	return (state->bp == aligned_bp && READ_ONCE_TASK_STACK(state->task, *(aligned_bp + 1)) ==
+		READ_ONCE_TASK_STACK(state->task, *(last_bp + 1)));
 }
 
 static bool is_last_ftrace_frame(struct unwind_state *state)
@@ -147,8 +148,10 @@ static bool is_last_ftrace_frame(struct unwind_state *state)
 	 *   -----------------
 	 */
 	return (state->bp == last_ftrace_bp &&
-		*state->bp == *(state->bp + 2) &&
-		*(state->bp + 1) == *(state->bp + 4));
+		READ_ONCE_TASK_STACK(state->task, *state->bp) ==
+		READ_ONCE_TASK_STACK(state->task, *(state->bp + 2)) &&
+		READ_ONCE_TASK_STACK(state->task, *(state->bp + 1)) ==
+		READ_ONCE_TASK_STACK(state->task, *(state->bp + 4)));
 }
 
 static bool is_last_task_frame(struct unwind_state *state)
@@ -245,7 +248,7 @@ static bool update_stack_state(struct unwind_state *state,
 	}
 
 	/* Save the return address: */
-	if (state->regs && user_mode(state->regs))
+	if (state->regs && (READ_ONCE_TASK_STACK(state->task, state->regs->cs) & 3))
 		state->ip = 0;
 	else {
 		addr_p = unwind_get_return_address_ptr(state);
@@ -270,7 +273,7 @@ bool unwind_next_frame(struct unwind_state *state)
 		return false;
 
 	/* Have we reached the end? */
-	if (state->regs && user_mode(state->regs))
+	if (state->regs && (READ_ONCE_TASK_STACK(state->task, state->regs->cs) & 3))
 		goto the_end;
 
 	if (is_last_task_frame(state)) {
@@ -287,7 +290,7 @@ bool unwind_next_frame(struct unwind_state *state)
 		 * newly forked kthread transitions into a user task by calling
 		 * kernel_execve(), which eventually clears PF_KTHREAD.
 		 */
-		if (!user_mode(regs))
+		if (!(READ_ONCE_TASK_STACK(state->task, regs->cs) & 3))
 			goto the_end;
 
 		/*
@@ -306,7 +309,7 @@ bool unwind_next_frame(struct unwind_state *state)
 		next_bp = state->next_bp;
 		state->next_bp = NULL;
 	} else if (state->regs) {
-		next_bp = (unsigned long *)state->regs->bp;
+		next_bp = (unsigned long *)READ_ONCE_TASK_STACK(state->task, state->regs->bp);
 	} else {
 		next_bp = (unsigned long *)READ_ONCE_TASK_STACK(state->task, *state->bp);
 	}
@@ -337,8 +340,8 @@ bad_address:
 	if (state->got_irq && in_entry_code(state->ip))
 		goto the_end;
 	if (state->regs &&
-	    state->regs->sp >= (unsigned long)last_aligned_frame(state) &&
-	    state->regs->sp < (unsigned long)task_pt_regs(state->task))
+	    READ_ONCE_TASK_STACK(state->task, state->regs->sp) >= (unsigned long)last_aligned_frame(state) &&
+	    READ_ONCE_TASK_STACK(state->task, state->regs->sp) < (unsigned long)task_pt_regs(state->task))
 		goto the_end;
 
 	/*
@@ -380,12 +383,13 @@ void __unwind_start(struct unwind_state *state, struct task_struct *task,
 	state->got_irq = (regs);
 
 	/* Don't even attempt to start from user mode regs: */
-	if (regs && user_mode(regs)) {
+	if (regs && (READ_ONCE_TASK_STACK(state->task, regs->cs) & 3)) {
 		state->stack_info.type = STACK_TYPE_UNKNOWN;
 		return;
 	}
 
-	bp = get_frame_pointer(task, regs);
+	bp = regs ? (unsigned long *)READ_ONCE_TASK_STACK(task, regs->bp) :
+		get_frame_pointer(task, NULL);
 
 	/*
 	 * If we crash with IP==0, the last successfully executed instruction
@@ -396,9 +400,9 @@ void __unwind_start(struct unwind_state *state, struct task_struct *task,
 	 * Pretend that the frame is complete and that BP points to it, but save
 	 * the real BP so that we can use it when looking for the next frame.
 	 */
-	if (regs && regs->ip == 0 && (unsigned long *)regs->sp >= first_frame) {
+	if (regs && READ_ONCE_TASK_STACK(task, regs->ip) == 0 && (unsigned long *)READ_ONCE_TASK_STACK(task, regs->sp) >= first_frame) {
 		state->next_bp = bp;
-		bp = ((unsigned long *)regs->sp) - 1;
+		bp = ((unsigned long *)READ_ONCE_TASK_STACK(task, regs->sp)) - 1;
 	}
 
 	/* Initialize stack info and make sure the frame data is accessible: */

@@ -544,6 +544,9 @@ void fred_install_sysvec(unsigned int vector, const idtentry_t function);
  */
 	.align IDT_ALIGN
 SYM_CODE_START(irq_entries_start)
+#ifdef CONFIG_X86_64
+	HDN_KEXEC_FUNC irq_entries_start, 35
+#endif
     vector=FIRST_EXTERNAL_VECTOR
     .rept NR_EXTERNAL_VECTORS
 	UNWIND_HINT_IRET_REGS
@@ -560,6 +563,9 @@ SYM_CODE_END(irq_entries_start)
 #ifdef CONFIG_X86_LOCAL_APIC
 	.align IDT_ALIGN
 SYM_CODE_START(spurious_entries_start)
+#ifdef CONFIG_X86_64
+	HDN_KEXEC_FUNC spurious_entries_start, 35
+#endif
     vector=FIRST_SYSTEM_VECTOR
     .rept NR_SYSTEM_VECTORS
 	UNWIND_HINT_IRET_REGS

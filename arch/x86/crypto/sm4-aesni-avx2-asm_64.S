@@ -14,6 +14,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <linux/cfi_types.h>
 #include <asm/frame.h>
 
@@ -155,6 +156,7 @@
 
 .text
 SYM_FUNC_START_LOCAL(__sm4_crypt_blk16)
+	HDN_REGS_FUNC __sm4_crypt_blk16
 	/* input:
 	 *	%rdi: round key array, CTX
 	 *	RA0, RA1, RA2, RA3, RB0, RB1, RB2, RB3: sixteen parallel
@@ -266,7 +268,8 @@ SYM_FUNC_START_LOCAL(__sm4_crypt_blk16)
 	vpshufb RTMP2, RB3, RB3;
 
 	FRAME_END
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __sm4_crypt_blk16
 SYM_FUNC_END(__sm4_crypt_blk16)
 
 #define inc_le128(x, minus_one, tmp) \
@@ -280,6 +283,7 @@ SYM_FUNC_END(__sm4_crypt_blk16)
  *                                   const u8 *src, u8 *iv)
  */
 SYM_TYPED_FUNC_START(sm4_aesni_avx2_ctr_enc_blk16)
+	HDN_ASM_FUNCTION sm4_aesni_avx2_ctr_enc_blk16, 1
 	/* input:
 	 *	%rdi: round key array, CTX
 	 *	%rsi: dst (16 blocks)
@@ -362,7 +366,7 @@ SYM_TYPED_FUNC_START(sm4_aesni_avx2_ctr_enc_blk16)
 	/* store new IV */
 	vmovdqu RTMP0x, (%rcx);
 
-	call __sm4_crypt_blk16;
+	HDN_REGS_CALL __sm4_crypt_blk16;
 
 	vpxor (0 * 32)(%rdx), RA0, RA0;
 	vpxor (1 * 32)(%rdx), RA1, RA1;
@@ -384,7 +388,8 @@ SYM_TYPED_FUNC_START(sm4_aesni_avx2_ctr_enc_blk16)
 
 	vzeroall;
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END sm4_aesni_avx2_ctr_enc_blk16
 SYM_FUNC_END(sm4_aesni_avx2_ctr_enc_blk16)
 
 /*
@@ -392,6 +397,7 @@ SYM_FUNC_END(sm4_aesni_avx2_ctr_enc_blk16)
  *                                   const u8 *src, u8 *iv)
  */
 SYM_TYPED_FUNC_START(sm4_aesni_avx2_cbc_dec_blk16)
+	HDN_ASM_FUNCTION sm4_aesni_avx2_cbc_dec_blk16, 1
 	/* input:
 	 *	%rdi: round key array, CTX
 	 *	%rsi: dst (16 blocks)
@@ -411,7 +417,7 @@ SYM_TYPED_FUNC_START(sm4_aesni_avx2_cbc_dec_blk16)
 	vmovdqu (6 * 32)(%rdx), RB2;
 	vmovdqu (7 * 32)(%rdx), RB3;
 
-	call __sm4_crypt_blk16;
+	HDN_REGS_CALL __sm4_crypt_blk16;
 
 	vmovdqu (%rcx), RNOTx;
 	vinserti128 $1, (%rdx), RNOT, RNOT;
@@ -437,5 +443,6 @@ SYM_TYPED_FUNC_START(sm4_aesni_avx2_cbc_dec_blk16)
 
 	vzeroall;
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END sm4_aesni_avx2_cbc_dec_blk16
 SYM_FUNC_END(sm4_aesni_avx2_cbc_dec_blk16)

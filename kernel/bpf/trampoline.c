@@ -13,6 +13,7 @@
 #include <linux/bpf_verifier.h>
 #include <linux/bpf_lsm.h>
 #include <linux/delay.h>
+#include <linux/module.h>
 
 /* dummy _ops. The verifier will operate on target program's ops. */
 const struct bpf_verifier_ops bpf_extension_verifier_ops = {
@@ -29,6 +30,10 @@ static struct hlist_head trampoline_ip_table[TRAMPOLINE_TABLE_SIZE];
 
 /* serializes access to trampoline tables */
 static DEFINE_MUTEX(trampoline_mutex);
+
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+static void bpf_trampoline_retire_work(struct work_struct *work);
+#endif
 
 #ifdef CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS
 static int bpf_trampoline_update(struct bpf_trampoline *tr, bool lock_direct_mutex);
@@ -360,6 +365,9 @@ static struct bpf_trampoline *bpf_trampoline_lookup(u64 key, unsigned long ip)
 	hlist_add_head(&tr->hlist_ip, head);
 	refcount_set(&tr->refcnt, 1);
 	mutex_init(&tr->mutex);
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	INIT_DELAYED_WORK(&tr->retire_work, bpf_trampoline_retire_work);
+#endif
 	for (i = 0; i < BPF_TRAMP_MAX; i++)
 		INIT_HLIST_HEAD(&tr->progs_hlist[i]);
 out:
@@ -467,8 +475,20 @@ static void bpf_tramp_image_free(struct bpf_tramp_image *im)
 {
 	bpf_image_ksym_del(&im->ksym);
 	arch_free_bpf_trampoline(im->image, im->size);
-	bpf_jit_uncharge_modmem(im->size);
+	bpf_jit_uncharge_modmem(IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM) ?
+			       PAGE_ALIGN(im->size) : im->size);
 	percpu_ref_exit(&im->pcref);
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	if (im->holds_progs) {
+		unsigned int i;
+
+		for (i = 0; i < im->nr_unlink; i++)
+			bpf_prog_put(im->unlink[i].prog);
+		if (im->target_prog)
+			bpf_prog_put(im->target_prog);
+		module_put(im->target_module);
+	}
+#endif
 	kfree_rcu(im, rcu);
 }
 
@@ -573,7 +593,8 @@ static struct bpf_tramp_image *bpf_tramp_image_alloc(u64 key, int size)
 	if (!im)
 		goto out;
 
-	err = bpf_jit_charge_modmem(size);
+	err = bpf_jit_charge_modmem(IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM) ?
+				 PAGE_ALIGN(size) : size);
 	if (err)
 		goto out_free_im;
 	im->size = size;
@@ -597,31 +618,46 @@ static struct bpf_tramp_image *bpf_tramp_image_alloc(u64 key, int size)
 out_free_image:
 	arch_free_bpf_trampoline(im->image, im->size);
 out_uncharge:
-	bpf_jit_uncharge_modmem(size);
+	bpf_jit_uncharge_modmem(IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM) ?
+			       PAGE_ALIGN(size) : size);
 out_free_im:
 	kfree(im);
 out:
 	return ERR_PTR(err);
 }
 
+static int bpf_trampoline_count_progs(const struct bpf_trampoline *tr)
+{
+	int total = 0, kind;
+
+	for (kind = 0; kind < BPF_TRAMP_MAX; kind++)
+		total += tr->progs_cnt[kind];
+	return total;
+}
+
 static int bpf_trampoline_update(struct bpf_trampoline *tr, bool lock_direct_mutex)
 {
 	struct bpf_tramp_image *im;
-	struct bpf_tramp_links *tlinks;
+	struct bpf_tramp_links *tlinks = NULL;
 	u32 orig_flags = tr->flags;
 	bool ip_arg = false;
 	int err, total, size;
 
-	tlinks = bpf_trampoline_get_progs(tr, &total, &ip_arg);
-	if (IS_ERR(tlinks))
-		return PTR_ERR(tlinks);
-
-	if (total == 0) {
+	/* Last-link removal must not allocate a new program inventory. The
+	 * ftrace backend can still fail; retain the installed image on failure. */
+	if (!bpf_trampoline_count_progs(tr)) {
+		if (!tr->cur_image)
+			return 0;
 		err = unregister_fentry(tr, orig_flags, tr->cur_image->image);
+		if (err)
+			goto out;
 		bpf_tramp_image_put(tr->cur_image);
 		tr->cur_image = NULL;
 		goto out;
 	}
+	tlinks = bpf_trampoline_get_progs(tr, &total, &ip_arg);
+	if (IS_ERR(tlinks))
+		return PTR_ERR(tlinks);
 
 	/* clear all bits except SHARE_IPMODIFY and TAIL_CALL_CTX */
 	tr->flags &= (BPF_TRAMP_F_SHARE_IPMODIFY | BPF_TRAMP_F_TAIL_CALL_CTX);
@@ -681,6 +717,33 @@ again:
 	if (err < 0)
 		goto out_free;
 
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	/* Executing images own the referenced programs, including after a
+	 * logical detach and throughout the task/trace-RCU retirement sequence. */
+	for (unsigned int i = 0; i < im->nr_unlink; i++)
+		bpf_prog_inc(im->unlink[i].prog);
+	im->target_prog = tr->target_prog;
+	if (im->target_prog)
+		bpf_prog_inc(im->target_prog);
+	im->holds_progs = true;
+	/* A program can later be reattached to another module. Snapshot the
+	 * original module lifetime separately from prog->aux->mod. */
+	{
+		struct module *mod;
+
+		preempt_disable();
+		mod = __module_text_address((unsigned long)tr->func.addr);
+		if (mod && !try_module_get(mod))
+			err = -ENODEV;
+		else {
+			im->target_module = mod;
+			err = 0;
+		}
+		preempt_enable();
+		if (err)
+			goto out_free;
+	}
+#endif
 	err = arch_protect_bpf_trampoline(im->image, im->size);
 	if (err)
 		goto out_free;
@@ -721,6 +784,35 @@ out_free:
 	bpf_tramp_image_free(im);
 	goto out;
 }
+
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+static void bpf_trampoline_queue_retire(struct bpf_trampoline *tr)
+{
+	lockdep_assert_held(&tr->mutex);
+	if (tr->retire_pending)
+		return;
+	tr->retire_pending = true;
+	refcount_inc(&tr->refcnt);
+	schedule_delayed_work(&tr->retire_work, HZ);
+	pr_warn_ratelimited("BPF: retaining detached trampoline while unregistration retries\n");
+}
+
+static void bpf_trampoline_retire_work(struct work_struct *work)
+{
+	struct bpf_trampoline *tr = container_of(to_delayed_work(work),
+						struct bpf_trampoline, retire_work);
+
+	mutex_lock(&tr->mutex);
+	if (!bpf_trampoline_count_progs(tr) && bpf_trampoline_update(tr, true)) {
+		mutex_unlock(&tr->mutex);
+		schedule_delayed_work(&tr->retire_work, HZ);
+		return;
+	}
+	tr->retire_pending = false;
+	mutex_unlock(&tr->mutex);
+	bpf_trampoline_put(tr);
+}
+#endif
 
 static enum bpf_tramp_prog_type bpf_attach_type_to_tramp(struct bpf_prog *prog)
 {
@@ -792,10 +884,16 @@ static int __bpf_trampoline_link_prog(struct bpf_tramp_link *link,
 		err = bpf_freplace_check_tgt_prog(tgt_prog);
 		if (err)
 			return err;
-		tr->extension_prog = link->link.prog;
-		return bpf_arch_text_poke(tr->func.addr, BPF_MOD_NOP,
+		err = bpf_arch_text_poke(tr->func.addr, BPF_MOD_NOP,
 					  BPF_MOD_JUMP, NULL,
 					  link->link.prog->bpf_func);
+		if (err < 0) {
+			guard(mutex)(&tgt_prog->aux->ext_mutex);
+			tgt_prog->aux->is_extended = false;
+			return err;
+		}
+		tr->extension_prog = link->link.prog;
+		return 0;
 	}
 	if (kind == BPF_TRAMP_FSESSION) {
 		prog_list = &tr->progs_hlist[BPF_TRAMP_FENTRY];
@@ -842,10 +940,25 @@ int bpf_trampoline_link_prog(struct bpf_tramp_link *link,
 			     struct bpf_trampoline *tr,
 			     struct bpf_prog *tgt_prog)
 {
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	struct bpf_prog *previous_target;
+#endif
 	int err;
 
 	mutex_lock(&tr->mutex);
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	if (tr->cur_image && tr->cur_image->target_prog != tgt_prog) {
+		mutex_unlock(&tr->mutex);
+		return -EINVAL;
+	}
+	previous_target = tr->target_prog;
+	tr->target_prog = tgt_prog;
+#endif
 	err = __bpf_trampoline_link_prog(link, tr, tgt_prog);
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	if (err)
+		tr->target_prog = previous_target;
+#endif
 	mutex_unlock(&tr->mutex);
 	return err;
 }
@@ -863,21 +976,43 @@ static int __bpf_trampoline_unlink_prog(struct bpf_tramp_link *link,
 		err = bpf_arch_text_poke(tr->func.addr, BPF_MOD_JUMP,
 					 BPF_MOD_NOP,
 					 tr->extension_prog->bpf_func, NULL);
+		if (err < 0) {
+			if (IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM))
+				panic("HDN BPF extension unlink invariant failed");
+			return err;
+		}
 		tr->extension_prog = NULL;
 		guard(mutex)(&tgt_prog->aux->ext_mutex);
 		tgt_prog->aux->is_extended = false;
-		return err;
-	} else if (kind == BPF_TRAMP_FSESSION) {
+		return 0;
+	}
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	/* Fixed one-way gates remove only this link; no replacement allocation
+	 * is needed, even when the isolated executable domain is exhausted. */
+	if (arch_bpf_trampoline_unlink(tr->cur_image, link))
+		panic("HDN BPF trampoline unlink invariant failed");
+#endif
+	if (kind == BPF_TRAMP_FSESSION) {
 		struct bpf_fsession_link *fslink =
 			container_of(link, struct bpf_fsession_link, link.link);
 
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+		if (arch_bpf_trampoline_unlink(tr->cur_image, &fslink->fexit))
+			panic("HDN BPF session unlink invariant failed");
+#endif
 		hlist_del_init(&fslink->fexit.tramp_hlist);
 		tr->progs_cnt[BPF_TRAMP_FEXIT]--;
 		kind = BPF_TRAMP_FENTRY;
 	}
 	hlist_del_init(&link->tramp_hlist);
 	tr->progs_cnt[kind]--;
+#ifdef CONFIG_SECURITY_HARDENING_BPF_EXECMEM
+	if (!bpf_trampoline_count_progs(tr) && bpf_trampoline_update(tr, true))
+		bpf_trampoline_queue_retire(tr);
+	return 0;
+#else
 	return bpf_trampoline_update(tr, true /* lock_direct_mutex */);
+#endif
 }
 
 /* bpf_trampoline_unlink_prog() should never fail. */
@@ -1364,6 +1499,12 @@ int __weak arch_protect_bpf_trampoline(void *image, unsigned int size)
 {
 	WARN_ON_ONCE(size > PAGE_SIZE);
 	return set_memory_rox((long)image, 1);
+}
+
+int __weak arch_bpf_trampoline_unlink(struct bpf_tramp_image *im,
+				    struct bpf_tramp_link *link)
+{
+	return -EOPNOTSUPP;
 }
 
 int __weak arch_bpf_trampoline_size(const struct btf_func_model *m, u32 flags,

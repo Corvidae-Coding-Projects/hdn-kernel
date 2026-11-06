@@ -18,8 +18,13 @@
 #include <linux/vmalloc.h>
 #include <linux/efi.h>
 #include <linux/cc_platform.h>
+#include <linux/hdn_pgtable.h>
+#include <linux/overflow.h>
+#include <linux/uaccess.h>
+#include <linux/xarray.h>
 
 #include <asm/init.h>
+#include <asm/hdn_pgtable.h>
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
 #include <asm/io_apic.h>
@@ -30,6 +35,7 @@
 #include <asm/cpu.h>
 #include <asm/efi.h>
 #include <asm/processor.h>
+#include <asm/hdn_rap_kexec.h>
 
 #ifdef CONFIG_ACPI
 /*
@@ -310,6 +316,7 @@ static int init_pgtable(struct kimage *image, unsigned long control_page)
 	return init_transition_pgtable(image, image->arch.pgd, control_page);
 }
 
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 static void load_segments(void)
 {
 	__asm__ __volatile__ (
@@ -321,6 +328,7 @@ static void load_segments(void)
 		: : "a" (__KERNEL_DS) : "memory"
 		);
 }
+#endif
 
 static void prepare_debug_idt(unsigned long control_page, unsigned long vec_ofs)
 {
@@ -369,6 +377,9 @@ int machine_kexec_prepare(struct kimage *image)
 		return result;
 	kexec_va_control_page = (unsigned long)control_page;
 	kexec_pa_table_page = (unsigned long)__pa(image->arch.pgd);
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	kexec_pa_rap_state = __pa_symbol(&hdn_rap_kexec_state);
+#endif
 
 	if (image->type == KEXEC_TYPE_DEFAULT)
 		kexec_pa_swap_page = page_to_pfn(image->swap_page) << PAGE_SHIFT;
@@ -378,15 +389,179 @@ int machine_kexec_prepare(struct kimage *image)
 
 	__memcpy(control_page, __relocate_kernel_start, reloc_end - reloc_start);
 
-	set_memory_rox((unsigned long)control_page, 1);
+	result = set_memory_rox((unsigned long)control_page, 1);
+	if (result)
+		return result;
+	return hdn_pt_kexec_seal(image);
+}
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+struct kexec_copy_builder {
+	unsigned long head, *page, used, pages;
+};
+
+static int kexec_copy_append(struct kimage *image, struct kexec_copy_builder *b,
+		unsigned long entry)
+{
+	if (!b->page || b->used == PAGE_SIZE / sizeof(long) - 1) {
+		struct page *page = kimage_alloc_control_pages(image, 0);
+		unsigned long link;
+
+		if (!page)
+			return -ENOMEM;
+		clear_page(page_address(page));
+		link = virt_to_boot_phys(page_address(page)) | IND_INDIRECTION;
+		if (b->page)
+			b->page[b->used] = link;
+		else
+			b->head = link;
+		b->page = page_address(page);
+		b->used = 0;
+		b->pages++;
+	}
+	b->page[b->used++] = entry;
 	return 0;
 }
+
+static bool kexec_copy_destination(struct kimage *image, unsigned long address)
+{
+	for (unsigned int i = 0; i < image->nr_segments; i++) {
+		const struct kexec_segment *segment = &image->segment[i];
+
+		if (address >= segment->mem && segment->memsz >= PAGE_SIZE &&
+		    address - segment->mem <= segment->memsz - PAGE_SIZE)
+			return true;
+	}
+	return false;
+}
+
+/* Both loading syscalls reach this point after kimage_terminate(). The input
+ * remains the core allocator's free list; execution uses only our sealed copy.
+ * In particular, cleanup may free original nodes before the arch callback. */
+int machine_kexec_post_load(struct kimage *image)
+{
+	DEFINE_XARRAY(nodes);
+	DEFINE_XARRAY(sources);
+	DEFINE_XARRAY(destinations);
+	struct kexec_copy_builder b = {};
+	struct hdn_rap_kexec_launch launch = {};
+	unsigned long *cursor = &image->head, destination = 0;
+	unsigned long total = 0, budget, entry, source, node, offset = 0;
+	bool have_destination = false, done = false;
+	int error = -EINVAL;
+
+	if (!image->nr_segments || image->nr_segments > KEXEC_SEGMENT_MAX)
+		goto out;
+	for (unsigned int i = 0; i < image->nr_segments; i++) {
+		struct kexec_segment *segment = &image->segment[i];
+		unsigned long end;
+
+		if (!PAGE_ALIGNED(segment->mem) || !PAGE_ALIGNED(segment->memsz) ||
+		    check_add_overflow(segment->mem, segment->memsz, &end) ||
+		    check_add_overflow(total, segment->memsz >> PAGE_SHIFT, &total))
+			goto out;
+	}
+	if (check_mul_overflow(total, 3UL, &budget) ||
+	    check_add_overflow(budget, 8UL, &budget))
+		goto out;
+	while (budget--) {
+		if (cursor != &image->head && offset >= PAGE_SIZE / sizeof(long))
+			goto invalid;
+		if (copy_from_kernel_nofault(&entry, cursor, sizeof(entry)))
+			goto invalid;
+		source = entry & PAGE_MASK;
+		if ((entry & ~PAGE_MASK) == IND_DONE) {
+			if (source)
+				goto invalid;
+			done = true;
+			break;
+		}
+		if ((entry & ~PAGE_MASK) == IND_INDIRECTION) {
+			if (!source || !pfn_valid(source >> PAGE_SHIFT) ||
+			    !virt_addr_valid(boot_phys_to_virt(source)) ||
+			    kexec_copy_destination(image, source))
+				goto invalid;
+			error = xa_insert(&nodes, source >> PAGE_SHIFT, XA_ZERO_ENTRY, GFP_KERNEL);
+			if (error)
+				goto out;
+			cursor = boot_phys_to_virt(source);
+			offset = 0;
+		} else {
+			/* A source or destination is never legal in image->head or
+			 * beyond the final word of a registered indirection page. */
+			if (cursor == &image->head || offset >= PAGE_SIZE / sizeof(long))
+				goto invalid;
+			if ((entry & ~PAGE_MASK) == IND_DESTINATION) {
+				destination = source;
+				have_destination = true;
+			} else if ((entry & ~PAGE_MASK) == IND_SOURCE) {
+				if (!have_destination || !kexec_copy_destination(image, destination) ||
+				    !pfn_valid(source >> PAGE_SHIFT) ||
+				    (source != destination && kexec_copy_destination(image, source)))
+					goto invalid;
+				error = xa_insert(&sources, source >> PAGE_SHIFT, XA_ZERO_ENTRY, GFP_KERNEL);
+				if (error)
+					goto out;
+				error = xa_insert(&destinations, destination >> PAGE_SHIFT, XA_ZERO_ENTRY, GFP_KERNEL);
+				if (error)
+					goto out;
+				error = kexec_copy_append(image, &b, destination | IND_DESTINATION);
+				if (!error)
+					error = kexec_copy_append(image, &b, entry);
+				if (error)
+					goto out;
+				destination += PAGE_SIZE;
+			} else {
+				goto invalid;
+			}
+			cursor++;
+			offset++;
+		}
+	}
+	if (!done)
+		goto invalid;
+	error = kexec_copy_append(image, &b, IND_DONE);
+	if (error)
+		goto out;
+	node = b.head & PAGE_MASK;
+	for (unsigned long i = 0; i < b.pages; i++) {
+		unsigned long *page = boot_phys_to_virt(node);
+		unsigned long next = page[PAGE_SIZE / sizeof(long) - 1] & PAGE_MASK;
+
+		error = hdn_pt_kexec_data_seal(image, virt_to_page(page));
+		if (error)
+			goto out;
+		node = next;
+	}
+	launch.head = b.head;
+	launch.control = virt_to_boot_phys(page_address(image->control_code_page));
+	launch.code = (unsigned long)page_address(image->control_code_page) +
+		(unsigned long)relocate_kernel - (unsigned long)__relocate_kernel_start;
+	launch.table = virt_to_boot_phys(image->arch.pgd);
+	launch.swap = image->type == KEXEC_TYPE_DEFAULT ?
+		page_to_boot_pfn(image->swap_page) << PAGE_SHIFT : 0;
+	launch.entry = image->start;
+	launch.flags = image->preserve_context ? RELOC_KERNEL_PRESERVE_CONTEXT : 0;
+	error = hdn_rap_kexec_publish(image, &launch);
+	goto out;
+invalid:
+	error = -EINVAL;
+out:
+	xa_destroy(&nodes);
+	xa_destroy(&sources);
+	xa_destroy(&destinations);
+	return error;
+}
+#endif
 
 void machine_kexec_cleanup(struct kimage *image)
 {
 	void *control_page = page_address(image->control_code_page);
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	hdn_rap_kexec_release(image);
+#endif
+	hdn_pt_kexec_release(image);
 	set_memory_nx((unsigned long)control_page, 1);
 	set_memory_rw((unsigned long)control_page, 1);
 
@@ -399,11 +574,13 @@ void machine_kexec_cleanup(struct kimage *image)
  */
 void __nocfi machine_kexec(struct kimage *image)
 {
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 	unsigned long reloc_start = (unsigned long)__relocate_kernel_start;
 	relocate_kernel_fn *relocate_kernel_ptr;
 	unsigned int relocate_kernel_flags;
-	int save_ftrace_enabled;
 	void *control_page;
+#endif
+	int save_ftrace_enabled;
 
 #ifdef CONFIG_KEXEC_JUMP
 	if (image->preserve_context)
@@ -430,6 +607,9 @@ void __nocfi machine_kexec(struct kimage *image)
 #endif
 	}
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	image->start = hdn_rap_kexec(image);
+#else
 	control_page = page_address(image->control_code_page);
 
 	/*
@@ -471,6 +651,7 @@ void __nocfi machine_kexec(struct kimage *image)
 					   virt_to_phys(control_page),
 					   image->start,
 					   relocate_kernel_flags);
+#endif
 
 #ifdef CONFIG_KEXEC_JUMP
 	if (image->preserve_context)
@@ -639,6 +820,30 @@ kexec_mark_range(unsigned long start, unsigned long end, bool protect)
 	if (!end || start > end)
 		return 0;
 
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	if (!protect) {
+		unsigned long pfn = start >> PAGE_SHIFT, last = end >> PAGE_SHIFT;
+		int error;
+
+		/* The published crash root remains sealed until it is withdrawn
+		 * and machine_kexec_cleanup releases its exact ownership handle.
+		 * Unprotect only the surrounding image payload here. */
+		while (pfn <= last) {
+			unsigned long first;
+			if (hdn_pt_protected_pfn(pfn, pfn)) {
+				pfn++;
+				continue;
+			}
+			first = pfn++;
+			while (pfn <= last && !hdn_pt_protected_pfn(pfn, pfn))
+				pfn++;
+			error = set_pages_rw(pfn_to_page(first), pfn - first);
+			if (error)
+				return error;
+		}
+		return 0;
+	}
+#endif
 	page = pfn_to_page(start >> PAGE_SHIFT);
 	nr_pages = (end >> PAGE_SHIFT) - (start >> PAGE_SHIFT) + 1;
 	if (protect)

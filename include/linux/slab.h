@@ -968,10 +968,36 @@ void *kmalloc_nolock_noprof(size_t size, gfp_t gfp_flags, int node);
  * Returns: Newly allocated pointer to (first) @TYPE of @COUNT-many
  * allocated @TYPE objects, or NULL on failure.
  */
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+/* A missing or disabled compiler pass leaves an unresolved marker at link. */
+void *__hdn_alloc_marker(size_t size, gfp_t flags, int node,
+			unsigned int virtual, ...) __alloc_size(1) __malloc;
+#define __hdn_typed_kmalloc(TYPE, SIZE, GFP) \
+	alloc_hooks(__hdn_alloc_marker(SIZE, GFP, NUMA_NO_NODE, 0, (TYPE *)0))
+#define __hdn_typed_kzalloc(TYPE, SIZE, GFP) \
+	__hdn_typed_kmalloc(TYPE, SIZE, (GFP) | __GFP_ZERO)
+#define __hdn_typed_kvmalloc(TYPE, SIZE, GFP) \
+	alloc_hooks(__hdn_alloc_marker(SIZE, GFP, NUMA_NO_NODE, 1, (TYPE *)0))
+#define __hdn_typed_kvzalloc(TYPE, SIZE, GFP) \
+	__hdn_typed_kvmalloc(TYPE, SIZE, (GFP) | __GFP_ZERO)
+#define __hdn_typed_call(KMALLOC, TYPE, SIZE, GFP) \
+	__hdn_typed_##KMALLOC(TYPE, SIZE, GFP)
+#define kmalloc_node_typed(TYPE, SIZE, GFP, NODE) \
+	((TYPE *)alloc_hooks(__hdn_alloc_marker(SIZE, GFP, NODE, 0, (TYPE *)0)))
+#else
+#define __hdn_typed_call(KMALLOC, TYPE, SIZE, GFP) KMALLOC(SIZE, GFP)
+#define kmalloc_node_typed(TYPE, SIZE, GFP, NODE) \
+	((TYPE *)kmalloc_node(SIZE, GFP, NODE))
+#endif
+
+/* Use at reviewed variable-size sites whose ordinary API erased the type. */
+#define kmalloc_typed(TYPE, SIZE, GFP) \
+	((TYPE *)__hdn_typed_call(kmalloc, TYPE, SIZE, GFP))
+
 #define __alloc_objs(KMALLOC, GFP, TYPE, COUNT)				\
 ({									\
 	const size_t __obj_size = size_mul(sizeof(TYPE), COUNT);	\
-	(TYPE *)KMALLOC(__obj_size, GFP);				\
+	(TYPE *)__hdn_typed_call(KMALLOC, TYPE, __obj_size, GFP);	\
 })
 
 /**
@@ -991,7 +1017,7 @@ void *kmalloc_nolock_noprof(size_t size, gfp_t gfp_flags, int node);
 ({									\
 	const size_t __count = (COUNT);					\
 	const size_t __obj_size = struct_size_t(TYPE, FAM, __count);	\
-	TYPE *__obj_ptr = KMALLOC(__obj_size, GFP);			\
+	TYPE *__obj_ptr = __hdn_typed_call(KMALLOC, TYPE, __obj_size, GFP); \
 	if (__obj_ptr)							\
 		__set_flex_counter(__obj_ptr->FAM, __count);		\
 	__obj_ptr;							\

@@ -20,6 +20,7 @@ struct opts {
 	bool noabs;
 	bool noinstr;
 	bool orc;
+	bool rap;
 	bool retpoline;
 	bool rethunk;
 	bool unret;

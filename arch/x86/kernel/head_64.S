@@ -27,6 +27,7 @@
 #include <asm/fixmap.h>
 #include <asm/smp.h>
 #include <asm/thread_info.h>
+#include <asm/hdn_rap.h>
 
 /*
  * We are not able to switch in one step to the final KERNEL ADDRESS SPACE
@@ -36,6 +37,7 @@
 	__INIT
 	.code64
 SYM_CODE_START_NOALIGN(startup_64)
+	HDN_KEXEC_FUNC startup_64, 48
 	UNWIND_HINT_END_OF_STACK
 	/*
 	 * At this point the CPU runs in 64bit mode CS.L = 1 CS.D = 0,
@@ -145,6 +147,7 @@ SYM_DATA_LOCAL(.Lcommon_startup_64, .quad common_startup_64)
 
 	.text
 SYM_CODE_START(secondary_startup_64)
+	HDN_KEXEC_FUNC secondary_startup_64, 49
 	UNWIND_HINT_END_OF_STACK
 	ANNOTATE_NOENDBR
 	/*
@@ -180,7 +183,14 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 
 	/* Derive the runtime physical address of init_top_pgt[] */
 	movq	phys_base(%rip), %rax
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	leaq	init_top_pgt(%rip), %rcx
+	movabsq	$__START_KERNEL_map, %rdx
+	subq	%rdx, %rcx
+	addq	%rcx, %rax
+#else
 	addq	$(init_top_pgt - __START_KERNEL_map), %rax
+#endif
 
 	/*
 	 * Retrieve the modifier (SME encryption mask if SME is active) to be
@@ -195,7 +205,13 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	 */
 	movq	%rax, %cr3
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+SYM_CODE_END(secondary_startup_64)
+SYM_CODE_START_LOCAL_NOALIGN(common_startup_64)
+	HDN_KEXEC_FUNC common_startup_64, 50
+#else
 SYM_INNER_LABEL(common_startup_64, SYM_L_LOCAL)
+#endif
 	UNWIND_HINT_END_OF_STACK
 	ANNOTATE_NOENDBR
 
@@ -232,6 +248,39 @@ SYM_INNER_LABEL(common_startup_64, SYM_L_LOCAL)
 	btsl	$X86_CR4_PGE_BIT, %ecx
 	movq	%rcx, %cr4
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* Before publication this is the BSP's fixed init stack. Every later
+	 * launch selects its sealed row by hardware APIC identity, including
+	 * an UP kernel returning from S3. Mutable task/thread fields and the
+	 * serialized smpboot_control selector are not launch authorities. */
+	cmpb	$0, hdn_stack_mm_ready(%rip)
+	jne	.Lread_apicid
+	xorl	%edx, %edx
+	leaq	__top_init_kernel_stack(%rip), %rsp
+	jmp	.Lstack_ready
+.Lread_apicid:
+	mov	$MSR_IA32_APICBASE, %ecx
+	rdmsr
+	testl	$X2APIC_ENABLE, %eax
+	jnz	.Lread_apicid_msr
+#ifdef CONFIG_X86_X2APIC
+	cmpl	$0, x2apic_mode(%rip)
+	jz	.Lread_apicid_mmio
+	orl	$X2APIC_ENABLE, %eax
+	wrmsr
+	jmp	.Lread_apicid_msr
+#endif
+.Lread_apicid_mmio:
+	movq	apic_mmio_base(%rip), %rcx
+	addq	$APIC_ID, %rcx
+	movl	(%rcx), %eax
+	shr	$24, %eax
+	jmp	.Lhdn_lookup_AP
+.Lread_apicid_msr:
+	mov	$APIC_X2APIC_ID_MSR, %ecx
+	rdmsr
+	jmp	.Lhdn_lookup_AP
+#else
 #ifdef CONFIG_SMP
 	/*
 	 * For parallel boot, the APIC ID is read from the APIC, and then
@@ -242,6 +291,12 @@ SYM_INNER_LABEL(common_startup_64, SYM_L_LOCAL)
 	 * Bit 0-23	CPU# if STARTUP_xx flags are not set
 	 */
 	movl	smpboot_control(%rip), %ecx
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* Every AP launch after private-root initialization uses hardware
+	 * identity, including serialized hotplug bringup. */
+	cmpb	$0, hdn_stack_mm_ready(%rip)
+	jne	.Lread_apicid
+#endif
 	testl	$STARTUP_READ_APICID, %ecx
 	jnz	.Lread_apicid
 	/*
@@ -287,6 +342,10 @@ SYM_INNER_LABEL(common_startup_64, SYM_L_LOCAL)
 
 .Llookup_AP:
 	/* EAX contains the APIC ID of the current CPU */
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	cmpb	$0, hdn_stack_mm_ready(%rip)
+	jne	.Lhdn_lookup_AP
+#endif
 	xorl	%ecx, %ecx
 	leaq	cpuid_to_apicid(%rip), %rbx
 
@@ -324,6 +383,32 @@ SYM_INNER_LABEL(common_startup_64, SYM_L_LOCAL)
 	 */
 	movq	current_task(%rdx), %rax
 	movq	TASK_threadsp(%rax), %rsp
+	jmp	.Lstack_ready
+#endif /* CONFIG_SECURITY_HARDENING_RAP */
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+.Lhdn_lookup_AP:
+	leaq	hdn_stack_startup(%rip), %rbx
+	movl	$NR_CPUS, %ecx
+.Lhdn_find_AP:
+	cmpq	HDN_STACK_STARTUP_APICID(%rbx), %rax
+	jne	.Lhdn_next_AP
+	cmpq	$0, HDN_STACK_STARTUP_CR3(%rbx)
+	je	.Lhdn_next_AP
+	/* Both mappings are supervisor-only. There is no stack access between
+	 * loading the private root and installing its authenticated SP. */
+	movq	HDN_STACK_STARTUP_GSBASE(%rbx), %rdx
+	movq	HDN_STACK_STARTUP_CR3(%rbx), %rax
+	movq	%rax, %cr3
+	movq	HDN_STACK_STARTUP_SP(%rbx), %rsp
+	jmp	.Lstack_ready
+.Lhdn_next_AP:
+	addq	$HDN_STACK_STARTUP_SIZE, %rbx
+	decl	%ecx
+	jnz	.Lhdn_find_AP
+	ud2
+#endif
+.Lstack_ready:
 
 	/*
 	 * Now that this CPU is running on its own stack, drop the realmode
@@ -373,7 +458,24 @@ SYM_INNER_LABEL(common_startup_64, SYM_L_LOCAL)
 	wrmsr
 
 	/* Setup and Load IDT */
-	call	early_setup_idt
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	cmpb	$0, hdn_stack_mm_ready(%rip)
+	je	.Linitial_idt_setup
+	HDN_C_CALL hdn_stack_mm_cpu_enter
+	movq	%rax, %r12
+#ifdef CONFIG_ACPI_SLEEP
+	testq	%r12, %r12
+	jnz	.Lidt_ready
+#endif
+	HDN_C_CALL hdn_rap_cpu_restart
+	HDN_C_CALL early_setup_idt
+	jmp	.Lidt_ready
+.Linitial_idt_setup:
+#endif
+	HDN_C_CALL early_setup_idt
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+.Lidt_ready:
+#endif
 
 	/* Check if nx is implemented */
 	movl	$0x80000001, %eax
@@ -414,12 +516,35 @@ SYM_INNER_LABEL(common_startup_64, SYM_L_LOCAL)
 
 .Ljump_to_C_code:
 	xorl	%ebp, %ebp	# clear frame pointer
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	cmpb	$0, hdn_stack_mm_ready(%rip)
+	je	.Linitial_C_code
+#ifdef CONFIG_ACPI_SLEEP
+	testq	%r12, %r12
+	jnz	wakeup_long64
+#endif
+	HDN_C_CALL start_secondary
+	ud2
+.Linitial_C_code:
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* APs and S3 resumes take the sealed launch path above. This is the
+	 * native BSP handoff; writable initial_code is not an authority here. */
+	HDN_C_CALL x86_64_start_kernel
+#else
 	ANNOTATE_RETPOLINE_SAFE
 	callq	*initial_code(%rip)
+#endif
 	ud2
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+SYM_CODE_END(common_startup_64)
+#else
 SYM_CODE_END(secondary_startup_64)
+#endif
 
+#define HDN_VERIFY_CPU64
 #include "verify_cpu.S"
+#undef HDN_VERIFY_CPU64
 #include "sev_verify_cbit.S"
 
 #if defined(CONFIG_HOTPLUG_CPU) && defined(CONFIG_AMD_MEM_ENCRYPT)
@@ -431,12 +556,18 @@ SYM_CODE_END(secondary_startup_64)
 SYM_CODE_START(soft_restart_cpu)
 	ANNOTATE_NOENDBR
 	UNWIND_HINT_END_OF_STACK
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* A restart discards the parked chain just like a SIPI launch. Reuse
+	 * hardware identity and the sealed launch row, never thread.sp. */
+	jmp	common_startup_64
+#else
 
 	/* Find the idle task stack */
 	movq	PER_CPU_VAR(current_task), %rcx
 	movq	TASK_threadsp(%rcx), %rsp
 
 	jmp	.Ljump_to_C_code
+#endif
 SYM_CODE_END(soft_restart_cpu)
 #endif
 
@@ -481,11 +612,14 @@ SYM_DATA(initial_code,	.quad x86_64_start_kernel)
 SYM_DATA(initial_vc_handler,	.quad handle_vc_boot_ghcb)
 #endif
 
+	.pushsection .data..ro_after_init, "aw"
 SYM_DATA(trampoline_lock, .quad 0);
+	.popsection
 	__FINITDATA
 
 	__INIT
 SYM_CODE_START(early_idt_handler_array)
+	HDN_KEXEC_FUNC early_idt_handler_array, 46
 	i = 0
 	.rept NUM_EXCEPTION_VECTORS
 	.if ((EXCEPTION_ERRCODE_MASK >> i) & 1) == 0
@@ -506,6 +640,7 @@ SYM_CODE_END(early_idt_handler_array)
 	ANNOTATE_NOENDBR // early_idt_handler_array[NUM_EXCEPTION_VECTORS]
 
 SYM_CODE_START_LOCAL(early_idt_handler_common)
+	HDN_KEXEC_FUNC early_idt_handler_common, 47
 	UNWIND_HINT_IRET_REGS offset=16
 	/*
 	 * The stack is the hardware frame, an error code or zero, and the
@@ -534,8 +669,22 @@ SYM_CODE_START_LOCAL(early_idt_handler_common)
 	pushq %r15				/* pt_regs->r15 */
 	UNWIND_HINT_REGS
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* The virtual-address boot phase already has init_stack and kernel
+	 * GS. Give early faults the same immutable frame as later IDT entry. */
+	movq %rsi, %r12
+	movq %rsi, %r9
+	movq %rsp, %rdi
+	xorl %esi, %esi
+	xorl %edx, %edx
+	xorl %ecx, %ecx
+	xorl %r8d, %r8d
+	HDN_C_CALL hdn_rap_frame_enter
+	movq %r12, %rsi
+#endif
 	movq %rsp,%rdi		/* RDI = pt_regs; RSI is already trapnr */
-	call do_early_exception
+	HDN_C_CALL do_early_exception
+	HDN_FRAME_EXIT HDN_RAP_FRAME_IDT
 
 	decl early_recursion_flag(%rip)
 	jmp restore_regs_and_return_to_kernel
@@ -679,9 +828,16 @@ SYM_DATA(smpboot_control,		.long 0)
 
 	.align 16
 /* This must match the first entry in level2_kernel_pgt */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	.pushsection .data..ro_after_init, "aw"
+	.balign 8
+#endif
 SYM_DATA(phys_base, .quad 0x0)
 SYM_PIC_ALIAS(phys_base);
 EXPORT_SYMBOL(phys_base)
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	.popsection
+#endif
 
 #include "../xen/xen-head.S"
 

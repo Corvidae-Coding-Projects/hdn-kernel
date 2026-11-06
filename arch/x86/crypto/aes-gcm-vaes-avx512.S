@@ -48,6 +48,7 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 .section .rodata
 .p2align 6
@@ -281,6 +282,7 @@
 // Given the expanded AES key |key->base.aes_key|, derive the GHASH subkey and
 // initialize |key->h_powers| and |key->padding|.
 SYM_FUNC_START(aes_gcm_precompute_vaes_avx512)
+	HDN_ASM_FUNCTION aes_gcm_precompute_vaes_avx512
 
 	// Function arguments
 	.set	KEY,		%rdi
@@ -380,7 +382,8 @@ SYM_FUNC_START(aes_gcm_precompute_vaes_avx512)
 	jnz		.Lprecompute_next
 
 	vzeroupper	// This is needed after using ymm or zmm registers.
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END aes_gcm_precompute_vaes_avx512
 SYM_FUNC_END(aes_gcm_precompute_vaes_avx512)
 
 // XOR together the 128-bit lanes of \src (whose low lane is \src_xmm) and store
@@ -496,6 +499,7 @@ SYM_FUNC_END(aes_gcm_precompute_vaes_avx512)
 // low for small amounts which is the common case.  TLS and IPsec use less than
 // one block of AAD, but (uncommonly) other use cases may use much more.
 SYM_FUNC_START(aes_gcm_aad_update_vaes_avx512)
+	HDN_ASM_FUNCTION aes_gcm_aad_update_vaes_avx512
 
 	// Function arguments
 	.set	KEY,		%rdi
@@ -612,7 +616,8 @@ SYM_FUNC_START(aes_gcm_aad_update_vaes_avx512)
 	vmovdqu		GHASH_ACC_XMM, (GHASH_ACC_PTR)
 
 	vzeroupper	// This is needed after using ymm or zmm registers.
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END aes_gcm_aad_update_vaes_avx512
 SYM_FUNC_END(aes_gcm_aad_update_vaes_avx512)
 
 // Do one non-last round of AES encryption on the blocks in %zmm[0-3] using the
@@ -1011,7 +1016,7 @@ SYM_FUNC_END(aes_gcm_aad_update_vaes_avx512)
 	vmovdqu		GHASH_ACC_XMM, (GHASH_ACC_PTR)
 
 	vzeroupper	// This is needed after using ymm or zmm registers.
-	RET
+	HDN_ASM_RETURN
 .endm
 
 // void aes_gcm_enc_final_vaes_avx512(const struct aes_gcm_key_vaes_avx512 *key,
@@ -1148,19 +1153,27 @@ SYM_FUNC_END(aes_gcm_aad_update_vaes_avx512)
 	sete		%al
 .endif
 	// No need for vzeroupper here, since only used xmm registers were used.
-	RET
+	HDN_ASM_RETURN
 .endm
 
 SYM_FUNC_START(aes_gcm_enc_update_vaes_avx512)
+	HDN_ASM_FUNCTION aes_gcm_enc_update_vaes_avx512
 	_aes_gcm_update	1
+	HDN_ASM_FUNCTION_END aes_gcm_enc_update_vaes_avx512
 SYM_FUNC_END(aes_gcm_enc_update_vaes_avx512)
 SYM_FUNC_START(aes_gcm_dec_update_vaes_avx512)
+	HDN_ASM_FUNCTION aes_gcm_dec_update_vaes_avx512
 	_aes_gcm_update	0
+	HDN_ASM_FUNCTION_END aes_gcm_dec_update_vaes_avx512
 SYM_FUNC_END(aes_gcm_dec_update_vaes_avx512)
 
 SYM_FUNC_START(aes_gcm_enc_final_vaes_avx512)
+	HDN_ASM_FUNCTION aes_gcm_enc_final_vaes_avx512
 	_aes_gcm_final	1
+	HDN_ASM_FUNCTION_END aes_gcm_enc_final_vaes_avx512
 SYM_FUNC_END(aes_gcm_enc_final_vaes_avx512)
 SYM_FUNC_START(aes_gcm_dec_final_vaes_avx512)
+	HDN_ASM_FUNCTION aes_gcm_dec_final_vaes_avx512
 	_aes_gcm_final	0
+	HDN_ASM_FUNCTION_END aes_gcm_dec_final_vaes_avx512
 SYM_FUNC_END(aes_gcm_dec_final_vaes_avx512)

@@ -19,6 +19,7 @@
  * - idtentry:		Define exception entry points.
  */
 #include <linux/export.h>
+#include <linux/cfi_types.h>
 #include <linux/kvm_types.h>
 #include <linux/linkage.h>
 #include <asm/segment.h>
@@ -42,6 +43,7 @@
 #include <linux/err.h>
 
 #include "calling.h"
+#include <asm/hdn_rap.h>
 
 .code64
 .section .entry.text, "ax"
@@ -85,6 +87,7 @@
  */
 
 SYM_CODE_START(entry_SYSCALL_64)
+	HDN_KEXEC_FUNC entry_SYSCALL_64, 42
 	UNWIND_HINT_ENTRY
 	ENDBR
 
@@ -118,7 +121,7 @@ SYM_INNER_LABEL(entry_SYSCALL_64_after_hwframe, SYM_L_GLOBAL)
 	UNTRAIN_RET
 	CLEAR_BRANCH_HISTORY
 
-	call	do_syscall_64		/* returns with IRQs disabled */
+	HDN_C_CALL do_syscall_64		/* returns with IRQs disabled */
 
 	/*
 	 * Try to use SYSRET instead of IRET if we're returning to
@@ -127,8 +130,13 @@ SYM_INNER_LABEL(entry_SYSCALL_64_after_hwframe, SYM_L_GLOBAL)
 	 * In the Xen PV case we must use iret anyway.
 	 */
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	testb	%al, %al
+	jz	swapgs_restore_regs_and_return_to_usermode
+#else
 	ALTERNATIVE "testb %al, %al; jz swapgs_restore_regs_and_return_to_usermode", \
 		"jmp swapgs_restore_regs_and_return_to_usermode", X86_FEATURE_XENPV
+#endif
 
 	/*
 	 * We win! This label is here just for ease of understanding
@@ -175,6 +183,7 @@ SYM_CODE_END(entry_SYSCALL_64)
  */
 .pushsection .text, "ax"
 SYM_FUNC_START(__switch_to_asm)
+	HDN_KEXEC_FUNC __switch_to_asm, 30
 	ANNOTATE_NOENDBR
 	/*
 	 * Save callee-saved registers
@@ -188,11 +197,63 @@ SYM_FUNC_START(__switch_to_asm)
 	pushq	%r15
 
 	/* switch stack */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	movq	%rdi, %r12
+	movq	%rsi, %r13
+	movq	%rsp, %rdx
+	movq	%r10, %rcx
+	subq	$8, %rsp	/* Preserve the C ABI's call-site alignment. */
+	HDN_C_CALL hdn_rap_switch
+	addq	$8, %rsp
+	movq	%r12, %rdi
+	movq	%r13, %rsi
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	movq	HDN_RAP_SWITCH_CR3(%rax), %r11
+	movq	HDN_RAP_SWITCH_SP(%rax), %rdx
+#else
+	movq	HDN_RAP_SWITCH_SP(%rax), %rsp
+#endif
+#elif defined(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS)
+	movq	%rsp, TASK_threadsp(%rdi)
+	movq	%rdi, %r12
+	movq	%rsi, %r13
+	movq	TASK_threadsp(%rsi), %rdx
+	subq	$8, %rsp
+	HDN_C_CALL hdn_stack_mm_prepare
+	addq	$8, %rsp
+	movq	%r12, %rdi
+	movq	%r13, %rsi
+	movq	HDN_STACK_SWITCH_CR3(%rax), %r11
+	movq	HDN_STACK_SWITCH_SP(%rax), %rdx
+#else
 	movq	%rsp, TASK_threadsp(%rdi)
 	movq	TASK_threadsp(%rsi), %rsp
+#endif
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* Neither instruction between these labels accesses a stack. NMI/#MC
+	 * use their independent IST domains and retain the interrupted CR3. */
+SYM_INNER_LABEL(__hdn_stack_switch_cr3, SYM_L_GLOBAL)
+	movq	%r11, %cr3
+	movq	%rdx, %rsp
+SYM_INNER_LABEL(__hdn_stack_switch_rsp, SYM_L_GLOBAL)
+	movq	%rax, %r12
+	movq	%rdi, %r13
+	movq	%rsi, %r14
+	subq	$8, %rsp
+	HDN_C_CALL hdn_stack_mm_finish
+	addq	$8, %rsp
+	movq	%r12, %rax
+	movq	%r13, %rdi
+	movq	%r14, %rsi
+#endif
 
 #ifdef CONFIG_STACKPROTECTOR
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	movq	HDN_RAP_SWITCH_CANARY(%rax), %rbx
+#else
 	movq	TASK_stack_canary(%rsi), %rbx
+#endif
 	movq	%rbx, PER_CPU_VAR(__stack_chk_guard)
 #endif
 
@@ -206,12 +267,25 @@ SYM_FUNC_START(__switch_to_asm)
 	FILL_RETURN_BUFFER %r12, RSB_CLEAR_LOOPS, X86_FEATURE_RSB_CTXSW
 
 	/* restore callee-saved registers */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	movq	HDN_RAP_SWITCH_R15(%rax), %r15
+	movq	HDN_RAP_SWITCH_R14(%rax), %r14
+	movq	HDN_RAP_SWITCH_R13(%rax), %r13
+	movq	HDN_RAP_SWITCH_R12(%rax), %r12
+	movq	HDN_RAP_SWITCH_BX(%rax), %rbx
+	movq	HDN_RAP_SWITCH_BP(%rax), %rbp
+	movq	HDN_RAP_SWITCH_RET(%rax), %r10
+	addq	$HDN_RAP_SWITCH_SAVED_SIZE, %rsp
+	/* The protected snapshot restores the same inactive_task_frame ABI. */
+	UNWIND_HINT_FUNC
+#else
 	popq	%r15
 	popq	%r14
 	popq	%r13
 	popq	%r12
 	popq	%rbx
 	popq	%rbp
+#endif
 
 	jmp	__switch_to
 SYM_FUNC_END(__switch_to_asm)
@@ -226,6 +300,7 @@ SYM_FUNC_END(__switch_to_asm)
  */
 .pushsection .text, "ax"
 SYM_CODE_START(ret_from_fork_asm)
+	HDN_KEXEC_FUNC ret_from_fork_asm, 31
 	/*
 	 * This is the start of the kernel stack; even through there's a
 	 * register set at the top, the regset isn't necessarily coherent
@@ -242,7 +317,7 @@ SYM_CODE_START(ret_from_fork_asm)
 	movq	%rsp, %rsi		/* regs */
 	movq	%rbx, %rdx		/* fn */
 	movq	%r12, %rcx		/* fn_arg */
-	call	ret_from_fork
+	HDN_C_CALL ret_from_fork
 
 	/*
 	 * Set the stack state to what is expected for the target function
@@ -286,7 +361,7 @@ SYM_CODE_END(xen_error_entry)
  * @cfunc:		C function to be called
  * @has_error_code:	Hardware pushed error code on stack
  */
-.macro idtentry_body cfunc has_error_code:req
+.macro idtentry_body cfunc has_error_code:req vector:req
 
 	/*
 	 * Call error_entry() and switch to the task stack if from userspace.
@@ -296,22 +371,32 @@ SYM_CODE_END(xen_error_entry)
 	 * own pvops for IRET and load_gs_index().  And it doesn't need to
 	 * switch the CR3.  So it can skip invoking error_entry().
 	 */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* The protected frame protocol uses the native entry root. Xen PV
+	 * requires its own stack/context protocol and is not this ABI. */
+	call	error_entry
+	movq	%rax, %rsp
+#else
 	ALTERNATIVE "call error_entry; movq %rax, %rsp", \
 		    "call xen_error_entry", X86_FEATURE_XENPV
+#endif
 
 	ENCODE_FRAME_POINTER
 	UNWIND_HINT_REGS
 
-	movq	%rsp, %rdi			/* pt_regs pointer into 1st argument*/
-
 	.if \has_error_code == 1
-		movq	ORIG_RAX(%rsp), %rsi	/* get error code into 2nd argument*/
+		movq	ORIG_RAX(%rsp), %r12	/* survives frame registration */
 		movq	$-1, ORIG_RAX(%rsp)	/* no syscall to restart */
+	.endif
+	HDN_FRAME_ENTER HDN_RAP_FRAME_IDT, \vector
+	movq	%rsp, %rdi			/* pt_regs pointer into 1st argument*/
+	.if \has_error_code == 1
+		movq	%r12, %rsi
 	.endif
 
 	/* For some configurations \cfunc ends up being a noreturn. */
 	ANNOTATE_REACHABLE
-	call	\cfunc
+	HDN_C_CALL \cfunc
 
 	jmp	error_return
 .endm
@@ -328,6 +413,7 @@ SYM_CODE_END(xen_error_entry)
  */
 .macro idtentry vector asmsym cfunc has_error_code:req
 SYM_CODE_START(\asmsym)
+	HDN_KEXEC_FUNC \asmsym, 33
 
 	.if \vector == X86_TRAP_BP
 		/* #BP advances %rip to the next instruction */
@@ -358,7 +444,7 @@ SYM_CODE_START(\asmsym)
 .Lfrom_usermode_no_gap_\@:
 	.endif
 
-	idtentry_body \cfunc \has_error_code
+	idtentry_body \cfunc \has_error_code \vector
 
 _ASM_NOKPROBE(\asmsym)
 SYM_CODE_END(\asmsym)
@@ -396,6 +482,7 @@ SYM_CODE_END(\asmsym)
  */
 .macro idtentry_mce_db vector asmsym cfunc
 SYM_CODE_START(\asmsym)
+	HDN_KEXEC_FUNC \asmsym, 34
 	UNWIND_HINT_IRET_ENTRY
 	ENDBR
 	ASM_CLAC
@@ -414,16 +501,17 @@ SYM_CODE_START(\asmsym)
 	call	paranoid_entry
 
 	UNWIND_HINT_REGS
+	HDN_FRAME_ENTER HDN_RAP_FRAME_PARANOID, \vector
 
 	movq	%rsp, %rdi		/* pt_regs pointer */
 
-	call	\cfunc
+	HDN_C_CALL \cfunc
 
 	jmp	paranoid_exit
 
 	/* Switch to the regular task stack and use the noist entry point */
 .Lfrom_usermode_switch_stack_\@:
-	idtentry_body noist_\cfunc, has_error_code=0
+	idtentry_body noist_\cfunc, has_error_code=0, vector=\vector
 
 _ASM_NOKPROBE(\asmsym)
 SYM_CODE_END(\asmsym)
@@ -480,19 +568,21 @@ SYM_CODE_START(\asmsym)
 	 * stack.
 	 */
 	movq	%rsp, %rdi		/* pt_regs pointer */
-	call	vc_switch_off_ist
+	HDN_C_CALL vc_switch_off_ist
 	movq	%rax, %rsp		/* Switch to new stack */
 
 	ENCODE_FRAME_POINTER
 	UNWIND_HINT_REGS
 
 	/* Update pt_regs */
-	movq	ORIG_RAX(%rsp), %rsi	/* get error code into 2nd argument*/
+	movq	ORIG_RAX(%rsp), %r12	/* survives frame registration */
 	movq	$-1, ORIG_RAX(%rsp)	/* no syscall to restart */
+	HDN_FRAME_ENTER HDN_RAP_FRAME_PARANOID, \vector
 
 	movq	%rsp, %rdi		/* pt_regs pointer */
+	movq	%r12, %rsi
 
-	call	kernel_\cfunc
+	HDN_C_CALL kernel_\cfunc
 
 	/*
 	 * No need to switch back to the IST stack. The current stack is either
@@ -503,7 +593,7 @@ SYM_CODE_START(\asmsym)
 
 	/* Switch to the regular task stack */
 .Lfrom_usermode_switch_stack_\@:
-	idtentry_body user_\cfunc, has_error_code=1
+	idtentry_body user_\cfunc, has_error_code=1, vector=\vector
 
 _ASM_NOKPROBE(\asmsym)
 SYM_CODE_END(\asmsym)
@@ -517,6 +607,7 @@ SYM_CODE_END(\asmsym)
  */
 .macro idtentry_df vector asmsym cfunc
 SYM_CODE_START(\asmsym)
+	HDN_KEXEC_FUNC \asmsym, 34
 	UNWIND_HINT_IRET_ENTRY offset=8
 	ENDBR
 	ASM_CLAC
@@ -526,13 +617,15 @@ SYM_CODE_START(\asmsym)
 	call	paranoid_entry
 	UNWIND_HINT_REGS
 
-	movq	%rsp, %rdi		/* pt_regs pointer into first argument */
-	movq	ORIG_RAX(%rsp), %rsi	/* get error code into 2nd argument*/
+	movq	ORIG_RAX(%rsp), %r12	/* survives frame registration */
 	movq	$-1, ORIG_RAX(%rsp)	/* no syscall to restart */
+	HDN_FRAME_ENTER HDN_RAP_FRAME_PARANOID, \vector
+	movq	%rsp, %rdi		/* pt_regs pointer into first argument */
+	movq	%r12, %rsi
 
 	/* For some configurations \cfunc ends up being a noreturn. */
 	ANNOTATE_REACHABLE
-	call	\cfunc
+	HDN_C_CALL \cfunc
 
 	jmp	paranoid_exit
 
@@ -557,6 +650,7 @@ __irqentry_text_end:
 	ANNOTATE_NOENDBR
 
 SYM_CODE_START_LOCAL(common_interrupt_return)
+	HDN_KEXEC_FUNC common_interrupt_return, 40
 SYM_INNER_LABEL(swapgs_restore_regs_and_return_to_usermode, SYM_L_GLOBAL)
 	IBRS_EXIT
 #ifdef CONFIG_XEN_PV
@@ -742,17 +836,20 @@ _ASM_NOKPROBE(common_interrupt_return)
  *
  * Is in entry.text as it shouldn't be instrumented.
  */
-SYM_FUNC_START(asm_load_gs_index)
-	ANNOTATE_NOENDBR
+SYM_TYPED_FUNC_START(asm_load_gs_index)
+	HDN_TYPED_FUNC_ENTER asm_load_gs_index
 	FRAME_BEGIN
 	swapgs
 .Lgs_change:
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+SYM_INNER_LABEL(__hdn_rap_gs_change, SYM_L_GLOBAL)
+#endif
 	ANNOTATE_NOENDBR // error_entry
 	movl	%edi, %gs
 2:	ALTERNATIVE "", "mfence", X86_BUG_SWAPGS_FENCE
 	swapgs
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 	/* running with kernelgs */
 .Lbad_gs:
@@ -866,6 +963,7 @@ SYM_CODE_END(xen_failsafe_callback)
  * R15 - old SPEC_CTRL
  */
 SYM_CODE_START(paranoid_entry)
+	HDN_KEXEC_FUNC paranoid_entry, 38
 	ANNOTATE_NOENDBR
 	UNWIND_HINT_FUNC
 	PUSH_AND_CLEAR_REGS save_ret=1
@@ -963,7 +1061,9 @@ SYM_CODE_END(paranoid_entry)
  * R15 - old SPEC_CTRL
  */
 SYM_CODE_START_LOCAL(paranoid_exit)
+	HDN_KEXEC_FUNC paranoid_exit, 39
 	UNWIND_HINT_REGS
+	HDN_FRAME_EXIT HDN_RAP_FRAME_PARANOID
 
 	/*
 	 * Must restore IBRS state before both CR3 and %GS since we need access
@@ -1002,6 +1102,7 @@ SYM_CODE_END(paranoid_exit)
  * Switch GS and CR3 if needed.
  */
 SYM_CODE_START(error_entry)
+	HDN_KEXEC_FUNC error_entry, 37
 	ANNOTATE_NOENDBR
 	UNWIND_HINT_FUNC
 
@@ -1022,9 +1123,15 @@ SYM_CODE_START(error_entry)
 	IBRS_ENTER
 	UNTRAIN_RET_FROM_CALL
 
+	HDN_ENTRY_ROOT
 	leaq	8(%rsp), %rdi			/* arg0 = pt_regs pointer */
 	/* Put us onto the real thread stack. */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	HDN_C_CALL sync_regs
+	HDN_ENTRY_ROOT_RETURN
+#else
 	jmp	sync_regs
+#endif
 
 	/*
 	 * There are two places in the kernel that can potentially fault with
@@ -1075,20 +1182,28 @@ SYM_CODE_START(error_entry)
 	SWITCH_TO_KERNEL_CR3 scratch_reg=%rax
 	IBRS_ENTER
 	UNTRAIN_RET_FROM_CALL
+	HDN_ENTRY_ROOT
 
 	/*
 	 * Pretend that the exception came from user mode: set up pt_regs
 	 * as if we faulted immediately after IRET.
 	 */
 	leaq	8(%rsp), %rdi			/* arg0 = pt_regs pointer */
-	call	fixup_bad_iret
+	HDN_C_CALL fixup_bad_iret
 	mov	%rax, %rdi
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	HDN_C_CALL sync_regs
+	HDN_ENTRY_ROOT_RETURN
+#else
 	jmp	sync_regs
+#endif
 SYM_CODE_END(error_entry)
 
 SYM_CODE_START_LOCAL(error_return)
+	HDN_KEXEC_FUNC error_return, 36
 	UNWIND_HINT_REGS
 	DEBUG_ENTRY_ASSERT_IRQS_OFF
+	HDN_FRAME_EXIT HDN_RAP_FRAME_IDT
 	testb	$3, CS(%rsp)
 	jz	restore_regs_and_return_to_kernel
 	jmp	swapgs_restore_regs_and_return_to_usermode
@@ -1103,6 +1218,7 @@ SYM_CODE_END(error_return)
  *	      when MITIGATION_PAGE_TABLE_ISOLATION is in use.  Do not clobber.
  */
 SYM_CODE_START(asm_exc_nmi)
+	HDN_KEXEC_FUNC asm_exc_nmi, 41
 	UNWIND_HINT_IRET_ENTRY
 	ENDBR
 
@@ -1190,7 +1306,7 @@ SYM_CODE_START(asm_exc_nmi)
 	 */
 
 	movq	%rsp, %rdi
-	call	exc_nmi
+	HDN_C_CALL exc_nmi
 
 	/*
 	 * Return back to user mode.  We must *not* do the normal exit
@@ -1354,6 +1470,9 @@ first_nmi:
 #endif
 
 repeat_nmi:
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+SYM_INNER_LABEL(__hdn_rap_repeat_nmi, SYM_L_GLOBAL)
+#endif
 	ANNOTATE_NOENDBR // this code
 	/*
 	 * If there was a nested NMI, the first NMI's iret will return
@@ -1401,9 +1520,11 @@ end_repeat_nmi:
 	 */
 	call	paranoid_entry
 	UNWIND_HINT_REGS
+	HDN_FRAME_ENTER HDN_RAP_FRAME_NMI, X86_TRAP_NMI
 
 	movq	%rsp, %rdi
-	call	exc_nmi
+	HDN_C_CALL exc_nmi
+	HDN_FRAME_EXIT HDN_RAP_FRAME_NMI
 
 	/* Always restore stashed SPEC_CTRL value (see paranoid_entry) */
 	IBRS_EXIT save_reg=%r15
@@ -1472,6 +1593,7 @@ SYM_CODE_END(asm_exc_nmi)
  * MSRs to fully disable 32-bit SYSCALL.
  */
 SYM_CODE_START(entry_SYSCALL32_ignore)
+	HDN_KEXEC_FUNC entry_SYSCALL32_ignore, 43
 	UNWIND_HINT_END_OF_STACK
 	ENDBR
 	mov	$-ENOSYS, %eax
@@ -1483,15 +1605,29 @@ SYM_CODE_END(entry_SYSCALL32_ignore)
 	__FUNC_ALIGN
 SYM_CODE_START_NOALIGN(rewind_stack_and_make_dead)
 	UNWIND_HINT_FUNC
+	HDN_DIRECT_FUNC_ENTER rewind_stack_and_make_dead, 0
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	cli
+	movl	%edi, %r12d
+	movq	%rsp, %rdi
+	subq	$8, %rsp
+	HDN_C_CALL hdn_rap_fatal_rewind
+	xorl	%ebp, %ebp
+	movq	%rax, %rsp
+	movl	%r12d, %edi
+#else
 	/* Prevent any naive code from trying to unwind to our caller. */
 	xorl	%ebp, %ebp
 
 	movq	PER_CPU_VAR(cpu_current_top_of_stack), %rax
 	leaq	-PTREGS_SIZE(%rax), %rsp
+#endif
 	UNWIND_HINT_REGS
 
-	call	make_task_dead
+	HDN_C_CALL make_task_dead
+	ud2
 SYM_CODE_END(rewind_stack_and_make_dead)
+_ASM_NOKPROBE(rewind_stack_and_make_dead)
 .popsection
 
 /*
@@ -1529,6 +1665,7 @@ SYM_CODE_END(rewind_stack_and_make_dead)
  * that all RETs are in the second half of a cacheline to mitigate Indirect
  * Target Selection, rather than taking the slowpath via its_return_thunk.
  */
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 SYM_FUNC_START(clear_bhb_loop)
 	ANNOTATE_NOENDBR
 	push	%rbp
@@ -1568,3 +1705,4 @@ SYM_FUNC_START(clear_bhb_loop)
 SYM_FUNC_END(clear_bhb_loop)
 EXPORT_SYMBOL_FOR_KVM(clear_bhb_loop)
 STACK_FRAME_NON_STANDARD(clear_bhb_loop)
+#endif

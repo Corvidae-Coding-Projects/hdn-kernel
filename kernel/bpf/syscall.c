@@ -1935,6 +1935,18 @@ free_key:
 	return err;
 }
 
+/* Validate the complete extent before a batch can publish partial changes. */
+static int bpf_batch_check_extent(const void __user *base, u32 count, u32 width)
+{
+	size_t bytes;
+	unsigned long end;
+
+	if (check_mul_overflow((size_t)count, (size_t)width, &bytes) ||
+	    check_add_overflow((unsigned long)base, bytes, &end))
+		return -EOVERFLOW;
+	return 0;
+}
+
 int generic_map_delete_batch(struct bpf_map *map,
 			     const union bpf_attr *attr,
 			     union bpf_attr __user *uattr)
@@ -1959,13 +1971,17 @@ int generic_map_delete_batch(struct bpf_map *map,
 	if (put_user(0, &uattr->batch.count))
 		return -EFAULT;
 
+	err = bpf_batch_check_extent(keys, max_count, map->key_size);
+	if (err)
+		return err;
+
 	key = kvmalloc(map->key_size, GFP_USER | __GFP_NOWARN);
 	if (!key)
 		return -ENOMEM;
 
 	for (cp = 0; cp < max_count; cp++) {
 		err = -EFAULT;
-		if (copy_from_user(key, keys + cp * map->key_size,
+		if (copy_from_user(key, keys + (size_t)cp * map->key_size,
 				   map->key_size))
 			break;
 
@@ -2015,6 +2031,12 @@ int generic_map_update_batch(struct bpf_map *map, struct file *map_file,
 	if (put_user(0, &uattr->batch.count))
 		return -EFAULT;
 
+	err = bpf_batch_check_extent(keys, max_count, map->key_size);
+	if (!err)
+		err = bpf_batch_check_extent(values, max_count, value_size);
+	if (err)
+		return err;
+
 	key = kvmalloc(map->key_size, GFP_USER | __GFP_NOWARN);
 	if (!key)
 		return -ENOMEM;
@@ -2027,9 +2049,9 @@ int generic_map_update_batch(struct bpf_map *map, struct file *map_file,
 
 	for (cp = 0; cp < max_count; cp++) {
 		err = -EFAULT;
-		if (copy_from_user(key, keys + cp * map->key_size,
+		if (copy_from_user(key, keys + (size_t)cp * map->key_size,
 		    map->key_size) ||
-		    copy_from_user(value, values + cp * value_size, value_size))
+		    copy_from_user(value, values + (size_t)cp * value_size, value_size))
 			break;
 
 		err = bpf_map_update_value(map, map_file, key, value,
@@ -2074,11 +2096,18 @@ int generic_map_lookup_batch(struct bpf_map *map,
 	if (put_user(0, &uattr->batch.count))
 		return -EFAULT;
 
+	err = bpf_batch_check_extent(keys, max_count, map->key_size);
+	if (!err)
+		err = bpf_batch_check_extent(values, max_count, value_size);
+	if (err)
+		return err;
+
 	buf_prevkey = kvmalloc(map->key_size, GFP_USER | __GFP_NOWARN);
 	if (!buf_prevkey)
 		return -ENOMEM;
 
-	buf = kvmalloc(map->key_size + value_size, GFP_USER | __GFP_NOWARN);
+	buf = kvmalloc(size_add(map->key_size, value_size),
+		       GFP_USER | __GFP_NOWARN);
 	if (!buf) {
 		kvfree(buf_prevkey);
 		return -ENOMEM;
@@ -2108,12 +2137,12 @@ int generic_map_lookup_batch(struct bpf_map *map,
 		if (err)
 			goto free_buf;
 
-		if (copy_to_user(keys + cp * map->key_size, key,
+		if (copy_to_user(keys + (size_t)cp * map->key_size, key,
 				 map->key_size)) {
 			err = -EFAULT;
 			goto free_buf;
 		}
-		if (copy_to_user(values + cp * value_size, value, value_size)) {
+		if (copy_to_user(values + (size_t)cp * value_size, value, value_size)) {
 			err = -EFAULT;
 			goto free_buf;
 		}

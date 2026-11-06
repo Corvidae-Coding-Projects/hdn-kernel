@@ -15,6 +15,7 @@
 
 #include <linux/linkage.h>
 #include <asm/frame.h>
+#include <asm/hdn_rap.h>
 
 .section	.rodata.cst16.bswap_mask, "aM", @progbits, 16
 .align 16
@@ -44,6 +45,7 @@
  *	T3
  */
 SYM_FUNC_START_LOCAL(__clmul_gf128mul_ble)
+	HDN_PRIVATE_FUNC_ENTER __clmul_gf128mul_ble
 	movaps DATA, T1
 	pshufd $0b01001110, DATA, T2
 	pshufd $0b01001110, SHASH, T3
@@ -85,21 +87,22 @@ SYM_FUNC_START_LOCAL(__clmul_gf128mul_ble)
 	psrlq $1, T2
 	pxor T2, T1
 	pxor T1, DATA
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(__clmul_gf128mul_ble)
 
 /* void clmul_ghash_mul(char *dst, const le128 *shash) */
 SYM_FUNC_START(clmul_ghash_mul)
+	HDN_DIRECT_FUNC_ENTER clmul_ghash_mul
 	FRAME_BEGIN
 	movups (%rdi), DATA
 	movups (%rsi), SHASH
 	movaps .Lbswap_mask(%rip), BSWAP
 	pshufb BSWAP, DATA
-	call __clmul_gf128mul_ble
+	HDN_C_CALL __clmul_gf128mul_ble
 	pshufb BSWAP, DATA
 	movups DATA, (%rdi)
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(clmul_ghash_mul)
 
 /*
@@ -107,6 +110,7 @@ SYM_FUNC_END(clmul_ghash_mul)
  *			  const le128 *shash);
  */
 SYM_FUNC_START(clmul_ghash_update)
+	HDN_DIRECT_FUNC_ENTER clmul_ghash_update
 	FRAME_BEGIN
 	cmp $16, %rdx
 	jb .Lupdate_just_ret	# check length
@@ -119,7 +123,7 @@ SYM_FUNC_START(clmul_ghash_update)
 	movups (%rsi), IN1
 	pshufb BSWAP, IN1
 	pxor IN1, DATA
-	call __clmul_gf128mul_ble
+	HDN_C_CALL __clmul_gf128mul_ble
 	sub $16, %rdx
 	add $16, %rsi
 	cmp $16, %rdx
@@ -129,5 +133,5 @@ SYM_FUNC_START(clmul_ghash_update)
 .Lupdate_just_ret:
 	mov %rdx, %rax
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(clmul_ghash_update)

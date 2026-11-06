@@ -22,6 +22,7 @@
 #include <linux/types.h>
 #include <linux/rseq_types.h>
 #include <linux/bitmap.h>
+#include <uapi/linux/hardening.h>
 
 #include <asm/mmu.h>
 
@@ -1298,6 +1299,9 @@ struct mm_struct {
 		u64 hardening_exec_ino;
 		u64 hardening_exec_profile_id;
 		u64 hardening_exec_memory_flags;
+		u64 hardening_compat_epoch;
+		char hardening_compat_path[HDN_POLICY_PATH_LEN];
+		bool hardening_compat_revoked;
 		bool hardening_exec_privileged;
 		bool hardening_exec_profile_pinned;
 		bool hardening_privileged_lineage;

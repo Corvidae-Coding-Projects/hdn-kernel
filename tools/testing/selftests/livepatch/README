@@ -54,3 +54,35 @@ check_result().  The latter function greps the kernel's ring buffer for
 those strings for result comparison.  Other utility functions include
 general module loading and livepatch loading helpers (waiting for patch
 transitions, sysfs entries, etc.)
+
+HDN delayed relocation fixture (not part of automatic TEST_PROGS)
+--------------------------------------------------------------
+Build test_modules against a CONFIG_SECURITY_HARDENING_PGTABLE=y,
+CONFIG_LIVEPATCH=y kernel. Preserve the unsigned test_hdn_klp_patch.ko, then run:
+
+  python3 make-hdn-relocs.py test_modules/test_hdn_klp_patch.ko /tmp/hdn-klp-good.ko
+
+Sign that output and test_hdn_klp_target.ko with the disposable guest's trusted
+module key, using that kernel's scripts/sign-file. Do not alter a signed module.
+Inside the disposable guest run:
+
+  bash test-hdn-relocs.sh /path/hdn-klp-good.ko /path/test_hdn_klp_target.ko
+
+The fixture checks values through actual module callbacks, not just successful
+insertion: one readonly pointer and one eight-byte pointer crossing a page at
+an unaligned offset must resolve to the same unexported target. An initial
+post-binding callback failure must leave the target unloaded and the journal
+clear; two subsequent target loads must bind successfully. The three callback
+observations are counted through a read-only module parameter. No force-unload
+or livepatch force-transition operation is used.
+
+The converter also writes separate --mode bounds, overlap, metadata and missing
+variants. Rewrite the original unsigned file separately for every case, then
+sign each output. Bounds/overlap/metadata variants must reject patch insertion
+without leaving the patch module loaded. Metadata mode requires RAP metadata in
+the input. Missing must load the patch while the target is absent, reject target
+insertion with zero binding_count, and permit disabling/removing the patch.
+After each rejection, load the valid pair to establish that failure did not
+poison later admission. Run the existing livepatch/callback/syscall/replace
+suites as regression coverage, including a profile with PGTABLE disabled.
+These fixtures and commands have been written but have not been executed.

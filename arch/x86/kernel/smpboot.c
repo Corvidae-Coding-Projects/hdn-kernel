@@ -41,6 +41,7 @@
 
 #include <linux/init.h>
 #include <linux/smp.h>
+#include <asm/hdn_stack_mm.h>
 #include <linux/export.h>
 #include <linux/sched.h>
 #include <linux/sched/topology.h>
@@ -226,7 +227,8 @@ static void ap_calibrate_delay(void)
 /*
  * Activate a secondary processor.
  */
-static void notrace __noendbr start_secondary(void *unused)
+void notrace __noendbr start_secondary(void *unused);
+void notrace __noendbr start_secondary(void *unused)
 {
 	/*
 	 * Don't put *anything* except direct CPU state initialization
@@ -1006,6 +1008,9 @@ static int do_boot_cpu(u32 apicid, unsigned int cpu, struct task_struct *idle)
 		start_ip = real_mode_header->trampoline_start64;
 #endif
 	idle->thread.sp = (unsigned long)task_pt_regs(idle);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_stack_mm_cpu_prepare(cpu, idle);
+#endif
 	initial_code = (unsigned long)start_secondary;
 
 	if (IS_ENABLED(CONFIG_X86_32)) {

@@ -14,6 +14,8 @@
 #define HDN_ELF_NOTE_MEMORY_ABI_VERSION 1
 #define HDN_PROFILE_DEFAULT 1
 #define HDN_PROFILE_PRIVILEGED 2
+/* Reserved kernel result; signed policies cannot define this profile. */
+#define HDN_PROFILE_REVOKED (~0ULL)
 #define HDN_MAX_PROFILES 256
 #define HDN_MAX_SUBJECT_RULES 1024
 #define HDN_MAX_OBJECT_RULES 1024
@@ -25,6 +27,62 @@
 #define HDN_MAX_POLICY_SIZE (1024 * 1024)
 #define HDN_POLICY_EXPECT_ANY (~0ULL)
 #define HDN_RESOURCE_LIMIT_INFINITY (~0ULL)
+
+#define HDN_CAPABILITY_ABI_VERSION 1
+/* Append only: invariants, not architecture mechanisms. */
+#define HDN_CAPABILITY_LIST(X) \
+	X(KERNEL_WX, kernel_wx) \
+	X(STATIC_ALIASES, static_aliases) \
+	X(EXECMEM_ALIASES, execmem_aliases) \
+	X(DESCRIPTOR_ALIASES, descriptor_aliases) \
+	X(PAGE_TABLE_ALIASES, page_table_aliases) \
+	X(FIRMWARE_WX, firmware_wx) \
+	X(INIT_RETIREMENT, init_retirement) \
+	X(USER_ACCESS, user_access) \
+	X(ACCESS_WINDOW_VALIDATION, access_window_validation) \
+	X(FORWARD_CFI, forward_cfi) \
+	X(RETURN_CFI, return_cfi) \
+	X(IMMUTABLE_POLICY, immutable_policy) \
+	X(PRIVATE_STACK_ALIASES, private_stack_aliases) \
+	X(BPF_DOMAIN, bpf_domain) \
+	X(BPF_RETIREMENT, bpf_retirement) \
+	X(TRANSIENT_DATAFLOW, transient_dataflow) \
+	X(SLAB_LAYOUT, slab_layout) \
+	X(TYPED_SLAB, typed_slab) \
+	X(CRITICAL_JITTER, critical_jitter) \
+	X(SYSFS_VIEW, sysfs_view)
+
+enum hdn_capability_id {
+#define HDN_CAP_ENUM(symbol, name) HDN_CAP_##symbol,
+	HDN_CAPABILITY_LIST(HDN_CAP_ENUM)
+#undef HDN_CAP_ENUM
+	HDN_CAP__MAX,
+};
+#define HDN_CAP_REQUIRED(id) (1U << (id))
+#define HDN_CAP_KNOWN_MASK ((1U << HDN_CAP__MAX) - 1)
+
+enum hdn_capability_state {
+	HDN_CAP_UNDECLARED = 0,
+	HDN_CAP_UNSUPPORTED = 1,
+	HDN_CAP_DISABLED = 2,
+	HDN_CAP_INITIALIZING = 3,
+	HDN_CAP_DEGRADED = 4,
+	HDN_CAP_ENFORCED = 5,
+	HDN_CAP_NOT_APPLICABLE = 6,
+};
+
+enum hdn_capability_backing {
+	HDN_CAP_BACKING_NONE = 0,
+	HDN_CAP_BACKING_HARDWARE = 1,
+	HDN_CAP_BACKING_SOFTWARE = 2,
+	HDN_CAP_BACKING_HYBRID = 3,
+};
+
+struct hdn_capability_record {
+	__u16 id;
+	__u8 state;
+	__u8 backing;
+};
 
 #define HDN_AUTHORITY_WORD_BITS 64
 #define HDN_AUTHORITY_WORDS 2
@@ -237,6 +295,12 @@ enum hdn_transition {
 	HDN_TRANS_CAPABILITY = 103,
 	HDN_TRANS_EXEC_INHERIT = 104,
 	HDN_TRANS_POLICY_REFRESH = 105,
+	HDN_TRANS_KERNEL_MAPPING = 106,
+	HDN_TRANS_KERNEL_TEXT = 107,
+	HDN_TRANS_KERNEL_SEAL = 108,
+	HDN_TRANS_KERNEL_DESCRIPTOR = 109,
+	HDN_TRANS_KERNEL_UACCESS = 110,
+	HDN_TRANS_KERNEL_ALLOC = 111,
 	HDN_TRANS__MAX,
 };
 
@@ -347,6 +411,12 @@ enum hdn_event_id {
 	HDN_EVENT_ID_CAPABILITY = HDN_TRANS_CAPABILITY,
 	HDN_EVENT_ID_EXEC_INHERIT = HDN_TRANS_EXEC_INHERIT,
 	HDN_EVENT_ID_POLICY_REFRESH = HDN_TRANS_POLICY_REFRESH,
+	HDN_EVENT_ID_KERNEL_MAPPING = HDN_TRANS_KERNEL_MAPPING,
+	HDN_EVENT_ID_KERNEL_TEXT = HDN_TRANS_KERNEL_TEXT,
+	HDN_EVENT_ID_KERNEL_SEAL = HDN_TRANS_KERNEL_SEAL,
+	HDN_EVENT_ID_KERNEL_DESCRIPTOR = HDN_TRANS_KERNEL_DESCRIPTOR,
+	HDN_EVENT_ID_KERNEL_UACCESS = HDN_TRANS_KERNEL_UACCESS,
+	HDN_EVENT_ID_KERNEL_ALLOC = HDN_TRANS_KERNEL_ALLOC,
 };
 
 enum hdn_decision_action {
@@ -360,6 +430,8 @@ enum hdn_decision_action {
 enum hdn_event_flags {
 	HDN_EVENT_RESPONSE_KILL_TASK = 1ULL << 0,
 	HDN_EVENT_CHROOTED = 1ULL << 1,
+	/* Kernel transition delivered later; timestamp is delivery time. */
+	HDN_EVENT_DEFERRED_KERNEL = 1ULL << 2,
 };
 
 enum hdn_reason {
@@ -426,6 +498,23 @@ enum hdn_reason {
 	HDN_REASON_RELRO_WRITE = 60,
 	HDN_REASON_USERNS_DEPTH = 61,
 	HDN_REASON_POLICY_IDENTITY_MISMATCH = 62,
+	HDN_REASON_KERNEL_WX_MAPPING = 63,
+	HDN_REASON_KERNEL_TEXT_PATCH = 64,
+	HDN_REASON_KERNEL_TEXT_DEBUGGER = 65,
+	HDN_REASON_KERNEL_TEXT_CONSTRUCT = 66,
+	HDN_REASON_KERNEL_TEXT_TRAP_FILL = 67,
+	HDN_REASON_KERNEL_TEXT_STATE = 68,
+	HDN_REASON_KERNEL_SEAL_STATE = 69,
+	HDN_REASON_KERNEL_PAGE_CONSTRUCT = 70,
+	HDN_REASON_KERNEL_PAGE_FINALIZE = 71,
+	HDN_REASON_KERNEL_PAGE_RETIRE = 72,
+	HDN_REASON_KERNEL_GDT_UPDATE = 73,
+	HDN_REASON_KERNEL_GDT_LTR = 74,
+	HDN_REASON_KERNEL_SMAP_RESTORED = 75,
+	HDN_REASON_KERNEL_OBJECT_CORRUPTION = 76,
+	HDN_REASON_APPLICATION_RESTART_REQUIRED = 77,
+	HDN_REASON_CONTROL_FLOW_VIOLATION = 78,
+	HDN_REASON_KERNEL_USER_ACCESS_DENIED = 79,
 };
 
 enum hdn_phase {
@@ -472,7 +561,17 @@ enum hdn_profile_flags {
 	HDN_PROFILE_AUDIT_PROCESS_ACCOUNT = 1ULL << 8,
 	HDN_PROFILE_PROTECT_SHM = 1ULL << 9,
 	HDN_PROFILE_INHERIT_UNMATCHED_EXEC = 1ULL << 10,
+	HDN_PROFILE_HIDE_SYSFS_KERNEL = 1ULL << 11,
+	HDN_PROFILE_HIDE_SYSFS_FIRMWARE = 1ULL << 12,
+	HDN_PROFILE_HIDE_SYSFS_DEVICES = 1ULL << 13,
+	HDN_PROFILE_HIDE_SYSFS_MODULES = 1ULL << 14,
 };
+
+/* Visibility class v1: closed node families, never application path globs. */
+#define HDN_SYSFS_VISIBILITY_VERSION 1
+#define HDN_PROFILE_SYSFS_MASK (HDN_PROFILE_HIDE_SYSFS_KERNEL | \
+	HDN_PROFILE_HIDE_SYSFS_FIRMWARE | HDN_PROFILE_HIDE_SYSFS_DEVICES | \
+	HDN_PROFILE_HIDE_SYSFS_MODULES)
 
 enum hdn_exec_rule_flags {
 	HDN_EXEC_MATCH_FILE_ID = 1ULL << 0,
@@ -482,6 +581,8 @@ enum hdn_exec_rule_flags {
 	HDN_EXEC_RESOLVE_ORIGINAL_PATH = 1ULL << 4,
 	HDN_EXEC_INHERIT_PROFILE = 1ULL << 5,
 	HDN_EXEC_AUDIT_INHERIT = 1ULL << 6,
+	/* Exact path + inode + verity; expires on every policy publication. */
+	HDN_EXEC_COMPAT_LEASE = 1ULL << 7,
 };
 
 enum hdn_subject_rule_flags {
@@ -578,7 +679,7 @@ struct hdn_policy_header {
 	__u32 header_size;
 	__u32 profile_size;
 	__u32 profile_count;
-	__u32 flags;
+	__u32 flags; /* Required HDN_CAP_REQUIRED() invariants; zero is compatible. */
 	__u32 subject_rule_size;
 	__u32 subject_rule_count;
 	__u32 object_rule_size;

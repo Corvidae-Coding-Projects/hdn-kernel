@@ -15,7 +15,14 @@
 #ifdef CONFIG_HAVE_FENTRY
 # include <asm/ibt.h>
 /* Add offset for endbr64 if IBT enabled */
-# define FTRACE_MCOUNT_MAX_OFFSET	ENDBR_INSN_SIZE
+# ifdef CONFIG_SECURITY_HARDENING_RAP
+/* R11 LEA + entry CALL, then the fentry CALL's R10 LEA. Objtool checks
+ * these instructions and their exact continuations before linking. */
+#  define HDN_RAP_FENTRY_PREFIX_SIZE 19
+#  define FTRACE_MCOUNT_MAX_OFFSET (ENDBR_INSN_SIZE + HDN_RAP_FENTRY_PREFIX_SIZE)
+# else
+#  define FTRACE_MCOUNT_MAX_OFFSET ENDBR_INSN_SIZE
+# endif
 #endif
 
 #ifdef CONFIG_DYNAMIC_FTRACE
@@ -24,6 +31,9 @@
 
 #ifndef __ASSEMBLER__
 extern void __fentry__(void);
+#if defined(CONFIG_SECURITY_HARDENING_RAP) && !defined(CONFIG_DYNAMIC_FTRACE)
+void hdn_ftrace_dispatch(unsigned long ip, unsigned long parent_ip);
+#endif
 
 static inline unsigned long ftrace_call_adjust(unsigned long addr)
 {
@@ -36,6 +46,9 @@ static inline unsigned long ftrace_call_adjust(unsigned long addr)
 
 static inline unsigned long arch_ftrace_get_symaddr(unsigned long fentry_ip)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	fentry_ip -= HDN_RAP_FENTRY_PREFIX_SIZE;
+#endif
 	if (is_endbr((void*)(fentry_ip - ENDBR_INSN_SIZE)))
 		fentry_ip -= ENDBR_INSN_SIZE;
 

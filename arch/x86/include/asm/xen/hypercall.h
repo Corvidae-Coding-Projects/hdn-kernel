@@ -47,6 +47,7 @@
 #include <asm/page.h>
 #include <asm/smap.h>
 #include <asm/nospec-branch.h>
+#include <asm/xen/hypercall_types.h>
 
 #include <xen/interface/xen.h>
 #include <xen/interface/sched.h>
@@ -88,9 +89,30 @@ struct xen_dm_op_buf;
  * there aren't more than 5 arguments...)
  */
 
-void xen_hypercall_func(void);
 DECLARE_STATIC_CALL(xen_hypercall, xen_hypercall_func);
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+static __always_inline long xen_single_call(unsigned int call,
+		unsigned long a1, unsigned long a2, unsigned long a3,
+		unsigned long a4, unsigned long a5)
+{
+	return static_call_mod(xen_hypercall)(call, a1, a2, a3, a4, a5);
+}
+
+#define _hypercall0(type, name) \
+	((type)xen_single_call(__HYPERVISOR_##name, 0, 0, 0, 0, 0))
+#define _hypercall1(type, name, a1) \
+	((type)xen_single_call(__HYPERVISOR_##name, (unsigned long)(a1), 0, 0, 0, 0))
+#define _hypercall2(type, name, a1, a2) \
+	((type)xen_single_call(__HYPERVISOR_##name, (unsigned long)(a1), \
+		(unsigned long)(a2), 0, 0, 0))
+#define _hypercall3(type, name, a1, a2, a3) \
+	((type)xen_single_call(__HYPERVISOR_##name, (unsigned long)(a1), \
+		(unsigned long)(a2), (unsigned long)(a3), 0, 0))
+#define _hypercall4(type, name, a1, a2, a3, a4) \
+	((type)xen_single_call(__HYPERVISOR_##name, (unsigned long)(a1), \
+		(unsigned long)(a2), (unsigned long)(a3), (unsigned long)(a4), 0))
+#else
 #ifdef MODULE
 #define __ADDRESSABLE_xen_hypercall
 #else
@@ -225,6 +247,7 @@ xen_single_call(unsigned int call,
 
 	return (long)__res;
 }
+#endif /* CONFIG_SECURITY_HARDENING_RAP */
 
 static __always_inline void __xen_stac(void)
 {

@@ -36,7 +36,11 @@
 #include <asm/msr.h>
 
 /* stub always returning 0. */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+noinstr unsigned long paravirt_ret0(void) { return 0; }
+#else
 DEFINE_ASM_FUNC(paravirt_ret0, "xor %eax,%eax", .entry.text);
+#endif
 
 void __init default_banner(void)
 {
@@ -50,11 +54,19 @@ void pv_native_irq_disable(void);
 void pv_native_irq_enable(void);
 unsigned long pv_native_read_cr2(void);
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+noinstr u64 _paravirt_ident_64(u64 value) { return value; }
+noinstr unsigned long pv_native_save_fl(void) { return native_save_fl(); }
+noinstr void pv_native_irq_disable(void) { native_irq_disable(); }
+noinstr void pv_native_irq_enable(void) { native_irq_enable(); }
+noinstr unsigned long pv_native_read_cr2(void) { return native_read_cr2(); }
+#else
 DEFINE_ASM_FUNC(_paravirt_ident_64, "mov %rdi, %rax", .text);
 DEFINE_ASM_FUNC(pv_native_save_fl, "pushf; pop %rax", .noinstr.text);
 DEFINE_ASM_FUNC(pv_native_irq_disable, "cli", .noinstr.text);
 DEFINE_ASM_FUNC(pv_native_irq_enable, "sti", .noinstr.text);
 DEFINE_ASM_FUNC(pv_native_read_cr2, "mov %cr2, %rax", .noinstr.text);
+#endif
 #endif
 
 static noinstr void pv_native_safe_halt(void)
@@ -97,7 +109,25 @@ struct pv_info pv_info = {
 };
 
 /* 64-bit pagetable entries */
-#define PTE_IDENT	__PV_IS_CALLEE_SAVE(_paravirt_ident_64)
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+#define PTE_MAKE_IDENT(level) __PV_IS_CALLEE_SAVE(native_make_##level)
+#define PTE_VALUE_IDENT(level) __PV_IS_CALLEE_SAVE(native_##level##_val)
+/* A void(void) nop is not a valid replacement for a different C signature. */
+#define HDN_PV_NOP(name) name
+static noinstr void pv_nop_mm(struct mm_struct *mm) { }
+static noinstr void pv_nop_enc(unsigned long pfn, int pages, bool enc) { }
+#ifdef CONFIG_PARAVIRT_XXL
+static noinstr void pv_nop_ldt(struct desc_struct *ldt, unsigned int entries) { }
+static noinstr void pv_nop_task(struct task_struct *task) { }
+static noinstr void pv_nop_pgd(struct mm_struct *mm, pgd_t *pgd) { }
+static noinstr void pv_nop_alloc(struct mm_struct *mm, unsigned long pfn) { }
+static noinstr void pv_nop_release(unsigned long pfn) { }
+#endif
+#else
+#define PTE_MAKE_IDENT(level) __PV_IS_CALLEE_SAVE(_paravirt_ident_64)
+#define PTE_VALUE_IDENT(level) __PV_IS_CALLEE_SAVE(_paravirt_ident_64)
+#define HDN_PV_NOP(name) paravirt_nop
+#endif
 
 struct paravirt_patch_template pv_ops = {
 	/* Cpu ops. */
@@ -126,8 +156,8 @@ struct paravirt_patch_template pv_ops = {
 	.cpu.write_gdt_entry	= native_write_gdt_entry,
 	.cpu.write_idt_entry	= native_write_idt_entry,
 
-	.cpu.alloc_ldt		= paravirt_nop,
-	.cpu.free_ldt		= paravirt_nop,
+	.cpu.alloc_ldt		= HDN_PV_NOP(pv_nop_ldt),
+	.cpu.free_ldt		= HDN_PV_NOP(pv_nop_ldt),
 
 	.cpu.load_sp0		= native_load_sp0,
 
@@ -136,8 +166,8 @@ struct paravirt_patch_template pv_ops = {
 	.cpu.update_io_bitmap		= native_tss_update_io_bitmap,
 #endif
 
-	.cpu.start_context_switch	= paravirt_nop,
-	.cpu.end_context_switch		= paravirt_nop,
+	.cpu.start_context_switch	= HDN_PV_NOP(pv_nop_task),
+	.cpu.end_context_switch		= HDN_PV_NOP(pv_nop_task),
 
 	/* Irq ops. */
 	.irq.save_fl		= __PV_IS_CALLEE_SAVE(pv_native_save_fl),
@@ -155,8 +185,8 @@ struct paravirt_patch_template pv_ops = {
 	.mmu.flush_tlb_one_user	= native_flush_tlb_one_user,
 	.mmu.flush_tlb_multi	= native_flush_tlb_multi,
 
-	.mmu.exit_mmap		= paravirt_nop,
-	.mmu.notify_page_enc_status_changed	= paravirt_nop,
+	.mmu.exit_mmap		= HDN_PV_NOP(pv_nop_mm),
+	.mmu.notify_page_enc_status_changed	= HDN_PV_NOP(pv_nop_enc),
 
 #ifdef CONFIG_PARAVIRT_XXL
 	.mmu.read_cr2		= __PV_IS_CALLEE_SAVE(pv_native_read_cr2),
@@ -165,16 +195,16 @@ struct paravirt_patch_template pv_ops = {
 	.mmu.write_cr3		= pv_native_write_cr3,
 
 	.mmu.pgd_alloc		= __paravirt_pgd_alloc,
-	.mmu.pgd_free		= paravirt_nop,
+	.mmu.pgd_free		= HDN_PV_NOP(pv_nop_pgd),
 
-	.mmu.alloc_pte		= paravirt_nop,
-	.mmu.alloc_pmd		= paravirt_nop,
-	.mmu.alloc_pud		= paravirt_nop,
-	.mmu.alloc_p4d		= paravirt_nop,
-	.mmu.release_pte	= paravirt_nop,
-	.mmu.release_pmd	= paravirt_nop,
-	.mmu.release_pud	= paravirt_nop,
-	.mmu.release_p4d	= paravirt_nop,
+	.mmu.alloc_pte		= HDN_PV_NOP(pv_nop_alloc),
+	.mmu.alloc_pmd		= HDN_PV_NOP(pv_nop_alloc),
+	.mmu.alloc_pud		= HDN_PV_NOP(pv_nop_alloc),
+	.mmu.alloc_p4d		= HDN_PV_NOP(pv_nop_alloc),
+	.mmu.release_pte	= HDN_PV_NOP(pv_nop_release),
+	.mmu.release_pmd	= HDN_PV_NOP(pv_nop_release),
+	.mmu.release_pud	= HDN_PV_NOP(pv_nop_release),
+	.mmu.release_p4d	= HDN_PV_NOP(pv_nop_release),
 
 	.mmu.set_pte		= native_set_pte,
 	.mmu.set_pmd		= native_set_pmd,
@@ -184,26 +214,26 @@ struct paravirt_patch_template pv_ops = {
 
 	.mmu.set_pud		= native_set_pud,
 
-	.mmu.pmd_val		= PTE_IDENT,
-	.mmu.make_pmd		= PTE_IDENT,
+	.mmu.pmd_val		= PTE_VALUE_IDENT(pmd),
+	.mmu.make_pmd		= PTE_MAKE_IDENT(pmd),
 
-	.mmu.pud_val		= PTE_IDENT,
-	.mmu.make_pud		= PTE_IDENT,
+	.mmu.pud_val		= PTE_VALUE_IDENT(pud),
+	.mmu.make_pud		= PTE_MAKE_IDENT(pud),
 
 	.mmu.set_p4d		= native_set_p4d,
 
-	.mmu.p4d_val		= PTE_IDENT,
-	.mmu.make_p4d		= PTE_IDENT,
+	.mmu.p4d_val		= PTE_VALUE_IDENT(p4d),
+	.mmu.make_p4d		= PTE_MAKE_IDENT(p4d),
 
 	.mmu.set_pgd		= native_set_pgd,
 
-	.mmu.pte_val		= PTE_IDENT,
-	.mmu.pgd_val		= PTE_IDENT,
+	.mmu.pte_val		= PTE_VALUE_IDENT(pte),
+	.mmu.pgd_val		= PTE_VALUE_IDENT(pgd),
 
-	.mmu.make_pte		= PTE_IDENT,
-	.mmu.make_pgd		= PTE_IDENT,
+	.mmu.make_pte		= PTE_MAKE_IDENT(pte),
+	.mmu.make_pgd		= PTE_MAKE_IDENT(pgd),
 
-	.mmu.enter_mmap		= paravirt_nop,
+	.mmu.enter_mmap		= HDN_PV_NOP(pv_nop_mm),
 
 	.mmu.lazy_mode = {
 		.enter		= paravirt_nop,

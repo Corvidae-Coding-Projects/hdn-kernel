@@ -48,6 +48,7 @@
 ########################################################################
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 .text
 
@@ -275,6 +276,7 @@ frame_size = frame_WK + WK_SIZE
 # "nblocks" is the message length in SHA512 blocks.  Must be >= 1.
 ########################################################################
 SYM_FUNC_START(sha512_transform_avx)
+	HDN_ASM_FUNCTION sha512_transform_avx
 
 	# Save GPRs
 	push	%rbx
@@ -359,7 +361,8 @@ SYM_FUNC_START(sha512_transform_avx)
 	pop	%r12
 	pop	%rbx
 
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END sha512_transform_avx
 SYM_FUNC_END(sha512_transform_avx)
 
 ########################################################################

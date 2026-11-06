@@ -19,6 +19,7 @@
 #include <linux/linkage.h>
 #include <linux/objtool.h>
 #include <asm/frame.h>
+#include <asm/hdn_rap.h>
 
 #define STATE1	%xmm0
 #define STATE2	%xmm4
@@ -51,7 +52,15 @@
 #define T1	%r10
 #define TKEYP	T1
 #define T2	%r11
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+/* These private helper values cross calls. R10/R11 belong to RAP; RAX is
+ * unused by the AES rounds and is preserved by the protected adapters. */
+#define TCTR_LOW %rax
+#define KEXP_PTR %rax
+#else
 #define TCTR_LOW T2
+#define KEXP_PTR TKEYP
+#endif
 #else
 #define AREG	%eax
 #define KEYP	%edi
@@ -63,22 +72,25 @@
 #define KLEN	%ebx
 #define T1	%ecx
 #define TKEYP	T1
+#define KEXP_PTR TKEYP
 #endif
 
 SYM_FUNC_START_LOCAL(_key_expansion_256a)
+	HDN_PRIVATE_FUNC_ENTER _key_expansion_256a
 	pshufd $0b11111111, %xmm1, %xmm1
 	shufps $0b00010000, %xmm0, %xmm4
 	pxor %xmm4, %xmm0
 	shufps $0b10001100, %xmm0, %xmm4
 	pxor %xmm4, %xmm0
 	pxor %xmm1, %xmm0
-	movaps %xmm0, (TKEYP)
-	add $0x10, TKEYP
-	RET
+	movaps %xmm0, (KEXP_PTR)
+	add $0x10, KEXP_PTR
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(_key_expansion_256a)
 SYM_FUNC_ALIAS_LOCAL(_key_expansion_128, _key_expansion_256a)
 
 SYM_FUNC_START_LOCAL(_key_expansion_192a)
+	HDN_PRIVATE_FUNC_ENTER _key_expansion_192a
 	pshufd $0b01010101, %xmm1, %xmm1
 	shufps $0b00010000, %xmm0, %xmm4
 	pxor %xmm4, %xmm0
@@ -95,14 +107,15 @@ SYM_FUNC_START_LOCAL(_key_expansion_192a)
 
 	movaps %xmm0, %xmm1
 	shufps $0b01000100, %xmm0, %xmm6
-	movaps %xmm6, (TKEYP)
+	movaps %xmm6, (KEXP_PTR)
 	shufps $0b01001110, %xmm2, %xmm1
-	movaps %xmm1, 0x10(TKEYP)
-	add $0x20, TKEYP
-	RET
+	movaps %xmm1, 0x10(KEXP_PTR)
+	add $0x20, KEXP_PTR
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(_key_expansion_192a)
 
 SYM_FUNC_START_LOCAL(_key_expansion_192b)
+	HDN_PRIVATE_FUNC_ENTER _key_expansion_192b
 	pshufd $0b01010101, %xmm1, %xmm1
 	shufps $0b00010000, %xmm0, %xmm4
 	pxor %xmm4, %xmm0
@@ -116,21 +129,22 @@ SYM_FUNC_START_LOCAL(_key_expansion_192b)
 	pxor %xmm3, %xmm2
 	pxor %xmm5, %xmm2
 
-	movaps %xmm0, (TKEYP)
-	add $0x10, TKEYP
-	RET
+	movaps %xmm0, (KEXP_PTR)
+	add $0x10, KEXP_PTR
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(_key_expansion_192b)
 
 SYM_FUNC_START_LOCAL(_key_expansion_256b)
+	HDN_PRIVATE_FUNC_ENTER _key_expansion_256b
 	pshufd $0b10101010, %xmm1, %xmm1
 	shufps $0b00010000, %xmm2, %xmm4
 	pxor %xmm4, %xmm2
 	shufps $0b10001100, %xmm2, %xmm4
 	pxor %xmm4, %xmm2
 	pxor %xmm1, %xmm2
-	movaps %xmm2, (TKEYP)
-	add $0x10, TKEYP
-	RET
+	movaps %xmm2, (KEXP_PTR)
+	add $0x10, KEXP_PTR
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(_key_expansion_256b)
 
 /*
@@ -138,6 +152,7 @@ SYM_FUNC_END(_key_expansion_256b)
  *                    unsigned int key_len)
  */
 SYM_FUNC_START(aesni_set_key)
+	HDN_DIRECT_FUNC_ENTER aesni_set_key
 	FRAME_BEGIN
 #ifndef __x86_64__
 	pushl KEYP
@@ -147,90 +162,90 @@ SYM_FUNC_START(aesni_set_key)
 #endif
 	movups (UKEYP), %xmm0		# user key (first 16 bytes)
 	movaps %xmm0, (KEYP)
-	lea 0x10(KEYP), TKEYP		# key addr
+	lea 0x10(KEYP), KEXP_PTR		# key addr
 	movl %edx, 480(KEYP)
 	pxor %xmm4, %xmm4		# xmm4 is assumed 0 in _key_expansion_x
 	cmp $24, %dl
 	jb .Lenc_key128
 	je .Lenc_key192
 	movups 0x10(UKEYP), %xmm2	# other user key
-	movaps %xmm2, (TKEYP)
-	add $0x10, TKEYP
+	movaps %xmm2, (KEXP_PTR)
+	add $0x10, KEXP_PTR
 	aeskeygenassist $0x1, %xmm2, %xmm1	# round 1
-	call _key_expansion_256a
+	HDN_C_CALL _key_expansion_256a
 	aeskeygenassist $0x1, %xmm0, %xmm1
-	call _key_expansion_256b
+	HDN_C_CALL _key_expansion_256b
 	aeskeygenassist $0x2, %xmm2, %xmm1	# round 2
-	call _key_expansion_256a
+	HDN_C_CALL _key_expansion_256a
 	aeskeygenassist $0x2, %xmm0, %xmm1
-	call _key_expansion_256b
+	HDN_C_CALL _key_expansion_256b
 	aeskeygenassist $0x4, %xmm2, %xmm1	# round 3
-	call _key_expansion_256a
+	HDN_C_CALL _key_expansion_256a
 	aeskeygenassist $0x4, %xmm0, %xmm1
-	call _key_expansion_256b
+	HDN_C_CALL _key_expansion_256b
 	aeskeygenassist $0x8, %xmm2, %xmm1	# round 4
-	call _key_expansion_256a
+	HDN_C_CALL _key_expansion_256a
 	aeskeygenassist $0x8, %xmm0, %xmm1
-	call _key_expansion_256b
+	HDN_C_CALL _key_expansion_256b
 	aeskeygenassist $0x10, %xmm2, %xmm1	# round 5
-	call _key_expansion_256a
+	HDN_C_CALL _key_expansion_256a
 	aeskeygenassist $0x10, %xmm0, %xmm1
-	call _key_expansion_256b
+	HDN_C_CALL _key_expansion_256b
 	aeskeygenassist $0x20, %xmm2, %xmm1	# round 6
-	call _key_expansion_256a
+	HDN_C_CALL _key_expansion_256a
 	aeskeygenassist $0x20, %xmm0, %xmm1
-	call _key_expansion_256b
+	HDN_C_CALL _key_expansion_256b
 	aeskeygenassist $0x40, %xmm2, %xmm1	# round 7
-	call _key_expansion_256a
+	HDN_C_CALL _key_expansion_256a
 	jmp .Ldec_key
 .Lenc_key192:
 	movq 0x10(UKEYP), %xmm2		# other user key
 	aeskeygenassist $0x1, %xmm2, %xmm1	# round 1
-	call _key_expansion_192a
+	HDN_C_CALL _key_expansion_192a
 	aeskeygenassist $0x2, %xmm2, %xmm1	# round 2
-	call _key_expansion_192b
+	HDN_C_CALL _key_expansion_192b
 	aeskeygenassist $0x4, %xmm2, %xmm1	# round 3
-	call _key_expansion_192a
+	HDN_C_CALL _key_expansion_192a
 	aeskeygenassist $0x8, %xmm2, %xmm1	# round 4
-	call _key_expansion_192b
+	HDN_C_CALL _key_expansion_192b
 	aeskeygenassist $0x10, %xmm2, %xmm1	# round 5
-	call _key_expansion_192a
+	HDN_C_CALL _key_expansion_192a
 	aeskeygenassist $0x20, %xmm2, %xmm1	# round 6
-	call _key_expansion_192b
+	HDN_C_CALL _key_expansion_192b
 	aeskeygenassist $0x40, %xmm2, %xmm1	# round 7
-	call _key_expansion_192a
+	HDN_C_CALL _key_expansion_192a
 	aeskeygenassist $0x80, %xmm2, %xmm1	# round 8
-	call _key_expansion_192b
+	HDN_C_CALL _key_expansion_192b
 	jmp .Ldec_key
 .Lenc_key128:
 	aeskeygenassist $0x1, %xmm0, %xmm1	# round 1
-	call _key_expansion_128
+	HDN_C_CALL _key_expansion_128
 	aeskeygenassist $0x2, %xmm0, %xmm1	# round 2
-	call _key_expansion_128
+	HDN_C_CALL _key_expansion_128
 	aeskeygenassist $0x4, %xmm0, %xmm1	# round 3
-	call _key_expansion_128
+	HDN_C_CALL _key_expansion_128
 	aeskeygenassist $0x8, %xmm0, %xmm1	# round 4
-	call _key_expansion_128
+	HDN_C_CALL _key_expansion_128
 	aeskeygenassist $0x10, %xmm0, %xmm1	# round 5
-	call _key_expansion_128
+	HDN_C_CALL _key_expansion_128
 	aeskeygenassist $0x20, %xmm0, %xmm1	# round 6
-	call _key_expansion_128
+	HDN_C_CALL _key_expansion_128
 	aeskeygenassist $0x40, %xmm0, %xmm1	# round 7
-	call _key_expansion_128
+	HDN_C_CALL _key_expansion_128
 	aeskeygenassist $0x80, %xmm0, %xmm1	# round 8
-	call _key_expansion_128
+	HDN_C_CALL _key_expansion_128
 	aeskeygenassist $0x1b, %xmm0, %xmm1	# round 9
-	call _key_expansion_128
+	HDN_C_CALL _key_expansion_128
 	aeskeygenassist $0x36, %xmm0, %xmm1	# round 10
-	call _key_expansion_128
+	HDN_C_CALL _key_expansion_128
 .Ldec_key:
-	sub $0x10, TKEYP
+	sub $0x10, KEXP_PTR
 	movaps (KEYP), %xmm0
-	movaps (TKEYP), %xmm1
-	movaps %xmm0, 240(TKEYP)
+	movaps (KEXP_PTR), %xmm1
+	movaps %xmm0, 240(KEXP_PTR)
 	movaps %xmm1, 240(KEYP)
 	add $0x10, KEYP
-	lea 240-16(TKEYP), UKEYP
+	lea 240-16(KEXP_PTR), UKEYP
 .align 4
 .Ldec_key_loop:
 	movaps (KEYP), %xmm0
@@ -238,19 +253,20 @@ SYM_FUNC_START(aesni_set_key)
 	movaps %xmm1, (UKEYP)
 	add $0x10, KEYP
 	sub $0x10, UKEYP
-	cmp TKEYP, KEYP
+	cmp KEXP_PTR, KEYP
 	jb .Ldec_key_loop
 #ifndef __x86_64__
 	popl KEYP
 #endif
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(aesni_set_key)
 
 /*
  * void aesni_enc(const void *ctx, u8 *dst, const u8 *src)
  */
 SYM_FUNC_START(aesni_enc)
+	HDN_DIRECT_FUNC_ENTER aesni_enc
 	FRAME_BEGIN
 #ifndef __x86_64__
 	pushl KEYP
@@ -261,14 +277,14 @@ SYM_FUNC_START(aesni_enc)
 #endif
 	movl 480(KEYP), KLEN		# key length
 	movups (INP), STATE		# input
-	call _aesni_enc1
+	HDN_C_CALL _aesni_enc1
 	movups STATE, (OUTP)		# output
 #ifndef __x86_64__
 	popl KLEN
 	popl KEYP
 #endif
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(aesni_enc)
 
 /*
@@ -284,6 +300,7 @@ SYM_FUNC_END(aesni_enc)
  *	TKEYP (T1)
  */
 SYM_FUNC_START_LOCAL(_aesni_enc1)
+	HDN_PRIVATE_FUNC_ENTER _aesni_enc1
 	movaps (KEYP), KEY		# key
 	mov KEYP, TKEYP
 	pxor KEY, STATE		# round 0
@@ -325,7 +342,7 @@ SYM_FUNC_START_LOCAL(_aesni_enc1)
 	aesenc KEY, STATE
 	movaps 0x70(TKEYP), KEY
 	aesenclast KEY, STATE
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(_aesni_enc1)
 
 /*
@@ -347,6 +364,7 @@ SYM_FUNC_END(_aesni_enc1)
  *	TKEYP (T1)
  */
 SYM_FUNC_START_LOCAL(_aesni_enc4)
+	HDN_PRIVATE_FUNC_ENTER _aesni_enc4
 	movaps (KEYP), KEY		# key
 	mov KEYP, TKEYP
 	pxor KEY, STATE1		# round 0
@@ -433,7 +451,7 @@ SYM_FUNC_START_LOCAL(_aesni_enc4)
 	aesenclast KEY, STATE2
 	aesenclast KEY, STATE3
 	aesenclast KEY, STATE4
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(_aesni_enc4)
 
 /*
@@ -449,6 +467,7 @@ SYM_FUNC_END(_aesni_enc4)
  *	TKEYP (T1)
  */
 SYM_FUNC_START_LOCAL(_aesni_dec1)
+	HDN_PRIVATE_FUNC_ENTER _aesni_dec1
 	movaps (KEYP), KEY		# key
 	mov KEYP, TKEYP
 	pxor KEY, STATE		# round 0
@@ -490,7 +509,7 @@ SYM_FUNC_START_LOCAL(_aesni_dec1)
 	aesdec KEY, STATE
 	movaps 0x70(TKEYP), KEY
 	aesdeclast KEY, STATE
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(_aesni_dec1)
 
 /*
@@ -512,6 +531,7 @@ SYM_FUNC_END(_aesni_dec1)
  *	TKEYP (T1)
  */
 SYM_FUNC_START_LOCAL(_aesni_dec4)
+	HDN_PRIVATE_FUNC_ENTER _aesni_dec4
 	movaps (KEYP), KEY		# key
 	mov KEYP, TKEYP
 	pxor KEY, STATE1		# round 0
@@ -598,7 +618,7 @@ SYM_FUNC_START_LOCAL(_aesni_dec4)
 	aesdeclast KEY, STATE2
 	aesdeclast KEY, STATE3
 	aesdeclast KEY, STATE4
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(_aesni_dec4)
 
 /*
@@ -606,6 +626,7 @@ SYM_FUNC_END(_aesni_dec4)
  *		      size_t len)
  */
 SYM_FUNC_START(aesni_ecb_enc)
+	HDN_DIRECT_FUNC_ENTER aesni_ecb_enc
 	FRAME_BEGIN
 #ifndef __x86_64__
 	pushl LEN
@@ -629,7 +650,7 @@ SYM_FUNC_START(aesni_ecb_enc)
 	movups 0x10(INP), STATE2
 	movups 0x20(INP), STATE3
 	movups 0x30(INP), STATE4
-	call _aesni_enc4
+	HDN_C_CALL _aesni_enc4
 	movups STATE1, (OUTP)
 	movups STATE2, 0x10(OUTP)
 	movups STATE3, 0x20(OUTP)
@@ -644,7 +665,7 @@ SYM_FUNC_START(aesni_ecb_enc)
 .align 4
 .Lecb_enc_loop1:
 	movups (INP), STATE1
-	call _aesni_enc1
+	HDN_C_CALL _aesni_enc1
 	movups STATE1, (OUTP)
 	sub $16, LEN
 	add $16, INP
@@ -658,7 +679,7 @@ SYM_FUNC_START(aesni_ecb_enc)
 	popl LEN
 #endif
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(aesni_ecb_enc)
 
 /*
@@ -666,6 +687,7 @@ SYM_FUNC_END(aesni_ecb_enc)
  *		      size_t len);
  */
 SYM_FUNC_START(aesni_ecb_dec)
+	HDN_DIRECT_FUNC_ENTER aesni_ecb_dec
 	FRAME_BEGIN
 #ifndef __x86_64__
 	pushl LEN
@@ -690,7 +712,7 @@ SYM_FUNC_START(aesni_ecb_dec)
 	movups 0x10(INP), STATE2
 	movups 0x20(INP), STATE3
 	movups 0x30(INP), STATE4
-	call _aesni_dec4
+	HDN_C_CALL _aesni_dec4
 	movups STATE1, (OUTP)
 	movups STATE2, 0x10(OUTP)
 	movups STATE3, 0x20(OUTP)
@@ -705,7 +727,7 @@ SYM_FUNC_START(aesni_ecb_dec)
 .align 4
 .Lecb_dec_loop1:
 	movups (INP), STATE1
-	call _aesni_dec1
+	HDN_C_CALL _aesni_dec1
 	movups STATE1, (OUTP)
 	sub $16, LEN
 	add $16, INP
@@ -719,7 +741,7 @@ SYM_FUNC_START(aesni_ecb_dec)
 	popl LEN
 #endif
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(aesni_ecb_dec)
 
 /*
@@ -727,6 +749,7 @@ SYM_FUNC_END(aesni_ecb_dec)
  *		      size_t len, u8 *iv)
  */
 SYM_FUNC_START(aesni_cbc_enc)
+	HDN_DIRECT_FUNC_ENTER aesni_cbc_enc
 	FRAME_BEGIN
 #ifndef __x86_64__
 	pushl IVP
@@ -747,7 +770,7 @@ SYM_FUNC_START(aesni_cbc_enc)
 .Lcbc_enc_loop:
 	movups (INP), IN	# load input
 	pxor IN, STATE
-	call _aesni_enc1
+	HDN_C_CALL _aesni_enc1
 	movups STATE, (OUTP)	# store output
 	sub $16, LEN
 	add $16, INP
@@ -763,7 +786,7 @@ SYM_FUNC_START(aesni_cbc_enc)
 	popl IVP
 #endif
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(aesni_cbc_enc)
 
 /*
@@ -771,6 +794,7 @@ SYM_FUNC_END(aesni_cbc_enc)
  *		      size_t len, u8 *iv)
  */
 SYM_FUNC_START(aesni_cbc_dec)
+	HDN_DIRECT_FUNC_ENTER aesni_cbc_dec
 	FRAME_BEGIN
 #ifndef __x86_64__
 	pushl IVP
@@ -807,7 +831,7 @@ SYM_FUNC_START(aesni_cbc_dec)
 	movups 0x30(INP), IN2
 	movaps IN2, STATE4
 #endif
-	call _aesni_dec4
+	HDN_C_CALL _aesni_dec4
 	pxor IV, STATE1
 #ifdef __x86_64__
 	pxor IN1, STATE2
@@ -837,7 +861,7 @@ SYM_FUNC_START(aesni_cbc_dec)
 .Lcbc_dec_loop1:
 	movups (INP), IN
 	movaps IN, STATE
-	call _aesni_dec1
+	HDN_C_CALL _aesni_dec1
 	pxor IV, STATE
 	movups STATE, (OUTP)
 	movaps IN, IV
@@ -856,7 +880,7 @@ SYM_FUNC_START(aesni_cbc_dec)
 	popl IVP
 #endif
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(aesni_cbc_dec)
 
 /*
@@ -864,6 +888,7 @@ SYM_FUNC_END(aesni_cbc_dec)
  *			  size_t len, u8 *iv)
  */
 SYM_FUNC_START(aesni_cts_cbc_enc)
+	HDN_DIRECT_FUNC_ENTER aesni_cts_cbc_enc
 	FRAME_BEGIN
 #ifndef __x86_64__
 	pushl IVP
@@ -894,8 +919,7 @@ SYM_FUNC_START(aesni_cts_cbc_enc)
 	movups (INP), IN2
 
 	pxor IN1, STATE
-	call _aesni_enc1
-
+	HDN_C_CALL _aesni_enc1
 	pshufb %xmm5, IN2
 	pxor STATE, IN2
 	pshufb %xmm4, STATE
@@ -903,7 +927,7 @@ SYM_FUNC_START(aesni_cts_cbc_enc)
 	movups STATE, (LEN)
 
 	movaps IN2, STATE
-	call _aesni_enc1
+	HDN_C_CALL _aesni_enc1
 	movups STATE, (OUTP)
 
 #ifndef __x86_64__
@@ -913,7 +937,7 @@ SYM_FUNC_START(aesni_cts_cbc_enc)
 	popl IVP
 #endif
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(aesni_cts_cbc_enc)
 
 /*
@@ -921,6 +945,7 @@ SYM_FUNC_END(aesni_cts_cbc_enc)
  *			  size_t len, u8 *iv)
  */
 SYM_FUNC_START(aesni_cts_cbc_dec)
+	HDN_DIRECT_FUNC_ENTER aesni_cts_cbc_dec
 	FRAME_BEGIN
 #ifndef __x86_64__
 	pushl IVP
@@ -950,7 +975,7 @@ SYM_FUNC_START(aesni_cts_cbc_dec)
 	add LEN, INP
 	movups (INP), IN1
 
-	call _aesni_dec1
+	HDN_C_CALL _aesni_dec1
 	movaps STATE, IN2
 	pshufb %xmm4, STATE
 	pxor IN1, STATE
@@ -962,8 +987,7 @@ SYM_FUNC_START(aesni_cts_cbc_dec)
 	pshufb %xmm0, IN1
 	pblendvb IN2, IN1
 	movaps IN1, STATE
-	call _aesni_dec1
-
+	HDN_C_CALL _aesni_dec1
 	pxor IV, STATE
 	movups STATE, (OUTP)
 
@@ -974,7 +998,7 @@ SYM_FUNC_START(aesni_cts_cbc_dec)
 	popl IVP
 #endif
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(aesni_cts_cbc_dec)
 
 .pushsection .rodata
@@ -1005,13 +1029,14 @@ SYM_FUNC_END(aesni_cts_cbc_dec)
  *	BSWAP_MASK == endian swapping mask
  */
 SYM_FUNC_START_LOCAL(_aesni_inc_init)
+	HDN_PRIVATE_FUNC_ENTER _aesni_inc_init
 	movaps .Lbswap_mask(%rip), BSWAP_MASK
 	movaps IV, CTR
 	pshufb BSWAP_MASK, CTR
 	mov $1, TCTR_LOW
 	movq TCTR_LOW, INC
 	movq CTR, TCTR_LOW
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(_aesni_inc_init)
 
 /*
@@ -1030,6 +1055,7 @@ SYM_FUNC_END(_aesni_inc_init)
  *	TCTR_LOW: == lower qword of CTR
  */
 SYM_FUNC_START_LOCAL(_aesni_inc)
+	HDN_PRIVATE_FUNC_ENTER _aesni_inc
 	paddq INC, CTR
 	add $1, TCTR_LOW
 	jnc .Linc_low
@@ -1039,7 +1065,7 @@ SYM_FUNC_START_LOCAL(_aesni_inc)
 .Linc_low:
 	movaps CTR, IV
 	pshufb BSWAP_MASK, IV
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(_aesni_inc)
 
 /*
@@ -1047,30 +1073,31 @@ SYM_FUNC_END(_aesni_inc)
  *		      size_t len, u8 *iv)
  */
 SYM_FUNC_START(aesni_ctr_enc)
+	HDN_DIRECT_FUNC_ENTER aesni_ctr_enc
 	ANNOTATE_NOENDBR
 	FRAME_BEGIN
 	cmp $16, LEN
 	jb .Lctr_enc_just_ret
 	mov 480(KEYP), KLEN
 	movups (IVP), IV
-	call _aesni_inc_init
+	HDN_C_CALL _aesni_inc_init
 	cmp $64, LEN
 	jb .Lctr_enc_loop1
 .align 4
 .Lctr_enc_loop4:
 	movaps IV, STATE1
-	call _aesni_inc
+	HDN_C_CALL _aesni_inc
 	movups (INP), IN1
 	movaps IV, STATE2
-	call _aesni_inc
+	HDN_C_CALL _aesni_inc
 	movups 0x10(INP), IN2
 	movaps IV, STATE3
-	call _aesni_inc
+	HDN_C_CALL _aesni_inc
 	movups 0x20(INP), IN3
 	movaps IV, STATE4
-	call _aesni_inc
+	HDN_C_CALL _aesni_inc
 	movups 0x30(INP), IN4
-	call _aesni_enc4
+	HDN_C_CALL _aesni_enc4
 	pxor IN1, STATE1
 	movups STATE1, (OUTP)
 	pxor IN2, STATE2
@@ -1089,9 +1116,9 @@ SYM_FUNC_START(aesni_ctr_enc)
 .align 4
 .Lctr_enc_loop1:
 	movaps IV, STATE
-	call _aesni_inc
+	HDN_C_CALL _aesni_inc
 	movups (INP), IN
-	call _aesni_enc1
+	HDN_C_CALL _aesni_enc1
 	pxor IN, STATE
 	movups STATE, (OUTP)
 	sub $16, LEN
@@ -1103,7 +1130,7 @@ SYM_FUNC_START(aesni_ctr_enc)
 	movups IV, (IVP)
 .Lctr_enc_just_ret:
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(aesni_ctr_enc)
 
 #endif
@@ -1187,9 +1214,9 @@ SYM_FUNC_END(aesni_ctr_enc)
 	movdqu IV, 0x30(OUTP)
 
 .if \enc
-	call _aesni_enc4
+	HDN_C_CALL _aesni_enc4
 .else
-	call _aesni_dec4
+	HDN_C_CALL _aesni_dec4
 .endif
 
 	movdqu 0x00(OUTP), IN
@@ -1226,8 +1253,7 @@ SYM_FUNC_END(aesni_ctr_enc)
 	popl IVP
 #endif
 	FRAME_END
-	RET
-
+	HDN_ENTRY_ROOT_RETURN
 .Lxts_1x\@:
 	add $64, LEN
 	jz .Lxts_ret_iv\@
@@ -1240,13 +1266,13 @@ SYM_FUNC_END(aesni_ctr_enc)
 	movdqu (INP), STATE
 .if \enc
 	pxor IV, STATE
-	call _aesni_enc1
+	HDN_C_CALL _aesni_enc1
 .else
 	add $16, INP
 	sub $16, LEN
 	jl .Lxts_cts1\@
 	pxor IV, STATE
-	call _aesni_dec1
+	HDN_C_CALL _aesni_dec1
 .endif
 	pxor IV, STATE
 	_aesni_gf128mul_x_ble
@@ -1279,7 +1305,7 @@ SYM_FUNC_END(aesni_ctr_enc)
 	_aesni_gf128mul_x_ble
 
 	pxor IV, STATE
-	call _aesni_dec1
+	HDN_C_CALL _aesni_dec1
 	pxor IV, STATE
 .endif
 #ifndef __x86_64__
@@ -1309,11 +1335,11 @@ SYM_FUNC_END(aesni_ctr_enc)
 
 .if \enc
 	pxor IV, STATE
-	call _aesni_enc1
+	HDN_C_CALL _aesni_enc1
 	pxor IV, STATE
 .else
 	pxor STATE4, STATE
-	call _aesni_dec1
+	HDN_C_CALL _aesni_dec1
 	pxor STATE4, STATE
 .endif
 
@@ -1326,6 +1352,7 @@ SYM_FUNC_END(aesni_ctr_enc)
  *		      const u8 *src, unsigned int len, le128 *iv)
  */
 SYM_FUNC_START(aesni_xts_enc)
+	HDN_DIRECT_FUNC_ENTER aesni_xts_enc
 	_aesni_xts_crypt	1
 SYM_FUNC_END(aesni_xts_enc)
 
@@ -1334,5 +1361,6 @@ SYM_FUNC_END(aesni_xts_enc)
  *		      const u8 *src, unsigned int len, le128 *iv)
  */
 SYM_FUNC_START(aesni_xts_dec)
+	HDN_DIRECT_FUNC_ENTER aesni_xts_dec
 	_aesni_xts_crypt	0
 SYM_FUNC_END(aesni_xts_dec)

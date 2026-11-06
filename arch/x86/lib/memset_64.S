@@ -6,6 +6,7 @@
 #include <linux/cfi_types.h>
 #include <asm/cpufeatures.h>
 #include <asm/alternative.h>
+#include <asm/hdn_rap.h>
 
 .section .noinstr.text, "ax"
 
@@ -30,6 +31,7 @@
  * which the compiler could/should do much better anyway.
  */
 SYM_TYPED_FUNC_START(__memset)
+	HDN_TYPED_FUNC_ENTER __memset, 2
 	ALTERNATIVE "jmp memset_orig", "", X86_FEATURE_FSRS
 
 	movq %rdi,%r9
@@ -37,15 +39,24 @@ SYM_TYPED_FUNC_START(__memset)
 	movq %rdx,%rcx
 	rep stosb
 	movq %r9,%rax
-	RET
+	HDN_ENTRY_ROOT_RETURN
+#ifndef HDN_RAP_ASM_ACTIVE
 SYM_FUNC_END(__memset)
+#endif
 EXPORT_SYMBOL(__memset)
 
 SYM_FUNC_ALIAS_MEMFUNC(memset, __memset)
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 SYM_PIC_ALIAS(memset)
+#endif
 EXPORT_SYMBOL(memset)
 
+#ifdef HDN_RAP_ASM_ACTIVE
+memset_orig:
+#else
 SYM_FUNC_START_LOCAL(memset_orig)
+	HDN_BOOTSTRAP_FUNC memset_orig
+#endif
 	movq %rdi,%r10
 
 	/* expand byte value  */
@@ -104,7 +115,7 @@ SYM_FUNC_START_LOCAL(memset_orig)
 
 .Lende:
 	movq	%r10,%rax
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 .Lbad_alignment:
 	cmpq $7,%rdx
@@ -116,4 +127,8 @@ SYM_FUNC_START_LOCAL(memset_orig)
 	subq %r8,%rdx
 	jmp .Lafter_bad_alignment
 .Lfinal:
+#ifdef HDN_RAP_ASM_ACTIVE
+SYM_FUNC_END(__memset)
+#else
 SYM_FUNC_END(memset_orig)
+#endif

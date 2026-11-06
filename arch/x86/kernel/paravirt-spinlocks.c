@@ -52,11 +52,19 @@ void __init paravirt_set_cap(void)
 		setup_force_cpu_cap(X86_FEATURE_VCPUPREEMPT);
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+static noinstr void pv_nop_wait(u8 *ptr, u8 val) { }
+static noinstr void pv_nop_kick(int cpu) { }
+#else
+#define pv_nop_wait paravirt_nop
+#define pv_nop_kick paravirt_nop
+#endif
+
 struct pv_lock_ops pv_ops_lock = {
 	.queued_spin_lock_slowpath	= native_queued_spin_lock_slowpath,
 	.queued_spin_unlock		= PV_CALLEE_SAVE(__native_queued_spin_unlock),
-	.wait				= paravirt_nop,
-	.kick				= paravirt_nop,
+	.wait				= pv_nop_wait,
+	.kick				= pv_nop_kick,
 	.vcpu_is_preempted		= PV_CALLEE_SAVE(__native_vcpu_is_preempted),
 };
 EXPORT_SYMBOL(pv_ops_lock);

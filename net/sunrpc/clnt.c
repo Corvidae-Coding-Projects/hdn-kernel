@@ -1238,7 +1238,7 @@ struct rpc_task *rpc_run_task(const struct rpc_task_setup *task_setup_data)
 	if (task->tk_action == NULL)
 		rpc_call_start(task);
 
-	atomic_inc(&task->tk_count);
+	refcount_inc(&task->tk_count);
 	rpc_execute(task);
 	return task;
 }
@@ -1338,8 +1338,8 @@ struct rpc_task *rpc_run_bc_task(struct rpc_rqst *req,
 	xprt_init_bc_request(req, task, timeout);
 
 	task->tk_action = call_bc_encode;
-	atomic_inc(&task->tk_count);
-	WARN_ON_ONCE(atomic_read(&task->tk_count) != 2);
+	refcount_inc(&task->tk_count);
+	WARN_ON_ONCE(refcount_read(&task->tk_count) != 2);
 	rpc_execute(task);
 
 	dprintk("RPC: rpc_run_bc_task: task= %p\n", task);

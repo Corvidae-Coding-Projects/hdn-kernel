@@ -16,12 +16,14 @@
 #include <linux/swap.h> /* mm_account_reclaimed_pages() */
 #include <linux/module.h>
 #include <linux/hardening.h>
+#include <linux/hdn_alloc.h>
 #include <linux/bit_spinlock.h>
 #include <linux/interrupt.h>
 #include <linux/swab.h>
 #include <linux/bitops.h>
 #include <linux/slab.h>
 #include "slab.h"
+#include "hdn_jitter.h"
 #include <linux/vmalloc.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -45,6 +47,9 @@
 #include <linux/memcontrol.h>
 #include <linux/random.h>
 #include <linux/prandom.h>
+#include <linux/siphash.h>
+#include <linux/hdn_slab.h>
+#include <linux/lcm.h>
 #include <kunit/test.h>
 #include <kunit/test-bug.h>
 #include <linux/sort.h>
@@ -795,7 +800,7 @@ static inline unsigned long obj_exts_offset_in_slab(struct kmem_cache *s,
 {
 	unsigned long objext_offset;
 
-	objext_offset = s->size * slab->objects;
+	objext_offset = slab_object_offset(slab) + s->size * slab->objects;
 	objext_offset = ALIGN(objext_offset, sizeof(struct slabobj_ext));
 	return objext_offset;
 }
@@ -909,7 +914,7 @@ static DEFINE_SPINLOCK(object_map_lock);
 static void __fill_map(unsigned long *obj_map, struct kmem_cache *s,
 		       struct slab *slab)
 {
-	void *addr = slab_address(slab);
+	void *addr = slab_object_address(slab);
 	void *p;
 
 	bitmap_zero(obj_map, slab->objects);
@@ -994,7 +999,7 @@ static inline int check_valid_pointer(struct kmem_cache *s,
 	if (!object)
 		return 1;
 
-	base = slab_address(slab);
+	base = slab_object_address(slab);
 	object = kasan_reset_tag(object);
 	object = restore_red_left(s, object);
 	if (object < base || object >= base + slab->objects * s->size ||
@@ -1372,7 +1377,7 @@ skip_bug_print:
  * - The trailing padding is pre-filled with POISON_INUSE by
  *   setup_slab_debug() when SLAB_POISON is set, and is validated by
  *   check_pad_bytes().
- * - The first object pointer is slab_address(slab) +
+ * - The first object pointer is slab_object_address(slab) +
  *   (s->red_left_pad if redzoning); subsequent objects are reached by
  *   adding s->size each time.
  *
@@ -1422,13 +1427,16 @@ slab_pad_check(struct kmem_cache *s, struct slab *slab)
 	start = slab_address(slab);
 	length = slab_size(slab);
 	end = start + length;
+	if (slab_object_offset(slab))
+		check_bytes_and_report(s, slab, NULL, "Slab leading padding", start,
+				       POISON_INUSE, slab_object_offset(slab), false);
 
 	if (obj_exts_in_slab(s, slab) && !obj_exts_in_object(s, slab)) {
 		remainder = length;
 		remainder -= obj_exts_offset_in_slab(s, slab);
 		remainder -= obj_exts_size_in_slab(slab);
 	} else {
-		remainder = length % s->size;
+		remainder = length - slab_object_offset(slab) - slab->objects * s->size;
 	}
 
 	if (!remainder)
@@ -1540,7 +1548,11 @@ static int check_slab(struct kmem_cache *s, struct slab *slab)
 {
 	int maxobj;
 
-	maxobj = order_objects(slab_order(slab), s->size);
+	if (slab_object_offset(slab) % s->align) {
+		slab_err(s, slab, "Misaligned object area");
+		return 0;
+	}
+	maxobj = (slab_size(slab) - slab_object_offset(slab)) / s->size;
 	if (slab->objects > maxobj) {
 		slab_err(s, slab, "objects %u > max %u",
 			slab->objects, maxobj);
@@ -1603,7 +1615,7 @@ static bool on_freelist(struct kmem_cache *s, struct slab *slab, void *search)
 		return false;
 	}
 
-	max_objects = order_objects(slab_order(slab), s->size);
+	max_objects = (slab_size(slab) - slab_object_offset(slab)) / s->size;
 	if (max_objects > MAX_OBJS_PER_PAGE)
 		max_objects = MAX_OBJS_PER_PAGE;
 
@@ -2287,12 +2299,12 @@ static void alloc_slab_obj_exts_early(struct kmem_cache *s, struct slab *slab)
 	} else if (s->flags & SLAB_OBJ_EXT_IN_OBJ) {
 		unsigned int offset = obj_exts_offset_in_object(s);
 
-		obj_exts = (unsigned long)slab_address(slab);
+		obj_exts = (unsigned long)slab_object_address(slab);
 		obj_exts += s->red_left_pad;
 		obj_exts += offset;
 
 		get_slab_obj_exts(obj_exts);
-		for_each_object(addr, s, slab_address(slab), slab->objects)
+		for_each_object(addr, s, slab_object_address(slab), slab->objects)
 			memset(kasan_reset_tag(addr) + offset, 0,
 			       sizeof(struct slabobj_ext));
 		put_slab_obj_exts(obj_exts);
@@ -3276,7 +3288,87 @@ static void barn_shrink(struct kmem_cache *s, struct node_barn *barn)
 /*
  * Slab allocation and freeing
  */
-static inline struct slab *alloc_slab_page(gfp_t flags, int node,
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+static atomic64_t hdn_slab_allocation_attempts;
+static atomic64_t hdn_slab_allocation_failures;
+static atomic64_t hdn_slab_created;
+static atomic64_t hdn_slab_fallback;
+static atomic64_t hdn_slab_no_offset_room;
+static atomic64_t hdn_slab_offset_slabs;
+static atomic64_t hdn_slab_offset_bytes;
+static atomic64_t hdn_slab_original_objects;
+static atomic64_t hdn_slab_placed_objects;
+static atomic64_t hdn_slab_displaced_objects;
+#endif
+
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT_TEST
+static DEFINE_MUTEX(hdn_slab_test_lock);
+static struct kmem_cache *hdn_slab_test_cache;
+static u64 hdn_slab_test_order_choice;
+static u64 hdn_slab_test_offset_choice;
+static unsigned long hdn_slab_test_fail_orders;
+static atomic64_t hdn_slab_test_attempts;
+static atomic64_t hdn_slab_test_failures;
+
+int hdn_slab_layout_test_configure(struct kmem_cache *cache,
+		u64 order_choice, u64 offset_choice, unsigned long fail_orders)
+{
+	int error = 0;
+
+	if (!cache)
+		return -EINVAL;
+	mutex_lock(&hdn_slab_test_lock);
+	if (hdn_slab_test_cache) {
+		error = -EBUSY;
+	} else {
+		WRITE_ONCE(hdn_slab_test_order_choice, order_choice);
+		WRITE_ONCE(hdn_slab_test_offset_choice, offset_choice);
+		WRITE_ONCE(hdn_slab_test_fail_orders, fail_orders);
+		atomic64_set(&hdn_slab_test_attempts, 0);
+		atomic64_set(&hdn_slab_test_failures, 0);
+		smp_store_release(&hdn_slab_test_cache, cache);
+	}
+	mutex_unlock(&hdn_slab_test_lock);
+	return error;
+}
+
+void hdn_slab_layout_test_clear(struct kmem_cache *cache,
+		u64 *allocation_attempts, u64 *allocation_failures)
+{
+	mutex_lock(&hdn_slab_test_lock);
+	if (hdn_slab_test_cache != cache)
+		BUG();
+	smp_store_release(&hdn_slab_test_cache, NULL);
+	*allocation_attempts = atomic64_read(&hdn_slab_test_attempts);
+	*allocation_failures = atomic64_read(&hdn_slab_test_failures);
+	WRITE_ONCE(hdn_slab_test_fail_orders, 0);
+	mutex_unlock(&hdn_slab_test_lock);
+}
+
+static bool hdn_slab_test_fail(struct kmem_cache *s, unsigned int order)
+{
+	return smp_load_acquire(&hdn_slab_test_cache) == s &&
+		(order < BITS_PER_LONG) &&
+		(READ_ONCE(hdn_slab_test_fail_orders) & BIT(order));
+}
+
+static void hdn_slab_test_account(struct kmem_cache *s, bool failed)
+{
+	if (smp_load_acquire(&hdn_slab_test_cache) != s)
+		return;
+	atomic64_inc(&hdn_slab_test_attempts);
+	if (failed)
+		atomic64_inc(&hdn_slab_test_failures);
+}
+#else
+static inline bool hdn_slab_test_fail(struct kmem_cache *s, unsigned int order)
+{
+	return false;
+}
+static inline void hdn_slab_test_account(struct kmem_cache *s, bool failed) { }
+#endif
+
+static inline struct slab *alloc_slab_page(struct kmem_cache *s, gfp_t flags, int node,
 					   struct kmem_cache_order_objects oo,
 					   bool allow_spin)
 {
@@ -3284,7 +3376,12 @@ static inline struct slab *alloc_slab_page(gfp_t flags, int node,
 	struct slab *slab;
 	unsigned int order = oo_order(oo);
 
-	if (unlikely(!allow_spin))
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+	atomic64_inc(&hdn_slab_allocation_attempts);
+#endif
+	if (unlikely(hdn_slab_test_fail(s, order))) {
+		page = NULL;
+	} else if (unlikely(!allow_spin))
 		page = alloc_frozen_pages_nolock(0/* __GFP_COMP is implied */,
 								  node, order);
 	else if (node == NUMA_NO_NODE)
@@ -3292,8 +3389,14 @@ static inline struct slab *alloc_slab_page(gfp_t flags, int node,
 	else
 		page = __alloc_frozen_pages(flags, order, node, NULL);
 
-	if (!page)
+	if (!page) {
+		hdn_slab_test_account(s, true);
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+		atomic64_inc(&hdn_slab_allocation_failures);
+#endif
 		return NULL;
+	}
+	hdn_slab_test_account(s, false);
 
 	__SetPageSlab(page);
 	slab = page_slab(page);
@@ -3396,7 +3499,7 @@ static bool shuffle_freelist(struct kmem_cache *s, struct slab *slab,
 	}
 
 	page_limit = slab->objects * s->size;
-	start = fixup_red_left(s, slab_address(slab));
+	start = fixup_red_left(s, slab_object_address(slab));
 
 	/* First entry is used as the base of the freelist */
 	cur = next_freelist_entry(s, &pos, start, page_limit, freelist_count);
@@ -3453,11 +3556,85 @@ static __always_inline void unaccount_slab(struct slab *slab, int order,
 			    -(PAGE_SIZE << order));
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+static siphash_key_t hdn_slab_key __ro_after_init;
+static bool hdn_slab_ready __ro_after_init;
+static atomic64_t hdn_slab_sequence;
+
+void hdn_slab_layout_stats(struct hdn_slab_layout_stats *stats)
+{
+	stats->active = smp_load_acquire(&hdn_slab_ready);
+	stats->allocation_attempts = atomic64_read(&hdn_slab_allocation_attempts);
+	stats->allocation_failures = atomic64_read(&hdn_slab_allocation_failures);
+	stats->slabs = atomic64_read(&hdn_slab_created);
+	stats->fallback = atomic64_read(&hdn_slab_fallback);
+	stats->no_offset_room = atomic64_read(&hdn_slab_no_offset_room);
+	stats->offset_slabs = atomic64_read(&hdn_slab_offset_slabs);
+	stats->offset_bytes = atomic64_read(&hdn_slab_offset_bytes);
+	stats->original_objects = atomic64_read(&hdn_slab_original_objects);
+	stats->placed_objects = atomic64_read(&hdn_slab_placed_objects);
+	stats->displaced_objects = atomic64_read(&hdn_slab_displaced_objects);
+}
+
+static u64 hdn_slab_choice(struct kmem_cache *s, u64 domain)
+{
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT_TEST
+	if (smp_load_acquire(&hdn_slab_test_cache) == s)
+		return domain == 1 ? READ_ONCE(hdn_slab_test_order_choice) :
+			READ_ONCE(hdn_slab_test_offset_choice);
+#endif
+	/* No allocation, locks, per-CPU migration dependency, or public cycle. */
+	return siphash_3u64(atomic64_inc_return(&hdn_slab_sequence),
+			   (unsigned long)s, domain, &hdn_slab_key);
+}
+
+static struct kmem_cache_order_objects hdn_slab_order(struct kmem_cache *s)
+{
+	unsigned int order = s->hdn_min_order;
+
+	if (smp_load_acquire(&hdn_slab_ready))
+		order += hdn_slab_choice(s, 1) % (oo_order(s->oo) - order + 1);
+	return oo_make(order, s->size);
+}
+
+static void hdn_slab_place(struct kmem_cache *s, struct slab *slab)
+{
+	unsigned int stride = lcm(s->align, HDN_SLAB_OFFSET_UNIT);
+	unsigned int capacity = slab->objects, limit, offset;
+
+	BUILD_BUG_ON(KMALLOC_MAX_SIZE > HDN_SLAB_STRIDE_MASK);
+	slab->stride = 0;
+	if (!smp_load_acquire(&hdn_slab_ready))
+		return;
+	limit = slab_size(slab) - (capacity - capacity / 8) * s->size;
+	limit = min(limit, 15U * HDN_SLAB_OFFSET_UNIT);
+	if (limit < stride)
+		atomic64_inc(&hdn_slab_no_offset_room);
+	offset = (hdn_slab_choice(s, 2) % (limit / stride + 1)) * stride;
+	slab->stride = (offset / HDN_SLAB_OFFSET_UNIT) << HDN_SLAB_OFFSET_SHIFT;
+	slab->objects = (slab_size(slab) - offset) / s->size;
+	if (offset) {
+		atomic64_inc(&hdn_slab_offset_slabs);
+		atomic64_add(offset, &hdn_slab_offset_bytes);
+	}
+	atomic64_add(capacity, &hdn_slab_original_objects);
+	atomic64_add(slab->objects, &hdn_slab_placed_objects);
+	atomic64_add(capacity - slab->objects, &hdn_slab_displaced_objects);
+	atomic64_inc(&hdn_slab_created);
+}
+#else
+static inline struct kmem_cache_order_objects hdn_slab_order(struct kmem_cache *s)
+{
+	return s->oo;
+}
+static inline void hdn_slab_place(struct kmem_cache *s, struct slab *slab) { }
+#endif
+
 static struct slab *allocate_slab(struct kmem_cache *s, gfp_t flags, int node)
 {
 	bool allow_spin = gfpflags_allow_spinning(flags);
 	struct slab *slab;
-	struct kmem_cache_order_objects oo = s->oo;
+	struct kmem_cache_order_objects oo = hdn_slab_order(s);
 	gfp_t alloc_gfp;
 	void *start, *p, *next;
 	int idx;
@@ -3479,17 +3656,34 @@ static struct slab *allocate_slab(struct kmem_cache *s, gfp_t flags, int node)
 	 * __GFP_RECLAIM could be cleared on the first allocation attempt,
 	 * so pass allow_spin flag directly.
 	 */
-	slab = alloc_slab_page(alloc_gfp, node, oo, allow_spin);
+	slab = alloc_slab_page(s, alloc_gfp, node, oo, allow_spin);
 	if (unlikely(!slab)) {
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+		unsigned int order = oo_order(oo);
+
+		if (order <= oo_order(s->min))
+			return NULL;
+		do {
+			order--;
+			oo = oo_make(order, s->size);
+			slab = alloc_slab_page(s,
+					       order == oo_order(s->min) ? flags : alloc_gfp,
+					       node, oo, allow_spin);
+		} while (!slab && order > oo_order(s->min));
+		if (!slab)
+			return NULL;
+		atomic64_inc(&hdn_slab_fallback);
+#else
 		oo = s->min;
 		alloc_gfp = flags;
 		/*
 		 * Allocation may have failed due to fragmentation.
 		 * Try a lower order alloc if possible
 		 */
-		slab = alloc_slab_page(alloc_gfp, node, oo, allow_spin);
+		slab = alloc_slab_page(s, alloc_gfp, node, oo, allow_spin);
 		if (unlikely(!slab))
 			return NULL;
+#endif
 		stat(s, ORDER_FALLBACK);
 	}
 
@@ -3498,12 +3692,14 @@ static struct slab *allocate_slab(struct kmem_cache *s, gfp_t flags, int node)
 	slab->frozen = 0;
 
 	slab->slab_cache = s;
+	hdn_slab_place(s, slab);
 
 	kasan_poison_slab(slab);
 
 	start = slab_address(slab);
 
 	setup_slab_debug(s, slab, start);
+	start = slab_object_address(slab);
 	init_slab_obj_exts(slab);
 	/*
 	 * Poison the slab before initializing the slabobj_ext array
@@ -3580,7 +3776,7 @@ static void free_slab(struct kmem_cache *s, struct slab *slab)
 		void *p;
 
 		slab_pad_check(s, slab);
-		for_each_object(p, s, slab_address(slab), slab->objects)
+		for_each_object(p, s, slab_object_address(slab), slab->objects)
 			check_object(s, slab, p, SLUB_RED_INACTIVE);
 	}
 
@@ -5209,6 +5405,10 @@ static void *___kmalloc_large_node(size_t size, gfp_t flags, int node)
 		mod_lruvec_page_state(page, NR_SLAB_UNRECLAIMABLE_B,
 				      PAGE_SIZE << order);
 		__SetPageLargeKmalloc(page);
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+		/* LargeKmalloc owns this word until free_large_kmalloc(). */
+		set_page_private(page, 0);
+#endif
 	}
 
 	ptr = kasan_kmalloc_large(ptr, size, flags);
@@ -5248,6 +5448,10 @@ void *__do_kmalloc_node(size_t size, kmem_buckets *b, gfp_t flags, int node,
 
 	if (unlikely(size > KMALLOC_MAX_CACHE_SIZE)) {
 		ret = __kmalloc_large_node_noprof(size, flags, node);
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+		if (ret && b)
+			set_page_private(virt_to_page(ret), (*b)[KMALLOC_SHIFT_LOW]->hdn_alloc_domain);
+#endif
 		trace_kmalloc(caller, ret, size,
 			      PAGE_SIZE << get_order(size), flags, node);
 		return ret;
@@ -5274,6 +5478,155 @@ void *__kmalloc_noprof(size_t size, gfp_t flags)
 	return __do_kmalloc_node(size, NULL, flags, NUMA_NO_NODE, _RET_IP_);
 }
 EXPORT_SYMBOL(__kmalloc_noprof);
+
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+static atomic64_t hdn_typed_allocs, hdn_successful_allocs, hdn_failed_allocs;
+static atomic64_t hdn_mandatory_allocs, hdn_early_allocs, hdn_rejected_allocs;
+
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB_TEST
+static DEFINE_MUTEX(hdn_alloc_test_lock);
+static u64 hdn_alloc_test_fail_identity;
+static atomic64_t hdn_alloc_test_attempts;
+static atomic64_t hdn_alloc_test_failures;
+
+int hdn_alloc_test_fail(u64 identity)
+{
+	int error = 0;
+
+	if (!identity)
+		return -EINVAL;
+	mutex_lock(&hdn_alloc_test_lock);
+	if (hdn_alloc_test_fail_identity)
+		error = -EBUSY;
+	else
+		WRITE_ONCE(hdn_alloc_test_fail_identity, identity);
+	if (!error) {
+		atomic64_set(&hdn_alloc_test_attempts, 0);
+		atomic64_set(&hdn_alloc_test_failures, 0);
+	}
+	mutex_unlock(&hdn_alloc_test_lock);
+	return error;
+}
+
+void hdn_alloc_test_clear(u64 *attempts, u64 *failures)
+{
+	mutex_lock(&hdn_alloc_test_lock);
+	WRITE_ONCE(hdn_alloc_test_fail_identity, 0);
+	*attempts = atomic64_read(&hdn_alloc_test_attempts);
+	*failures = atomic64_read(&hdn_alloc_test_failures);
+	mutex_unlock(&hdn_alloc_test_lock);
+}
+
+static bool hdn_alloc_test_should_fail(u64 identity)
+{
+	return READ_ONCE(hdn_alloc_test_fail_identity) == identity;
+}
+
+static void hdn_alloc_test_account(bool failed)
+{
+	atomic64_inc(&hdn_alloc_test_attempts);
+	if (failed)
+		atomic64_inc(&hdn_alloc_test_failures);
+}
+#else
+static inline bool hdn_alloc_test_should_fail(u64 identity)
+{
+	return false;
+}
+static inline void hdn_alloc_test_account(bool failed) { }
+#endif
+
+static kmem_buckets *hdn_alloc_buckets(unsigned int domain, gfp_t flags, u64 identity)
+{
+	unsigned int plane;
+
+	if (!domain || (domain >= HDN_ALLOC_TIER_BASE &&
+			 domain < HDN_ALLOC_TIER_BASE + NR_KMALLOC_TYPES)) {
+		enum kmalloc_cache_type type = kmalloc_type(flags, 0);
+
+#ifdef CONFIG_RANDOM_KMALLOC_CACHES
+		if (!(flags & KMALLOC_NOT_NORMAL_BITS))
+			type = KMALLOC_RANDOM_START + identity % (RANDOM_KMALLOC_CACHES_NR + 1);
+#endif
+		if (domain >= HDN_ALLOC_TIER_BASE && !(flags & KMALLOC_NOT_NORMAL_BITS)) {
+			unsigned int previous = domain - HDN_ALLOC_TIER_BASE;
+
+			if (previous == KMALLOC_NORMAL ||
+			    (IS_ENABLED(CONFIG_RANDOM_KMALLOC_CACHES) &&
+			     previous >= KMALLOC_RANDOM_START && previous <= KMALLOC_RANDOM_END))
+				type = previous;
+		}
+		return &kmalloc_caches[type];
+	}
+	if (!smp_load_acquire(&hdn_alloc_ready) || domain > HDN_ALLOC_MODULE)
+		return NULL;
+	if (IS_ENABLED(CONFIG_ZONE_DMA) && (flags & __GFP_DMA))
+		plane = 2;
+	else if (flags & __GFP_RECLAIMABLE)
+		plane = 1;
+	else if (IS_ENABLED(CONFIG_MEMCG) && (flags & __GFP_ACCOUNT))
+		plane = 3;
+	else
+		plane = 0;
+	return &hdn_alloc_caches[domain][plane];
+}
+
+void *__hdn_alloc_typed(size_t size, gfp_t flags, int node, unsigned int virtual,
+			u64 identity, unsigned int domain)
+{
+	kmem_buckets *buckets;
+	void *result;
+
+	atomic64_inc(&hdn_typed_allocs);
+	if (!identity || virtual > 1)
+		goto rejected;
+	/* Module code gets a lower-trust class, never a built-in domain. */
+	if (READ_ONCE(hdn_alloc_ready) && is_module_text_address(_RET_IP_))
+		domain = HDN_ALLOC_MODULE;
+	else if (domain > HDN_ALLOC_MODULE)
+		goto rejected;
+	if (!READ_ONCE(hdn_alloc_ready))
+		atomic64_inc(&hdn_early_allocs);
+	if (unlikely(hdn_alloc_test_should_fail(identity))) {
+		hdn_alloc_test_account(true);
+		goto failed;
+	}
+	buckets = hdn_alloc_buckets(domain, flags, identity);
+	if (!buckets)
+		goto rejected;
+	if (domain)
+		atomic64_inc(&hdn_mandatory_allocs);
+	if (virtual)
+		result = __kvmalloc_node_noprof(PASS_BUCKET_PARAMS(size, buckets), 1,
+						 flags, node);
+	else
+		result = __do_kmalloc_node(size, buckets, flags, node, _RET_IP_);
+	if (unlikely(!result && size))
+		goto failed;
+	atomic64_inc(&hdn_successful_allocs);
+	return result;
+rejected:
+	atomic64_inc(&hdn_rejected_allocs);
+failed:
+	atomic64_inc(&hdn_failed_allocs);
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(__hdn_alloc_typed);
+
+void hdn_alloc_get_stats(struct hdn_alloc_stats *stats)
+{
+	*stats = (struct hdn_alloc_stats) {
+		.typed = atomic64_read(&hdn_typed_allocs),
+		.successful = atomic64_read(&hdn_successful_allocs),
+		.failed = atomic64_read(&hdn_failed_allocs),
+		.mandatory = atomic64_read(&hdn_mandatory_allocs),
+		.early = atomic64_read(&hdn_early_allocs),
+		.rejected = atomic64_read(&hdn_rejected_allocs),
+		.caches = READ_ONCE(hdn_alloc_cache_count),
+		.ready = smp_load_acquire(&hdn_alloc_ready),
+	};
+}
+#endif
 
 /**
  * kmalloc_nolock - Allocate an object of given size from any context.
@@ -6162,7 +6515,7 @@ void defer_free_barrier(void)
 }
 
 static __fastpath_inline
-void slab_free(struct kmem_cache *s, struct slab *slab, void *object,
+void __slab_free_object(struct kmem_cache *s, struct slab *slab, void *object,
 	       unsigned long addr)
 {
 	memcg_slab_free_hook(s, slab, &object, 1);
@@ -6180,6 +6533,30 @@ void slab_free(struct kmem_cache *s, struct slab *slab, void *object,
 	__slab_free(s, slab, object, object, 1, addr);
 	stat(s, FREE_SLOWPATH);
 }
+
+static __fastpath_inline
+void slab_free(struct kmem_cache *s, struct slab *slab, void *object,
+	       unsigned long addr)
+{
+	hdn_jitter_reject_generic(s);
+	if (slab)
+		hdn_jitter_reject_generic(slab->slab_cache);
+	__slab_free_object(s, slab, object, addr);
+}
+
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_JITTER
+void hdn_jitter_release_backing(struct kmem_cache *cache, void *backing)
+{
+	BUG_ON(!cache->hdn_jitter_class || !hdn_jitter_release_allowed(cache, backing));
+	__slab_free_object(cache, virt_to_slab(backing), backing, _RET_IP_);
+}
+
+void hdn_jitter_abort_backing(struct kmem_cache *cache, void *backing)
+{
+	BUG_ON(!cache->hdn_jitter_class);
+	__slab_free_object(cache, virt_to_slab(backing), backing, _RET_IP_);
+}
+#endif
 
 #ifdef CONFIG_MEMCG
 /* Do not inline the rare memcg charging failed path into the allocation path */
@@ -6388,6 +6765,14 @@ size_t ksize(const void *objp)
 	if (unlikely(ZERO_OR_NULL_PTR(objp)) || !kasan_check_byte(objp))
 		return 0;
 
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_JITTER
+	{
+		struct slab *slab = virt_to_slab(objp);
+
+		if (slab && slab->slab_cache->hdn_jitter_class)
+			return hdn_jitter_usable_size(objp);
+	}
+#endif
 	return kfence_ksize(objp) ?: __ksize(objp);
 }
 EXPORT_SYMBOL(ksize);
@@ -6411,6 +6796,9 @@ static void free_large_kmalloc(struct page *page, void *object)
 	mod_lruvec_page_state(page, NR_SLAB_UNRECLAIMABLE_B,
 			      -(PAGE_SIZE << order));
 	__ClearPageLargeKmalloc(page);
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	set_page_private(page, 0);
+#endif
 	free_frozen_pages(page, order);
 }
 
@@ -6445,7 +6833,7 @@ void kvfree_rcu_cb(struct rcu_head *head)
 	}
 
 	s = slab->slab_cache;
-	slab_addr = slab_address(slab);
+	slab_addr = slab_object_address(slab);
 
 	if (is_kfence_address(obj)) {
 		obj = kfence_object_start(obj);
@@ -6515,6 +6903,7 @@ void kfree_nolock(const void *object)
 	}
 
 	s = slab->slab_cache;
+	hdn_jitter_reject_generic(s);
 
 	memcg_slab_free_hook(s, slab, &x, 1);
 	alloc_tagging_slab_free_hook(s, slab, &x, 1);
@@ -6567,6 +6956,9 @@ __do_krealloc(const void *p, size_t new_size, unsigned long align, gfp_t flags, 
 	size_t ks = 0;
 	int orig_size = 0;
 	struct kmem_cache *s = NULL;
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	unsigned int domain = 0;
+#endif
 
 	if (unlikely(ZERO_OR_NULL_PTR(p)))
 		goto alloc_new;
@@ -6574,15 +6966,28 @@ __do_krealloc(const void *p, size_t new_size, unsigned long align, gfp_t flags, 
 	/* Check for double-free. */
 	if (!kasan_check_byte(p))
 		return NULL;
+	{
+		struct slab *slab = virt_to_slab(p);
+
+		if (slab)
+			hdn_jitter_reject_generic(slab->slab_cache);
+	}
 
 	if (is_kfence_address(p)) {
 		ks = orig_size = kfence_ksize(p);
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+		s = virt_to_slab(p)->slab_cache;
+#endif
 	} else {
 		struct page *page = virt_to_page(p);
 		struct slab *slab = page_slab(page);
 
 		if (!slab) {
 			/* Big kmalloc object */
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+			if (PageLargeKmalloc(page))
+				domain = page_private(page);
+#endif
 			ks = page_size(page);
 			WARN_ON(ks <= KMALLOC_MAX_CACHE_SIZE);
 			WARN_ON(p != page_address(page));
@@ -6622,7 +7027,7 @@ __do_krealloc(const void *p, size_t new_size, unsigned long align, gfp_t flags, 
 	}
 
 	/* Setup kmalloc redzone when needed */
-	if (s && slub_debug_orig_size(s)) {
+	if (s && !is_kfence_address(p) && slub_debug_orig_size(s)) {
 		set_orig_size(s, (void *)p, new_size);
 		if (s->flags & SLAB_RED_ZONE && new_size < ks)
 			memset_no_sanitize_memory(kasan_reset_tag(p) + new_size,
@@ -6633,6 +7038,17 @@ __do_krealloc(const void *p, size_t new_size, unsigned long align, gfp_t flags, 
 	return (void *)p;
 
 alloc_new:
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	if (s)
+		domain = s->hdn_alloc_domain;
+	if (domain) {
+		kmem_buckets *buckets = hdn_alloc_buckets(domain, flags, 0);
+
+		if (!buckets)
+			return NULL;
+		ret = __do_kmalloc_node(new_size, buckets, flags, nid, _RET_IP_);
+	} else
+#endif
 	ret = kmalloc_node_track_caller_noprof(new_size, flags, nid, _RET_IP_);
 	if (ret && p) {
 		/* Disable KASAN checks as the object's redzone is accessed. */
@@ -6783,9 +7199,14 @@ void *__kvmalloc_node_noprof(DECL_BUCKET_PARAMS(size, b), unsigned long align,
 	 * about the resulting pointer, and cannot play
 	 * protection games.
 	 */
-	return __vmalloc_node_range_noprof(size, align, VMALLOC_START, VMALLOC_END,
+	ret = __vmalloc_node_range_noprof(size, align, VMALLOC_START, VMALLOC_END,
 			flags, PAGE_KERNEL, allow_block ? VM_ALLOW_HUGE_VMAP:0,
 			node, __builtin_return_address(0));
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	if (ret && b)
+		find_vm_area(ret)->hdn_alloc_domain = (*b)[KMALLOC_SHIFT_LOW]->hdn_alloc_domain;
+#endif
+	return ret;
 }
 EXPORT_SYMBOL(__kvmalloc_node_noprof);
 
@@ -6864,7 +7285,28 @@ void *kvrealloc_node_align_noprof(const void *p, size_t size, unsigned long alig
 	n = krealloc_node_align_noprof(p, size, align, kmalloc_gfp_adjust(flags, size), nid);
 	if (!n) {
 		/* We failed to krealloc(), fall back to kvmalloc(). */
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+		unsigned int domain = 0;
+		kmem_buckets *buckets = NULL;
+
+		if (!ZERO_OR_NULL_PTR(p)) {
+			struct page *page = virt_to_page(p);
+			struct slab *slab = page_slab(page);
+
+			if (slab || is_kfence_address(p))
+				domain = virt_to_slab(p)->slab_cache->hdn_alloc_domain;
+			else if (PageLargeKmalloc(page))
+				domain = page_private(page);
+		}
+		if (domain) {
+			buckets = hdn_alloc_buckets(domain, flags, 0);
+			if (!buckets)
+				return NULL;
+		}
+		n = __kvmalloc_node_noprof(size, buckets, align, flags, nid);
+#else
 		n = kvmalloc_node_align_noprof(size, align, flags, nid);
+#endif
 		if (!n)
 			return NULL;
 
@@ -6992,6 +7434,19 @@ void kmem_cache_free_bulk(struct kmem_cache *s, size_t size, void **p)
 {
 	if (!size)
 		return;
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_JITTER
+	if (s)
+		hdn_jitter_reject_generic(s);
+	for (size_t i = 0; i < size; i++) {
+		struct slab *slab;
+
+		if (ZERO_OR_NULL_PTR(p[i]))
+			continue;
+		slab = virt_to_slab(p[i]);
+		if (slab)
+			hdn_jitter_reject_generic(slab->slab_cache);
+	}
+#endif
 
 	/*
 	 * freeing to sheaves is so incompatible with the detached freelist so
@@ -7301,8 +7756,8 @@ out:
 EXPORT_SYMBOL(kmem_cache_alloc_bulk_noprof);
 
 /*
- * Object placement in a slab is made very easy because we always start at
- * offset 0. If we tune the size of the object to the alignment then we can
+ * Object placement starts at an aligned per-slab object-area offset. If we
+ * tune the size of the object to the alignment then we can
  * get the required alignment by putting one properly sized object after
  * another.
  *
@@ -7774,8 +8229,8 @@ static int calculate_sizes(struct kmem_cache_args *args, struct kmem_cache *s)
 #endif
 
 	/*
-	 * SLUB stores one object immediately after another beginning from
-	 * offset 0. In order to align the objects we have to simply size
+	 * SLUB stores one object immediately after another beginning from an
+	 * aligned object-area offset. In order to align the objects we size
 	 * each object to conform to the alignment.
 	 */
 	aligned_size = ALIGN(size, s->align);
@@ -7816,6 +8271,12 @@ static int calculate_sizes(struct kmem_cache_args *args, struct kmem_cache *s)
 	 */
 	s->oo = oo_make(order, size);
 	s->min = oo_make(get_order(size), size);
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+	s->hdn_min_order = order;
+	if (order < min(slub_max_order, 3U) &&
+	    order_objects(order + 1, size) <= MAX_OBJS_PER_PAGE)
+		s->oo = oo_make(order + 1, size);
+#endif
 
 	return !!oo_objects(s->oo);
 }
@@ -7823,7 +8284,7 @@ static int calculate_sizes(struct kmem_cache_args *args, struct kmem_cache *s)
 static void list_slab_objects(struct kmem_cache *s, struct slab *slab)
 {
 #ifdef CONFIG_SLUB_DEBUG
-	void *addr = slab_address(slab);
+	void *addr = slab_object_address(slab);
 	void *p;
 
 	if (!slab_add_kunit_errors())
@@ -7923,7 +8384,7 @@ void __kmem_obj_info(struct kmem_obj_info *kpp, void *object, struct slab *slab)
 	kpp->kp_ptr = object;
 	kpp->kp_slab = slab;
 	kpp->kp_slab_cache = s;
-	base = slab_address(slab);
+	base = slab_object_address(slab);
 	objp0 = kasan_reset_tag(object);
 #ifdef CONFIG_SLUB_DEBUG
 	objp = restore_red_left(s, objp0);
@@ -8058,9 +8519,15 @@ void __check_heap_object(const void *ptr, unsigned long n,
 
 	/* Find object and usable object size. */
 	s = slab->slab_cache;
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_JITTER
+	/* None of the closed initial classes has a usercopy region. */
+	if (s->hdn_jitter_class)
+		usercopy_abort("HDN critical object", s->name, to_user, 0, n);
+#endif
 
 	/* Reject impossible pointers. */
-	if (ptr < slab_address(slab))
+	if (ptr < slab_object_address(slab) ||
+	    (!is_kfence && ptr >= slab_object_address(slab) + slab->objects * s->size))
 		usercopy_abort("SLUB object not in SLUB page?!", NULL,
 			       to_user, 0, n);
 
@@ -8068,7 +8535,7 @@ void __check_heap_object(const void *ptr, unsigned long n,
 	if (is_kfence)
 		offset = ptr - kfence_object_start(ptr);
 	else
-		offset = (ptr - slab_address(slab)) % s->size;
+		offset = (ptr - slab_object_address(slab)) % s->size;
 
 	/* Adjust for redzone and reject if within the redzone. */
 	if (!is_kfence && kmem_cache_debug_flags(s, SLAB_RED_ZONE)) {
@@ -8424,6 +8891,10 @@ void __init kmem_cache_init(void)
 
 void __init kmem_cache_init_late(void)
 {
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_LAYOUT
+	get_random_bytes(&hdn_slab_key, sizeof(hdn_slab_key));
+	smp_store_release(&hdn_slab_ready, true);
+#endif
 	flushwq = alloc_workqueue("slub_flushwq", WQ_MEM_RECLAIM | WQ_PERCPU,
 				  0);
 	WARN_ON(!flushwq);
@@ -8548,7 +9019,7 @@ static void validate_slab(struct kmem_cache *s, struct slab *slab,
 			  unsigned long *obj_map)
 {
 	void *p;
-	void *addr = slab_address(slab);
+	void *addr = slab_object_address(slab);
 
 	if (!validate_slab_ptr(slab)) {
 		slab_err(s, slab, "Not a valid slab page");
@@ -8779,7 +9250,7 @@ static void process_slab(struct loc_track *t, struct kmem_cache *s,
 		struct slab *slab, enum track_item alloc,
 		unsigned long *obj_map)
 {
-	void *addr = slab_address(slab);
+	void *addr = slab_object_address(slab);
 	bool is_alloc = (alloc == TRACK_ALLOC);
 	void *p;
 

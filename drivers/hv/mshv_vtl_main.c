@@ -1319,7 +1319,9 @@ static int __init mshv_vtl_init(void)
 		goto free_dev;
 	}
 
-	mshv_vtl_return_call_init(mshv_vsm_page_offsets.vtl_return_offset);
+	ret = mshv_vtl_return_call_init(mshv_vsm_page_offsets.vtl_return_offset);
+	if (ret)
+		goto free_dev;
 	ret = hv_vtl_setup_synic();
 	if (ret)
 		goto free_dev;

@@ -267,7 +267,7 @@ static const struct lsm_id safesetid_lsmid = {
 	.id = LSM_ID_SAFESETID,
 };
 
-static struct security_hook_list safesetid_security_hooks[] = {
+static struct security_hook_list safesetid_security_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(task_fix_setuid, safesetid_task_fix_setuid),
 	LSM_HOOK_INIT(task_fix_setgid, safesetid_task_fix_setgid),
 	LSM_HOOK_INIT(task_fix_setgroups, safesetid_task_fix_setgroups),

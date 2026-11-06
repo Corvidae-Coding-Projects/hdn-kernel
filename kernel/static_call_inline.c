@@ -139,6 +139,7 @@ void __static_call_update(struct static_call_key *key, void *tramp, void *func)
 	cpus_read_lock();
 	static_call_lock();
 
+	hdn_rap_static_update((unsigned long)key, (unsigned long)tramp, (unsigned long)func);
 	if (key->func == func)
 		goto done;
 

@@ -6,6 +6,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 .file "blowfish-x86_64-asm.S"
 .text
@@ -100,6 +101,7 @@
 	movq RX0, 		(RIO);
 
 SYM_FUNC_START(blowfish_enc_blk)
+	HDN_ASM_FUNCTION blowfish_enc_blk
 	/* input:
 	 *	%rdi: ctx
 	 *	%rsi: dst
@@ -127,10 +129,12 @@ SYM_FUNC_START(blowfish_enc_blk)
 	movq %r10, RIO;
 
 	write_block();
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END blowfish_enc_blk
 SYM_FUNC_END(blowfish_enc_blk)
 
 SYM_FUNC_START(blowfish_dec_blk)
+	HDN_ASM_FUNCTION blowfish_dec_blk
 	/* input:
 	 *	%rdi: ctx
 	 *	%rsi: dst
@@ -159,7 +163,8 @@ SYM_FUNC_START(blowfish_dec_blk)
 
 	movq %r11, %r12;
 
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END blowfish_dec_blk
 SYM_FUNC_END(blowfish_dec_blk)
 
 /**********************************************************************
@@ -273,6 +278,7 @@ SYM_FUNC_END(blowfish_dec_blk)
 	xorq RT3,		RX3;
 
 SYM_FUNC_START(blowfish_enc_blk_4way)
+	HDN_ASM_FUNCTION blowfish_enc_blk_4way
 	/* input:
 	 *	%rdi: ctx
 	 *	%rsi: dst
@@ -304,10 +310,12 @@ SYM_FUNC_START(blowfish_enc_blk_4way)
 
 	popq %rbx;
 	popq %r12;
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END blowfish_enc_blk_4way
 SYM_FUNC_END(blowfish_enc_blk_4way)
 
 SYM_FUNC_START(__blowfish_dec_blk_4way)
+	HDN_ASM_FUNCTION __blowfish_dec_blk_4way
 	/* input:
 	 *	%rdi: ctx
 	 *	%rsi: dst
@@ -350,5 +358,6 @@ SYM_FUNC_START(__blowfish_dec_blk_4way)
 	popq %rbx;
 	popq %r12;
 
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END __blowfish_dec_blk_4way
 SYM_FUNC_END(__blowfish_dec_blk_4way)

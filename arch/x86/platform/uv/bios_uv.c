@@ -26,13 +26,21 @@ static s64 __uv_bios_call(enum uv_bios_cmd which, u64 a1, u64 a2, u64 a3,
 	struct uv_systab *tab = uv_systab;
 	s64 ret;
 
-	if (!tab || !tab->function)
+	if (!tab || !tab->function || !efi_enabled(EFI_RUNTIME_SERVICES))
 		/*
 		 * BIOS does not support UV systab
 		 */
 		return BIOS_STATUS_UNIMPLEMENTED;
 
-	ret = efi_call_virt_pointer(tab, function, (u64)which, a1, a2, a3, a4, a5);
+	arch_efi_call_virt_setup();
+	{
+		unsigned long flags = efi_call_virt_save_flags();
+
+		ret = arch_efi_call_virt_address(HDN_EFI_UV, READ_ONCE(tab->function),
+					       (u64)which, a1, a2, a3, a4, a5);
+		efi_call_virt_check_flags(flags, NULL);
+	}
+	arch_efi_call_virt_teardown();
 
 	return ret;
 }
@@ -237,7 +245,7 @@ unsigned long get_uv_systab_phys(bool msg)
 	return uv_systab_phys;
 }
 
-int uv_bios_init(void)
+int __init uv_bios_init(void)
 {
 	unsigned long uv_systab_phys_addr;
 
@@ -263,6 +271,11 @@ int uv_bios_init(void)
 			pr_err("UV: UVsystab: ioremap(%d) failed!\n", size);
 			return -EFAULT;
 		}
+	}
+	if (hdn_efi_register(HDN_EFI_UV, (unsigned long)uv_systab->function, false)) {
+		iounmap(uv_systab);
+		uv_systab = NULL;
+		return -EINVAL;
 	}
 	pr_info("UV: UVsystab: Revision:%x\n", uv_systab->revision);
 	return 0;

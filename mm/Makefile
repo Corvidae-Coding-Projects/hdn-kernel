@@ -70,6 +70,7 @@ obj-y += init-mm.o
 obj-y += memblock.o
 obj-y += $(memory-hotplug-y)
 obj-y += slub.o
+obj-$(CONFIG_SECURITY_HARDENING_SLAB_JITTER) += hdn_jitter.o
 
 ifdef CONFIG_MMU
 	obj-$(CONFIG_ADVISE_SYSCALLS)	+= madvise.o
@@ -148,5 +149,6 @@ obj-$(CONFIG_HAVE_BOOTMEM_INFO_NODE) += bootmem_info.o
 obj-$(CONFIG_GENERIC_IOREMAP) += ioremap.o
 obj-$(CONFIG_SHRINKER_DEBUG) += shrinker_debug.o
 obj-$(CONFIG_EXECMEM) += execmem.o
+obj-$(CONFIG_SECURITY_HARDENING_EXECMEM) += hdn_execmem.o
 obj-$(CONFIG_TMPFS_QUOTA) += shmem_quota.o
 obj-$(CONFIG_LAZY_MMU_MODE_KUNIT_TEST) += tests/lazy_mmu_mode_kunit.o

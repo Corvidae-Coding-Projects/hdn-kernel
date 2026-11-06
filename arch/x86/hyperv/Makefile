@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 obj-y			:= hv_init.o mmu.o nested.o irqdomain.o ivm.o
 obj-$(CONFIG_X86_64)	+= hv_apic.o
+obj-$(CONFIG_SECURITY_HARDENING_RAP) += hdn_hypercall.o hdn_hypercall_asm.o
 obj-$(CONFIG_HYPERV_VTL_MODE)	+= hv_vtl.o mshv_vtl_asm.o
 
 $(obj)/mshv_vtl_asm.o: $(obj)/mshv-asm-offsets.h
@@ -20,3 +21,7 @@ endif
 
 targets += mshv-asm-offsets.s
 clean-files += mshv-asm-offsets.h
+
+ifeq ($(CONFIG_MSHV_ROOT)$(CONFIG_CRASH_DUMP),yy)
+obj-$(CONFIG_SECURITY_HARDENING_RAP) += hdn_crash_asm.o
+endif

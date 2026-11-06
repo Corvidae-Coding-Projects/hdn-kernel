@@ -5,6 +5,8 @@
  * (C) 2012 Christoph Lameter <cl@gentwo.org>
  */
 #include <linux/slab.h>
+#include <linux/hdn_alloc.h>
+#include "hdn_jitter.h"
 
 #include <linux/mm.h>
 #include <linux/poison.h>
@@ -667,6 +669,7 @@ bool kmem_dump_obj(void *object)
 	}
 	if (kp.kp_slab_cache && kp.kp_slab_cache->object_size)
 		pr_cont(" size %u", kp.kp_slab_cache->object_size);
+	hdn_jitter_dump(object);
 	if (kp.kp_ret)
 		pr_cont(" allocated at %pS\n", kp.kp_ret);
 	else
@@ -941,6 +944,68 @@ static unsigned int __kmalloc_minalign(void)
 	return max(minalign, arch_slab_minalign());
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+kmem_buckets hdn_alloc_caches[HDN_ALLOC_MODULE + 1][HDN_ALLOC_PLANES] __ro_after_init;
+bool hdn_alloc_ready __ro_after_init;
+unsigned int hdn_alloc_cache_count __ro_after_init;
+
+void hdn_cache_domain(struct kmem_cache *cache, enum hdn_alloc_domain domain)
+{
+	BUG_ON(!cache || !(cache->flags & SLAB_NO_MERGE) || cache->refcount != 1 ||
+	       domain <= HDN_ALLOC_MODULE || domain >= HDN_ALLOC_DOMAIN_MAX ||
+	       READ_ONCE(cache->hdn_alloc_domain));
+	WRITE_ONCE(cache->hdn_alloc_domain, domain);
+}
+
+static void __init hdn_create_alloc_caches(void)
+{
+	const enum kmalloc_cache_type types[HDN_ALLOC_PLANES] = {
+		KMALLOC_NORMAL, KMALLOC_RECLAIM, KMALLOC_DMA, KMALLOC_CGROUP,
+	};
+	unsigned int domain, plane, index;
+
+	for (plane = 0; plane < NR_KMALLOC_TYPES; plane++)
+		for (index = 0; index <= KMALLOC_SHIFT_HIGH; index++)
+			if (kmalloc_caches[plane][index])
+				kmalloc_caches[plane][index]->hdn_alloc_domain = HDN_ALLOC_TIER_BASE + plane;
+
+	for (domain = 1; domain <= HDN_ALLOC_MODULE; domain++) {
+		for (plane = 0; plane < HDN_ALLOC_PLANES; plane++) {
+			for (index = 0; index <= KMALLOC_SHIFT_HIGH; index++) {
+				struct kmem_cache *base = kmalloc_caches[types[plane]][index];
+				struct kmem_cache *cache = NULL;
+				char *name;
+				unsigned int earlier;
+
+				if (!base)
+					continue;
+				/* Preserve native small-size index aliases within a domain. */
+				for (earlier = 0; earlier < index; earlier++) {
+					if (kmalloc_caches[types[plane]][earlier] == base) {
+						cache = hdn_alloc_caches[domain][plane][earlier];
+						break;
+					}
+				}
+				if (!cache) {
+					if (++hdn_alloc_cache_count > 2048)
+						panic("HDN allocation cache budget exceeded");
+					name = kasprintf(GFP_KERNEL, "hdn-%u-%u-%u", domain,
+							 plane, base->object_size);
+					if (!name)
+						panic("HDN allocation cache metadata unavailable");
+					cache = create_kmalloc_cache(name, base->object_size,
+						(base->flags & (SLAB_ACCOUNT | SLAB_RECLAIM_ACCOUNT |
+						 SLAB_CACHE_DMA | SLAB_CACHE_DMA32)) | SLAB_NO_MERGE);
+					cache->hdn_alloc_domain = domain;
+				}
+				hdn_alloc_caches[domain][plane][index] = cache;
+			}
+		}
+	}
+	smp_store_release(&hdn_alloc_ready, true);
+}
+#endif
+
 static void __init
 new_kmalloc_cache(int idx, enum kmalloc_cache_type type)
 {
@@ -1021,6 +1086,9 @@ void __init create_kmalloc_caches(void)
 		kmem_buckets_cache = kmem_cache_create("kmalloc_buckets",
 						       sizeof(kmem_buckets),
 						       0, SLAB_NO_MERGE, NULL);
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+	hdn_create_alloc_caches();
+#endif
 }
 
 gfp_t kmalloc_fix_flags(gfp_t flags)

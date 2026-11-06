@@ -12,6 +12,7 @@
 #include <asm/cpufeatures.h>
 #include <asm/page.h>
 #include <asm/percpu.h>
+#include <asm/hdn_rap_call.h>
 
 #ifdef MODULE
   #define runtime_const_ptr(sym) (sym)
@@ -124,13 +125,24 @@ copy_user_generic(void *to, const void *from, unsigned long len)
 	 * Otherwise, use rep_movs_alternative.
 	 */
 	asm volatile(
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		ALTERNATIVE("jmp 990f", "", X86_FEATURE_FSRM)
+		"1: rep movsb\n\tjmp 992f\n\t"
+		"990:\n\t" HDN_ASM_C_CALL("rep_movs_alternative")
+		"992:\n\t"
+#else
 		"1:\n\t"
 		ALTERNATIVE("rep movsb",
 			    "call rep_movs_alternative", ALT_NOT(X86_FEATURE_FSRM))
+#endif
 		"2:\n"
 		_ASM_EXTABLE_UA(1b, 2b)
 		:"+c" (len), "+D" (to), "+S" (from), ASM_CALL_CONSTRAINT
-		: : "memory", "rax");
+		: : "memory", "rax"
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		, "r10", "r11", "cc"
+#endif
+		);
 	clac();
 	return len;
 }
@@ -188,13 +200,24 @@ static __always_inline __must_check unsigned long __clear_user(void __user *addr
 	 * knows about.
 	 */
 	asm volatile(
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+		ALTERNATIVE("jmp 990f", "", X86_FEATURE_FSRS)
+		"1: rep stosb\n\tjmp 992f\n\t"
+		"990:\n\t" HDN_ASM_C_CALL("rep_stos_alternative")
+		"992:\n\t"
+#else
 		"1:\n\t"
 		ALTERNATIVE("rep stosb",
 			    "call rep_stos_alternative", ALT_NOT(X86_FEATURE_FSRS))
+#endif
 		"2:\n"
 	       _ASM_EXTABLE_UA(1b, 2b)
 	       : "+c" (size), "+D" (addr), ASM_CALL_CONSTRAINT
-	       : "a" (0));
+	       : "a" (0)
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	       : "r10", "r11", "cc"
+#endif
+	       );
 
 	clac();
 

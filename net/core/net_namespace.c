@@ -5,6 +5,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/cache.h>
 #include <linux/slab.h>
+#include <linux/hdn_alloc.h>
 #include <linux/list.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
@@ -1264,7 +1265,8 @@ void __init net_ns_init(void)
 	netns_ipv4_struct_check();
 	net_cachep = kmem_cache_create("net_namespace", sizeof(struct net),
 					SMP_CACHE_BYTES,
-					SLAB_PANIC|SLAB_ACCOUNT, NULL);
+					SLAB_PANIC|SLAB_ACCOUNT|SLAB_HDN_DOMAIN, NULL);
+	hdn_cache_domain(net_cachep, HDN_ALLOC_NET_NAMESPACE);
 
 	/* Create workqueue for cleanup */
 	netns_wq = create_singlethread_workqueue("netns");

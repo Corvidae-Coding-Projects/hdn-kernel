@@ -55,6 +55,7 @@
 #include <asm/uv/uv.h>
 #include <asm/setup.h>
 #include <asm/ftrace.h>
+#include <asm/hdn_stack_mm.h>
 
 #include "mm_internal.h"
 
@@ -150,6 +151,9 @@ static void sync_global_pgds_l5(unsigned long start, unsigned long end)
 			pgd_t *pgd;
 			spinlock_t *pgt_lock;
 
+			if (hdn_stack_mm_sync_owned(pgd_page_get_mm(page), addr))
+				continue;
+
 			pgd = (pgd_t *)page_address(page) + pgd_index(addr);
 			/* the pgt_lock only for Xen */
 			pgt_lock = &pgd_page_get_mm(page)->page_table_lock;
@@ -191,6 +195,9 @@ static void sync_global_pgds_l4(unsigned long start, unsigned long end)
 			pgd_t *pgd;
 			p4d_t *p4d;
 			spinlock_t *pgt_lock;
+
+			if (hdn_stack_mm_sync_owned(pgd_page_get_mm(page), addr))
+				continue;
 
 			pgd = (pgd_t *)page_address(page) + pgd_index(addr);
 			p4d = p4d_offset(pgd, addr);
@@ -250,7 +257,7 @@ static __ref void *spp_getpage(void)
 	void *ptr;
 
 	if (after_bootmem)
-		ptr = (void *) get_zeroed_page(GFP_ATOMIC);
+		ptr = (void *)hdn_pt_alloc_address(GFP_ATOMIC | __GFP_ZERO, 0, true);
 	else
 		ptr = memblock_alloc(PAGE_SIZE, PAGE_SIZE);
 
@@ -1011,6 +1018,8 @@ static void __meminit free_pagetable(struct page *page, int order)
 	/* bootmem page has reserved flag */
 	if (PageReserved(page)) {
 		unsigned long nr_pages = 1 << order;
+
+		hdn_pt_release_reserved(page);
 #ifdef CONFIG_HAVE_BOOTMEM_INFO_NODE
 		enum bootmem_type type = bootmem_type(page);
 
@@ -1041,6 +1050,7 @@ static void __meminit free_pte_table(pte_t *pte_start, pmd_t *pmd)
 {
 	pte_t *pte;
 	int i;
+	struct page *table_page;
 
 	for (i = 0; i < PTRS_PER_PTE; i++) {
 		pte = pte_start + i;
@@ -1049,16 +1059,20 @@ static void __meminit free_pte_table(pte_t *pte_start, pmd_t *pmd)
 	}
 
 	/* free a pte table */
-	free_pagetable(pmd_page(*pmd), 0);
+	table_page = pmd_page(*pmd);
 	spin_lock(&init_mm.page_table_lock);
 	pmd_clear(pmd);
 	spin_unlock(&init_mm.page_table_lock);
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE))
+		flush_tlb_all();
+	free_pagetable(table_page, 0);
 }
 
 static void __meminit free_pmd_table(pmd_t *pmd_start, pud_t *pud)
 {
 	pmd_t *pmd;
 	int i;
+	struct page *table_page;
 
 	for (i = 0; i < PTRS_PER_PMD; i++) {
 		pmd = pmd_start + i;
@@ -1067,16 +1081,20 @@ static void __meminit free_pmd_table(pmd_t *pmd_start, pud_t *pud)
 	}
 
 	/* free a pmd table */
-	free_pagetable(pud_page(*pud), 0);
+	table_page = pud_page(*pud);
 	spin_lock(&init_mm.page_table_lock);
 	pud_clear(pud);
 	spin_unlock(&init_mm.page_table_lock);
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE))
+		flush_tlb_all();
+	free_pagetable(table_page, 0);
 }
 
 static void __meminit free_pud_table(pud_t *pud_start, p4d_t *p4d)
 {
 	pud_t *pud;
 	int i;
+	struct page *table_page;
 
 	for (i = 0; i < PTRS_PER_PUD; i++) {
 		pud = pud_start + i;
@@ -1085,10 +1103,13 @@ static void __meminit free_pud_table(pud_t *pud_start, p4d_t *p4d)
 	}
 
 	/* free a pud table */
-	free_pagetable(p4d_page(*p4d), 0);
+	table_page = p4d_page(*p4d);
 	spin_lock(&init_mm.page_table_lock);
 	p4d_clear(p4d);
 	spin_unlock(&init_mm.page_table_lock);
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE))
+		flush_tlb_all();
+	free_pagetable(table_page, 0);
 }
 
 static void __meminit
@@ -1397,10 +1418,13 @@ void mark_rodata_ro(void)
 	unsigned long text_end = PFN_ALIGN(_etext);
 	unsigned long rodata_end = PFN_ALIGN(__end_rodata);
 	unsigned long all_end;
+	int ret;
 
 	printk(KERN_INFO "Write protecting the kernel read-only data: %luk\n",
 	       (end - start) >> 10);
-	set_memory_ro(start, (end - start) >> PAGE_SHIFT);
+	ret = set_memory_ro(start, (end - start) >> PAGE_SHIFT);
+	if (ret && IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNEL_WX))
+		panic("Unable to finalize kernel read-only mappings");
 
 	kernel_set_to_readonly = 1;
 
@@ -1417,7 +1441,9 @@ void mark_rodata_ro(void)
 	 * has been zapped already via cleanup_highmem().
 	 */
 	all_end = roundup((unsigned long)_brk_end, PMD_SIZE);
-	set_memory_nx(text_end, (all_end - text_end) >> PAGE_SHIFT);
+	ret = set_memory_nx(text_end, (all_end - text_end) >> PAGE_SHIFT);
+	if (ret && IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNEL_WX))
+		panic("Unable to finalize kernel non-executable mappings");
 
 	set_ftrace_ops_ro();
 

@@ -4,7 +4,9 @@
 #include <linux/error-injection.h>
 #include <linux/kprobes.h>
 #include <linux/objtool.h>
+#include <asm/hdn_rap_probe.h>
 
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 asmlinkage void just_return_func(void);
 
 asm(
@@ -17,9 +19,14 @@ asm(
 		ASM_RET
 	".size just_return_func, .-just_return_func\n"
 );
+#endif
 
 void override_function_with_return(struct pt_regs *regs)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	hdn_rap_probe_override(regs);
+#else
 	regs->ip = (unsigned long)&just_return_func;
+#endif
 }
 NOKPROBE_SYMBOL(override_function_with_return);

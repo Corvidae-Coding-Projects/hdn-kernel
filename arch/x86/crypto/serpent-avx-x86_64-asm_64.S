@@ -9,6 +9,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <linux/cfi_types.h>
 #include <asm/frame.h>
 #include "glue_helper-asm-avx.S"
@@ -552,6 +553,7 @@
 	transpose_4x4(x0, x1, x2, x3, t0, t1, t2)
 
 SYM_FUNC_START_LOCAL(__serpent_enc_blk8_avx)
+	HDN_REGS_FUNC __serpent_enc_blk8_avx
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2: blocks
@@ -601,10 +603,12 @@ SYM_FUNC_START_LOCAL(__serpent_enc_blk8_avx)
 	write_blocks(RA1, RB1, RC1, RD1, RK0, RK1, RK2);
 	write_blocks(RA2, RB2, RC2, RD2, RK0, RK1, RK2);
 
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __serpent_enc_blk8_avx
 SYM_FUNC_END(__serpent_enc_blk8_avx)
 
 SYM_FUNC_START_LOCAL(__serpent_dec_blk8_avx)
+	HDN_REGS_FUNC __serpent_dec_blk8_avx
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2: encrypted blocks
@@ -654,10 +658,12 @@ SYM_FUNC_START_LOCAL(__serpent_dec_blk8_avx)
 	write_blocks(RC1, RD1, RB1, RE1, RK0, RK1, RK2);
 	write_blocks(RC2, RD2, RB2, RE2, RK0, RK1, RK2);
 
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END __serpent_dec_blk8_avx
 SYM_FUNC_END(__serpent_dec_blk8_avx)
 
 SYM_TYPED_FUNC_START(serpent_ecb_enc_8way_avx)
+	HDN_ASM_FUNCTION serpent_ecb_enc_8way_avx, 1
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
@@ -667,15 +673,17 @@ SYM_TYPED_FUNC_START(serpent_ecb_enc_8way_avx)
 
 	load_8way(%rdx, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
-	call __serpent_enc_blk8_avx;
+	HDN_REGS_CALL __serpent_enc_blk8_avx;
 
 	store_8way(%rsi, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END serpent_ecb_enc_8way_avx
 SYM_FUNC_END(serpent_ecb_enc_8way_avx)
 
 SYM_TYPED_FUNC_START(serpent_ecb_dec_8way_avx)
+	HDN_ASM_FUNCTION serpent_ecb_dec_8way_avx, 1
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
@@ -685,15 +693,17 @@ SYM_TYPED_FUNC_START(serpent_ecb_dec_8way_avx)
 
 	load_8way(%rdx, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
-	call __serpent_dec_blk8_avx;
+	HDN_REGS_CALL __serpent_dec_blk8_avx;
 
 	store_8way(%rsi, RC1, RD1, RB1, RE1, RC2, RD2, RB2, RE2);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END serpent_ecb_dec_8way_avx
 SYM_FUNC_END(serpent_ecb_dec_8way_avx)
 
 SYM_TYPED_FUNC_START(serpent_cbc_dec_8way_avx)
+	HDN_ASM_FUNCTION serpent_cbc_dec_8way_avx, 1
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
@@ -703,10 +713,11 @@ SYM_TYPED_FUNC_START(serpent_cbc_dec_8way_avx)
 
 	load_8way(%rdx, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
-	call __serpent_dec_blk8_avx;
+	HDN_REGS_CALL __serpent_dec_blk8_avx;
 
 	store_cbc_8way(%rdx, %rsi, RC1, RD1, RB1, RE1, RC2, RD2, RB2, RE2);
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END serpent_cbc_dec_8way_avx
 SYM_FUNC_END(serpent_cbc_dec_8way_avx)

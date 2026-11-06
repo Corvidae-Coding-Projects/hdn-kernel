@@ -44,6 +44,7 @@
 #include <asm/traps.h>
 #include <asm/reboot.h>
 #include <asm/fpu/api.h>
+#include <asm/hdn_svm.h>
 
 #include <trace/events/ipi.h>
 
@@ -59,6 +60,13 @@
 MODULE_AUTHOR("Qumranet");
 MODULE_DESCRIPTION("KVM support for SVM (AMD-V) extensions");
 MODULE_LICENSE("GPL");
+
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+__ADDRESSABLE(__svm_vcpu_run);
+#ifdef CONFIG_KVM_AMD_SEV
+__ADDRESSABLE(__svm_sev_es_vcpu_run);
+#endif
+#endif
 
 #ifdef MODULE
 static const struct x86_cpu_id svm_cpu_id[] = {
@@ -475,14 +483,32 @@ static void __svm_write_tsc_multiplier(u64 multiplier)
 
 static __always_inline struct sev_es_save_area *sev_es_host_save_area(struct svm_cpu_data *sd)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* The private host-save page has no CPU-accessible alias. */
+	return NULL;
+#else
 	return &sd->save_area->host_sev_es_save;
+#endif
+}
+
+static __always_inline unsigned long svm_host_save_pa(struct svm_cpu_data *sd)
+{
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	return hdn_svm_host_pa();
+#else
+	return sd->save_area_pa;
+#endif
 }
 
 static inline void kvm_cpu_svm_disable(void)
 {
 	uint64_t efer;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_svm_disable();
+#else
 	wrmsrq(MSR_VM_HSAVE_PA, 0);
+#endif
 	rdmsrq(MSR_EFER, efer);
 	if (efer & EFER_SVME) {
 		/*
@@ -531,7 +557,11 @@ static int svm_enable_virtualization_cpu(void)
 
 	wrmsrq(MSR_EFER, efer | EFER_SVME);
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_svm_enable();
+#else
 	wrmsrq(MSR_VM_HSAVE_PA, sd->save_area_pa);
+#endif
 
 	if (static_cpu_has(X86_FEATURE_TSCRATEMSR)) {
 		/*
@@ -581,6 +611,11 @@ static void svm_cpu_uninit(int cpu)
 {
 	struct svm_cpu_data *sd = per_cpu_ptr(&svm_data, cpu);
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_svm_cpu_release(cpu);
+	kfree(sd->sev_vmcbs);
+	sd->sev_vmcbs = NULL;
+#else
 	if (!sd->save_area)
 		return;
 
@@ -588,6 +623,7 @@ static void svm_cpu_uninit(int cpu)
 	__free_page(__sme_pa_to_page(sd->save_area_pa));
 	sd->save_area_pa = 0;
 	sd->save_area = NULL;
+#endif
 }
 
 static int svm_cpu_init(int cpu)
@@ -601,6 +637,15 @@ static int svm_cpu_init(int cpu)
 	if (!save_area_page)
 		return ret;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	ret = hdn_svm_cpu_prepare(cpu, save_area_page);
+	if (ret)
+		return ret;
+	ret = sev_cpu_init(sd);
+	if (ret)
+		hdn_svm_cpu_release(cpu);
+	return ret;
+#else
 	ret = sev_cpu_init(sd);
 	if (ret)
 		goto free_save_area;
@@ -612,6 +657,7 @@ static int svm_cpu_init(int cpu)
 free_save_area:
 	__free_page(save_area_page);
 	return ret;
+#endif
 
 }
 
@@ -1380,7 +1426,7 @@ static void svm_prepare_switch_to_guest(struct kvm_vcpu *vcpu)
 	 * Save additional host state that will be restored on VMEXIT (sev-es)
 	 * or subsequent vmload of host save area.
 	 */
-	vmsave(sd->save_area_pa);
+	vmsave(svm_host_save_pa(sd));
 	if (sev_es_guest(vcpu->kvm))
 		sev_es_prepare_switch_to_guest(svm, sev_es_host_save_area(sd));
 
@@ -4367,7 +4413,7 @@ static noinstr void svm_vcpu_enter_exit(struct kvm_vcpu *vcpu, bool spec_ctrl_in
 		__svm_sev_es_vcpu_run(svm, spec_ctrl_intercepted,
 				      sev_es_host_save_area(sd));
 	else
-		__svm_vcpu_run(svm, spec_ctrl_intercepted);
+		__svm_vcpu_run(svm, spec_ctrl_intercepted, svm_host_save_pa(sd));
 
 	raw_local_irq_disable();
 

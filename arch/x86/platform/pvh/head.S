@@ -22,9 +22,17 @@
 #include <asm/processor-flags.h>
 #include <asm/msr.h>
 #include <asm/nospec-branch.h>
+#include <asm/hdn_rap.h>
 #include <xen/interface/elfnote.h>
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* Keep real 32-bit instructions identifiable in the ELF64 input and
+	 * relocatable link. The RAP decoder and protocol checker bind this one
+	 * section to pvh_start_xen; it is not an uninstrumented-code exemption. */
+	.section .init.text.hdn_pvh32, "ax"
+#else
 	__INIT
+#endif
 
 /*
  * Entry point for PVH guests.
@@ -73,7 +81,7 @@ SYM_CODE_START(pvh_start_xen)
 	subl $rva(1b), %ebp
 	movl $0, %esp
 
-	leal rva(gdt)(%ebp), %eax
+	leal rva(pvh_gdt)(%ebp), %eax
 	addl %eax, 2(%eax)
 	lgdt (%eax)
 
@@ -89,7 +97,7 @@ SYM_CODE_START(pvh_start_xen)
 	shr $2,%ecx
 	rep movsl
 
-	leal rva(early_stack_end)(%ebp), %esp
+	leal rva(pvh_early_stack_end)(%ebp), %esp
 
 #if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE)
 	/* Enable PAE mode. */
@@ -165,12 +173,55 @@ SYM_CODE_START(pvh_start_xen)
 
 	/* Jump to 64-bit mode. */
 	pushl $PVH_CS_SEL
-	leal  rva(1f)(%ebp), %eax
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	leal rva(hdn_pvh_physical64)(%ebp), %eax
+#else
+	leal rva(1f)(%ebp), %eax
+#endif
 	pushl %eax
 	lretl
 
 	/* 64-bit entry point. */
 	.code64
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+SYM_CODE_END(pvh_start_xen)
+HDN_KEXEC_FUNC pvh_start_xen, 52
+	__INIT
+SYM_CODE_START(hdn_pvh_physical64)
+	UNWIND_HINT_END_OF_STACK
+	/* No C is callable on the temporary physical stack. */
+	leaq hdn_pvh_virtual64(%rip), %rax
+	subq phys_base(%rip), %rax
+	addq $__START_KERNEL_map, %rax
+	ANNOTATE_RETPOLINE_SAFE
+	jmp *%rax
+SYM_CODE_END(hdn_pvh_physical64)
+HDN_KEXEC_FUNC hdn_pvh_physical64, 53
+
+SYM_CODE_START(hdn_pvh_virtual64)
+	UNWIND_HINT_END_OF_STACK
+	/* The static RAP boot context owns this exact stack before BSS/SLAB
+	 * initialization. GS=0 selects the initial per-CPU image. */
+	movl $MSR_GS_BASE, %ecx
+	xorl %eax, %eax
+	xorl %edx, %edx
+	wrmsr
+	leaq __top_init_kernel_stack(%rip), %rsp
+	xorl %ebp, %ebp
+	HDN_C_CALL xen_prepare_pvh
+	/* Return authentication has now emptied the boot context. Resume the
+	 * physical BSP entry with its ABI argument, never a saved stack target. */
+	leaq pvh_bootparams(%rip), %rsi
+	subq $__START_KERNEL_map, %rsi
+	addq phys_base(%rip), %rsi
+	leaq startup_64(%rip), %rax
+	subq $__START_KERNEL_map, %rax
+	addq phys_base(%rip), %rax
+	ANNOTATE_RETPOLINE_SAFE
+	jmp *%rax
+SYM_CODE_END(hdn_pvh_virtual64)
+HDN_KEXEC_FUNC hdn_pvh_virtual64, 54
+#else
 1:
 	UNWIND_HINT_END_OF_STACK
 
@@ -194,6 +245,7 @@ SYM_CODE_START(pvh_start_xen)
 	/* startup_64 expects boot_params in %rsi. */
 	lea pvh_bootparams(%rip), %rsi
 	jmp startup_64
+#endif /* CONFIG_SECURITY_HARDENING_RAP */
 
 #else /* CONFIG_X86_64 */
 
@@ -223,16 +275,18 @@ SYM_CODE_START(pvh_start_xen)
 
 	ljmp $PVH_CS_SEL, $_pa(startup_32)
 #endif
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 SYM_CODE_END(pvh_start_xen)
+#endif
 
 	.section ".init.data","aw"
 	.balign 8
-SYM_DATA_START_LOCAL(gdt)
-	.word gdt_end - gdt_start - 1
-	.long gdt_start - gdt
+SYM_DATA_START_LOCAL(pvh_gdt)
+	.word pvh_gdt_end - pvh_gdt_start - 1
+	.long pvh_gdt_start - pvh_gdt
 	.word 0
-SYM_DATA_END(gdt)
-SYM_DATA_START_LOCAL(gdt_start)
+SYM_DATA_END(pvh_gdt)
+SYM_DATA_START_LOCAL(pvh_gdt_start)
 	.quad 0x0000000000000000            /* NULL descriptor */
 #ifdef CONFIG_X86_64
 	.quad GDT_ENTRY(DESC_CODE64, 0, 0xfffff) /* PVH_CS_SEL */
@@ -240,12 +294,12 @@ SYM_DATA_START_LOCAL(gdt_start)
 	.quad GDT_ENTRY(DESC_CODE32, 0, 0xfffff) /* PVH_CS_SEL */
 #endif
 	.quad GDT_ENTRY(DESC_DATA32, 0, 0xfffff) /* PVH_DS_SEL */
-SYM_DATA_END_LABEL(gdt_start, SYM_L_LOCAL, gdt_end)
+SYM_DATA_END_LABEL(pvh_gdt_start, SYM_L_LOCAL, pvh_gdt_end)
 
 	.balign 16
-SYM_DATA_START_LOCAL(early_stack)
+SYM_DATA_START_LOCAL(pvh_early_stack)
 	.fill BOOT_STACK_SIZE, 1, 0
-SYM_DATA_END_LABEL(early_stack, SYM_L_LOCAL, early_stack_end)
+SYM_DATA_END_LABEL(pvh_early_stack, SYM_L_LOCAL, pvh_early_stack_end)
 
 #ifdef CONFIG_X86_64
 /*
@@ -301,12 +355,15 @@ SYM_DATA_START_PAGE_ALIGNED(pvh_level2_kernel_pgt)
 	 * or _PAGE_GLOBAL in some cases.
 	 */
 	PMDS(0, __PAGE_KERNEL_LARGE_EXEC, KERNEL_IMAGE_SIZE / PMD_SIZE)
+	.fill PTRS_PER_PMD - KERNEL_IMAGE_SIZE / PMD_SIZE, 8, 0
 SYM_DATA_END(pvh_level2_kernel_pgt)
 
 	ELFNOTE(Xen, XEN_ELFNOTE_PHYS32_RELOC,
+		     SYM_DATA_START_LOCAL(pvh_reloc_note);
 		     .long CONFIG_PHYSICAL_ALIGN;
 		     .long LOAD_PHYSICAL_ADDR;
-		     .long KERNEL_IMAGE_SIZE - 1)
+		     .long KERNEL_IMAGE_SIZE - 1;
+		     SYM_DATA_END(pvh_reloc_note))
 #endif
 
 	ELFNOTE(Xen, XEN_ELFNOTE_PHYS32_ENTRY, .global xen_elfnote_phys32_entry;

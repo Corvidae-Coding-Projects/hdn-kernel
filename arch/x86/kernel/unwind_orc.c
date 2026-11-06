@@ -3,6 +3,7 @@
 #include <linux/module.h>
 #include <linux/sort.h>
 #include <linux/bpf.h>
+#include <linux/hdn_stack.h>
 #include <asm/ptrace.h>
 #include <asm/stacktrace.h>
 #include <asm/unwind.h>
@@ -36,6 +37,17 @@ static bool orc_init __ro_after_init;
 static bool unwind_debug __ro_after_init;
 static unsigned int lookup_num_blocks __ro_after_init;
 
+static bool read_stack_word(struct unwind_state *state, const void *address,
+			    unsigned long *word)
+{
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (hdn_stack_address((unsigned long)address))
+		return !hdn_stack_read(state->task, (unsigned long)address, word, sizeof(*word));
+#endif
+	*word = READ_ONCE_NOCHECK(*(const unsigned long *)address);
+	return true;
+}
+
 static int __init unwind_debug_cmdline(char *str)
 {
 	unwind_debug = true;
@@ -67,7 +79,8 @@ static void unwind_dump(struct unwind_state *state)
 
 		for (; sp < stack_info.end; sp++) {
 
-			word = READ_ONCE_NOCHECK(*sp);
+			if (!read_stack_word(state, sp, &word))
+				break;
 
 			printk_deferred("%0*lx: %0*lx (%pB)\n", BITS_PER_LONG/4,
 					(unsigned long)sp, BITS_PER_LONG/4,
@@ -419,8 +432,7 @@ static bool deref_stack_reg(struct unwind_state *state, unsigned long addr,
 	if (!stack_access_ok(state, addr, sizeof(long)))
 		return false;
 
-	*val = READ_ONCE_NOCHECK(*(unsigned long *)addr);
-	return true;
+	return read_stack_word(state, (unsigned long *)addr, val);
 }
 
 static bool deref_stack_regs(struct unwind_state *state, unsigned long addr,
@@ -434,9 +446,7 @@ static bool deref_stack_regs(struct unwind_state *state, unsigned long addr,
 	if (!stack_access_ok(state, addr, sizeof(struct pt_regs)))
 		return false;
 
-	*ip = READ_ONCE_NOCHECK(regs->ip);
-	*sp = READ_ONCE_NOCHECK(regs->sp);
-	return true;
+	return read_stack_word(state, &regs->ip, ip) && read_stack_word(state, &regs->sp, sp);
 }
 
 static bool deref_stack_iret_regs(struct unwind_state *state, unsigned long addr,
@@ -447,9 +457,7 @@ static bool deref_stack_iret_regs(struct unwind_state *state, unsigned long addr
 	if (!stack_access_ok(state, addr, IRET_FRAME_SIZE))
 		return false;
 
-	*ip = READ_ONCE_NOCHECK(regs->ip);
-	*sp = READ_ONCE_NOCHECK(regs->sp);
-	return true;
+	return read_stack_word(state, &regs->ip, ip) && read_stack_word(state, &regs->sp, sp);
 }
 
 /*
@@ -469,17 +477,82 @@ static bool get_reg(struct unwind_state *state, unsigned int reg_off,
 		return false;
 
 	if (state->full_regs) {
-		*val = READ_ONCE_NOCHECK(((unsigned long *)state->regs)[reg]);
-		return true;
+		return read_stack_word(state, &((unsigned long *)state->regs)[reg], val);
 	}
 
 	if (state->prev_regs) {
-		*val = READ_ONCE_NOCHECK(((unsigned long *)state->prev_regs)[reg]);
-		return true;
+		return read_stack_word(state, &((unsigned long *)state->prev_regs)[reg], val);
 	}
 
 	return false;
 }
+
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+extern char __hdn_rap_enter_transfer[], __hdn_rap_enter_transfer_end[];
+extern char __hdn_rap_enter_flags_transfer[], __hdn_rap_enter_flags_transfer_end[];
+extern char __hdn_rap_return_transfer[], __hdn_rap_return_transfer_end[];
+extern char __hdn_rap_jump_transfer[], __hdn_rap_jump_transfer_end[];
+extern char __hdn_rap_transfer[], __hdn_rap_transfer_capture[], __hdn_rap_transfer_ready[];
+#ifdef CONFIG_FUNCTION_GRAPH_TRACER
+extern char __hdn_rap_graph_return_transfer[], __hdn_rap_graph_return_transfer_end[];
+#endif
+#ifdef CONFIG_RETHOOK
+extern char __hdn_rap_rethook_return_transfer[], __hdn_rap_rethook_return_transfer_end[];
+#endif
+
+static bool rap_transfer_ip(unsigned long ip)
+{
+	return (ip >= (unsigned long)__hdn_rap_enter_transfer &&
+		ip < (unsigned long)__hdn_rap_enter_transfer_end) ||
+	       (ip >= (unsigned long)__hdn_rap_enter_flags_transfer &&
+		ip < (unsigned long)__hdn_rap_enter_flags_transfer_end) ||
+#ifdef CONFIG_FUNCTION_GRAPH_TRACER
+	       (ip >= (unsigned long)__hdn_rap_graph_return_transfer &&
+		ip < (unsigned long)__hdn_rap_graph_return_transfer_end) ||
+#endif
+#ifdef CONFIG_RETHOOK
+	       (ip >= (unsigned long)__hdn_rap_rethook_return_transfer &&
+		ip < (unsigned long)__hdn_rap_rethook_return_transfer_end) ||
+#endif
+	       (ip >= (unsigned long)__hdn_rap_return_transfer &&
+		ip < (unsigned long)__hdn_rap_return_transfer_end) ||
+	       (ip >= (unsigned long)__hdn_rap_jump_transfer &&
+		ip < (unsigned long)__hdn_rap_jump_transfer_end) ||
+	       (ip >= (unsigned long)__hdn_rap_transfer &&
+		ip < (unsigned long)__hdn_rap_transfer_ready);
+}
+
+/* The register transfer has consumed its ordinary return slot. Interrupt
+ * entry can overwrite memory below that RSP, so recover the authenticated
+ * target from the saved R11, not from the abandoned stack slot. This also
+ * covers the fixed retpoline's one-instruction capture interval before its
+ * validated return slot is installed. No ORC on-disk format change is needed.
+ */
+static int unwind_rap_transfer(struct unwind_state *state)
+{
+	unsigned long target, bp, sp = state->sp;
+
+	if (!rap_transfer_ip(state->ip))
+		return 0;
+	if (!get_reg(state, offsetof(struct pt_regs, r11), &target) ||
+	    !get_reg(state, offsetof(struct pt_regs, bp), &bp) ||
+	    rap_transfer_ip(target) || !__kernel_text_address(target))
+		return -EINVAL;
+	if (state->ip >= (unsigned long)__hdn_rap_transfer_capture &&
+	    state->ip < (unsigned long)__hdn_rap_transfer_ready)
+		sp += sizeof(unsigned long);
+	if (!on_stack(&state->stack_info, (void *)sp, sizeof(unsigned long)))
+		return -EINVAL;
+	state->ip = target;
+	state->sp = sp;
+	state->bp = bp;
+	/* This is the exact resumed instruction, not a call's ip-minus-one. */
+	state->signal = true;
+	return 1;
+}
+#else
+static int unwind_rap_transfer(struct unwind_state *state) { return 0; }
+#endif
 
 bool unwind_next_frame(struct unwind_state *state)
 {
@@ -487,6 +560,7 @@ bool unwind_next_frame(struct unwind_state *state)
 	enum stack_type prev_type = state->stack_info.type;
 	struct orc_entry *orc;
 	bool indirect = false;
+	int rap;
 
 	if (unwind_done(state))
 		return false;
@@ -495,8 +569,18 @@ bool unwind_next_frame(struct unwind_state *state)
 	guard(rcu)();
 
 	/* End-of-stack check for user tasks: */
-	if (state->regs && user_mode(state->regs))
-		goto the_end;
+	if (state->regs) {
+		if (!read_stack_word(state, &state->regs->csx, &tmp))
+			goto err;
+		if (tmp & SEGMENT_RPL_MASK)
+			goto the_end;
+	}
+
+	rap = unwind_rap_transfer(state);
+	if (rap < 0)
+		goto err;
+	if (rap)
+		return true;
 
 	/*
 	 * Find the orc_entry associated with the text address.
@@ -713,12 +797,17 @@ void __unwind_start(struct unwind_state *state, struct task_struct *task,
 		goto err;
 
 	if (regs) {
-		if (user_mode(regs))
+		unsigned long cs;
+
+		if (!read_stack_word(state, &regs->csx, &cs))
+			goto err;
+		if (cs & SEGMENT_RPL_MASK)
 			goto the_end;
 
-		state->ip = regs->ip;
-		state->sp = regs->sp;
-		state->bp = regs->bp;
+		if (!read_stack_word(state, &regs->ip, &state->ip) ||
+		    !read_stack_word(state, &regs->sp, &state->sp) ||
+		    !read_stack_word(state, &regs->bp, &state->bp))
+			goto err;
 		state->regs = regs;
 		state->full_regs = true;
 		state->signal = true;
@@ -734,8 +823,9 @@ void __unwind_start(struct unwind_state *state, struct task_struct *task,
 		struct inactive_task_frame *frame = (void *)task->thread.sp;
 
 		state->sp = task->thread.sp + sizeof(*frame);
-		state->bp = READ_ONCE_NOCHECK(frame->bp);
-		state->ip = READ_ONCE_NOCHECK(frame->ret_addr);
+		if (!read_stack_word(state, &frame->bp, &state->bp) ||
+		    !read_stack_word(state, &frame->ret_addr, &state->ip))
+			goto err;
 		state->signal = (void *)state->ip == ret_from_fork_asm;
 	}
 

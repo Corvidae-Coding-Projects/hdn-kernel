@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
+obj-$(CONFIG_HDN_ARCH_CONTRACT) += hdn-contract.o
+CFLAGS_hdn-contract.o += -Werror=switch
 #
 # Makefile for the RISC-V Linux kernel
 #

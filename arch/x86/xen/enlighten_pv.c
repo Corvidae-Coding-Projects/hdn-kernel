@@ -571,6 +571,7 @@ static void xen_load_gdt(const struct desc_ptr *dtr)
 	BUG_ON(ptep == NULL);
 
 	pfn = pte_pfn(*ptep);
+	hdn_gdt_xen_bind(raw_smp_processor_id(), pfn, size);
 	mfn = pfn_to_mfn(pfn);
 	virt = __va(PFN_PHYS(pfn));
 
@@ -627,10 +628,13 @@ static void load_TLS_descriptor(struct thread_struct *t,
 	*shadow = t->tls_array[i];
 
 	gdt = get_cpu_gdt_rw(cpu);
+	hdn_gdt_xen_validate(gdt, GDT_ENTRY_TLS_MIN + i, sizeof(struct desc_struct));
 	maddr = arbitrary_virt_to_machine(&gdt[GDT_ENTRY_TLS_MIN+i]);
 	mc = __xen_mc_entry(0);
 
 	MULTI_update_descriptor(mc.mc, maddr.maddr, t->tls_array[i]);
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_GDT))
+		xen_mc_callback(hdn_gdt_xen_complete, NULL);
 }
 
 static void xen_load_tls(struct thread_struct *t, unsigned int cpu)
@@ -970,9 +974,11 @@ static void xen_write_gdt_entry(struct desc_struct *dt, int entry,
 	default: {
 		xmaddr_t maddr = arbitrary_virt_to_machine(&dt[entry]);
 
+		hdn_gdt_xen_validate(dt, entry, sizeof(struct desc_struct));
 		xen_mc_flush();
 		if (HYPERVISOR_update_descriptor(maddr.maddr, *(u64 *)desc))
 			BUG();
+		hdn_gdt_xen_complete(NULL);
 	}
 
 	}

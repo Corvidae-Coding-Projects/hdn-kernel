@@ -6,6 +6,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <linux/cfi_types.h>
 
 .file "twofish-x86_64-asm-3way.S"
@@ -222,6 +223,7 @@
 	outunpack3(mov, RIO, 2, RAB, 2);
 
 SYM_TYPED_FUNC_START(__twofish_enc_blk_3way)
+	HDN_ASM_FUNCTION __twofish_enc_blk_3way, 1
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
@@ -259,7 +261,7 @@ SYM_TYPED_FUNC_START(__twofish_enc_blk_3way)
 	popq %rbx;
 	popq %r12;
 	popq %r13;
-	RET;
+	HDN_ASM_RETURN;
 
 .L__enc_xor3:
 	outunpack_enc3(xor);
@@ -267,10 +269,12 @@ SYM_TYPED_FUNC_START(__twofish_enc_blk_3way)
 	popq %rbx;
 	popq %r12;
 	popq %r13;
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END __twofish_enc_blk_3way
 SYM_FUNC_END(__twofish_enc_blk_3way)
 
 SYM_TYPED_FUNC_START(twofish_dec_blk_3way)
+	HDN_ASM_FUNCTION twofish_dec_blk_3way, 1
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
@@ -302,5 +306,6 @@ SYM_TYPED_FUNC_START(twofish_dec_blk_3way)
 	popq %rbx;
 	popq %r12;
 	popq %r13;
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END twofish_dec_blk_3way
 SYM_FUNC_END(twofish_dec_blk_3way)

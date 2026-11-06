@@ -16,10 +16,13 @@
 #include <linux/cpu.h>
 #include <linux/pfn.h>
 #include <linux/mm.h>
+#include <linux/overflow.h>
 #include <linux/tboot.h>
+#include <linux/hdn_pgtable.h>
 #include <linux/debugfs.h>
 
 #include <asm/realmode.h>
+#include <asm/hdn_stack_mm.h>
 #include <asm/processor.h>
 #include <asm/bootparam.h>
 #include <asm/pgalloc.h>
@@ -34,6 +37,18 @@
 /* Global pointer to shared data; NULL means no measured launch. */
 static struct tboot *tboot __read_mostly;
 
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+/* The shared tboot page remains writable because it carries shutdown and S3
+ * requests. Never reload executable coordinates from it after admitting the
+ * terminal image: retain one kernel-owned, post-init immutable launch record. */
+static struct {
+	u32 entry;
+	u32 base;
+	u32 size;
+	bool ready;
+} tboot_launch __ro_after_init;
+#endif
+
 /* timeout for APs (in secs) to enter wait-for-SIPI state during shutdown */
 #define AP_WAIT_TIMEOUT		1
 
@@ -41,6 +56,21 @@ static struct tboot *tboot __read_mostly;
 #define pr_fmt(fmt)	"tboot: " fmt
 
 static u8 tboot_uuid[16] __initdata = TBOOT_UUID;
+
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+static bool __init tboot_launch_valid(u32 base, u32 size, u32 entry, u64 *endp)
+{
+	u64 end;
+
+	if (!base || !size || check_add_overflow((u64)base, (u64)size, &end) ||
+	    end > BIT_ULL(32) || entry < base || entry >= end ||
+	    !e820__mapped_all(base, end, E820_TYPE_RESERVED))
+		return false;
+	if (endp)
+		*endp = end;
+	return true;
+}
+#endif
 
 bool tboot_enabled(void)
 {
@@ -59,6 +89,13 @@ static noinline __init bool check_tboot_version(void)
 		pr_warn("tboot version is invalid: %u\n", tboot->version);
 		return false;
 	}
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	if (!tboot_launch_valid(tboot->tboot_base, tboot->tboot_size,
+				tboot->shutdown_entry, NULL)) {
+		pr_warn("tboot executable range is invalid\n");
+		return false;
+	}
+#endif
 
 	pr_info("found shared page at phys addr 0x%llx:\n",
 		boot_params.tboot_addr);
@@ -107,7 +144,7 @@ static struct mm_struct tboot_mm = {
 
 static inline void switch_to_tboot_pt(void)
 {
-	write_cr3(virt_to_phys(tboot_pg_dir));
+	write_cr3(hdn_stack_mm_route(virt_to_phys(tboot_pg_dir)));
 }
 
 static int map_tboot_page(unsigned long vaddr, unsigned long pfn,
@@ -143,7 +180,7 @@ static int map_tboot_page(unsigned long vaddr, unsigned long pfn,
 	 * Note: 'pgd' actually gets set in p4d_alloc() _or_
 	 * pud_alloc() depending on 4/5-level paging.
 	 */
-	pgd->pgd &= ~_PAGE_NX;
+	set_pgd(pgd, __pgd((pgd_val(*pgd) & ~_PAGE_NX) | _PAGE_NOPTISHADOW));
 
 	return 0;
 }
@@ -151,13 +188,16 @@ static int map_tboot_page(unsigned long vaddr, unsigned long pfn,
 static int map_tboot_pages(unsigned long vaddr, unsigned long start_pfn,
 			   unsigned long nr)
 {
+	pgprot_t prot = IS_ENABLED(CONFIG_SECURITY_HARDENING_PGTABLE) ?
+		PAGE_KERNEL_ROX : PAGE_KERNEL_EXEC;
+
 	/* Reuse the original kernel mapping */
 	tboot_pg_dir = pgd_alloc(&tboot_mm);
 	if (!tboot_pg_dir)
 		return -1;
 
 	for (; nr > 0; nr--, vaddr += PAGE_SIZE, start_pfn++) {
-		if (map_tboot_page(vaddr, start_pfn, PAGE_KERNEL_EXEC))
+		if (map_tboot_page(vaddr, start_pfn, prot))
 			return -1;
 	}
 
@@ -166,14 +206,40 @@ static int map_tboot_pages(unsigned long vaddr, unsigned long start_pfn,
 
 static void tboot_create_trampoline(void)
 {
-	u32 map_base, map_size;
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	u64 end;
+	unsigned long map_base, map_end;
+	u32 base = READ_ONCE(tboot->tboot_base);
+	u32 size = READ_ONCE(tboot->tboot_size);
+	u32 entry = READ_ONCE(tboot->shutdown_entry);
+
+	/* Revalidate at the point of ownership transfer.  The external shared
+	 * page may have changed since the early UUID/version probe. */
+	if (!tboot_launch_valid(base, size, entry, &end))
+		panic("tboot: executable range changed before sealing\n");
+	map_base = PFN_DOWN(base);
+	map_end = PFN_UP(end);
+	if (map_end <= map_base)
+		panic("tboot: executable page range is empty\n");
 
 	/* Create identity map for tboot shutdown code. */
-	map_base = PFN_DOWN(tboot->tboot_base);
-	map_size = PFN_UP(tboot->tboot_size);
+	if (map_tboot_pages(map_base << PAGE_SHIFT, map_base, map_end - map_base))
+		panic("tboot: Error mapping tboot pages (mfns) @ 0x%x, 0x%x\n",
+		      base, size);
+	if (hdn_pt_foreign_code_seal(base, size, &tboot_launch))
+		panic("HDN could not seal the tboot terminal code range\n");
+	tboot_launch.entry = entry;
+	tboot_launch.base = base;
+	tboot_launch.size = size;
+	smp_store_release(&tboot_launch.ready, true);
+#else
+	u32 map_base = PFN_DOWN(tboot->tboot_base);
+	u32 map_size = PFN_UP(tboot->tboot_size);
+
 	if (map_tboot_pages(map_base << PAGE_SHIFT, map_base, map_size))
 		panic("tboot: Error mapping tboot pages (mfns) @ 0x%x, 0x%x\n",
 		      map_base, map_size);
+#endif
 }
 
 #ifdef CONFIG_ACPI_SLEEP
@@ -237,6 +303,10 @@ void tboot_shutdown(u32 shutdown_type)
 	 */
 	if (!tboot_pg_dir)
 		return;
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	if (!smp_load_acquire(&tboot_launch.ready))
+		return;
+#endif
 
 	/* if this is S3 then set regions to MAC */
 	if (shutdown_type == TB_SHUTDOWN_S3)
@@ -247,7 +317,11 @@ void tboot_shutdown(u32 shutdown_type)
 
 	switch_to_tboot_pt();
 
+#ifdef CONFIG_SECURITY_HARDENING_PGTABLE
+	shutdown = (void(*)(void))(unsigned long)tboot_launch.entry;
+#else
 	shutdown = (void(*)(void))(unsigned long)tboot->shutdown_entry;
+#endif
 	shutdown();
 
 	/* should not reach here */

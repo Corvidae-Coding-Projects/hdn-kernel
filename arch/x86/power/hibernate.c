@@ -9,6 +9,7 @@
 #include <linux/gfp.h>
 #include <linux/smp.h>
 #include <linux/suspend.h>
+#include <linux/set_memory.h>
 #include <linux/scatterlist.h>
 #include <linux/kdebug.h>
 #include <linux/cpu.h>
@@ -24,6 +25,7 @@
 #include <asm/sections.h>
 #include <asm/suspend.h>
 #include <asm/tlbflush.h>
+#include <asm/hdn_rap_resume.h>
 
 /*
  * Address to jump to in the last phase of restore in order to get to the image
@@ -139,14 +141,18 @@ int arch_hibernation_header_restore(void *addr)
 		return -EINVAL;
 	}
 
-	restore_jump_address = rdr->jump_address;
-	jump_address_phys = rdr->jump_address_phys;
-	restore_cr3 = rdr->cr3;
-
 	if (rdr->e820_checksum != compute_e820_crc32(e820_table_firmware)) {
 		pr_crit("Hibernate inconsistent memory map detected!\n");
 		return -ENODEV;
 	}
+
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	if (hdn_rap_hibernate_header(rdr->jump_address, rdr->jump_address_phys, rdr->cr3))
+		return -EINVAL;
+#endif
+	restore_jump_address = rdr->jump_address;
+	jump_address_phys = rdr->jump_address_phys;
+	restore_cr3 = rdr->cr3;
 
 	return 0;
 }
@@ -163,8 +169,24 @@ int relocate_restore_code(void)
 	if (!relocated_restore_code)
 		return -ENOMEM;
 
+#ifdef CONFIG_X86_64
+	/* Copy only the closed relocation body. The rest of the executable page
+	 * is a trap, not unrelated text following this symbol in the link. */
+	if ((unsigned long)core_restore_code_end <= (unsigned long)core_restore_code ||
+	    core_restore_code_end - core_restore_code > PAGE_SIZE)
+		return -E2BIG;
+	memset((void *)relocated_restore_code, 0xcc, PAGE_SIZE);
+	__memcpy((void *)relocated_restore_code, core_restore_code,
+		 core_restore_code_end - core_restore_code);
+#else
 	__memcpy((void *)relocated_restore_code, core_restore_code, PAGE_SIZE);
+#endif
 
+#ifdef CONFIG_SECURITY_HARDENING_KERNEL_WX
+	/* The HDN prepare hook runs before quiescing devices/CPUs. Finalize
+	 * exactly this code page, without making a whole huge mapping W+X. */
+	return set_memory_rox(relocated_restore_code, 1);
+#endif
 	/* Make the page containing the relocated code executable */
 	pgd = (pgd_t *)__va(read_cr3_pa()) +
 		pgd_index(relocated_restore_code);

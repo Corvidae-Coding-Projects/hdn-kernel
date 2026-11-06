@@ -10,6 +10,7 @@
 #include <linux/poison.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/hdn_alloc.h>
 #include <linux/security.h>
 #include <linux/workqueue.h>
 #include <linux/random.h>
@@ -1275,7 +1276,8 @@ void __init key_init(void)
 {
 	/* allocate a slab in which we can store keys */
 	key_jar = kmem_cache_create("key_jar", sizeof(struct key),
-			0, SLAB_HWCACHE_ALIGN|SLAB_PANIC, NULL);
+			0, SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_HDN_DOMAIN, NULL);
+	hdn_cache_domain(key_jar, HDN_ALLOC_KEY);
 
 	/* add the special key types */
 	list_add_tail(&key_type_keyring.link, &key_types_list);

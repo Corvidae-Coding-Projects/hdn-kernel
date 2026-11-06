@@ -21,6 +21,7 @@
  * Jeremy Fitzhardinge <jeremy@xensource.com>, XenSource Inc, 2007
  */
 #include <linux/percpu.h>
+#include <asm/hdn_gdt.h>
 #include <linux/hardirq.h>
 #include <linux/debugfs.h>
 #include <linux/jump_label.h>
@@ -186,6 +187,11 @@ void xen_mc_flush(void)
 			if (b->entries[i].result < 0)
 				ret++;
 	}
+
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_GDT))
+		for (i = 0; i < b->mcidx; i++)
+			if (b->entries[i].op == __HYPERVISOR_update_descriptor)
+				hdn_gdt_xen_result(b->entries[i].result);
 
 	if (WARN_ON(ret)) {
 		pr_err("%d of %d multicall(s) failed: cpu %d\n",

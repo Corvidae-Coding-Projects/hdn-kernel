@@ -16,16 +16,24 @@
 
 	.text
 #include <linux/linkage.h>
+#include <linux/cfi_types.h>
 #include <asm/segment.h>
 #include <asm/page_types.h>
 #include <asm/asm-offsets.h>
 #include <asm/processor-flags.h>
 #include <asm/frame.h>
 #include <asm/nospec-branch.h>
+#include <asm/msr.h>
+#include <asm/hdn_rap.h>
+#include <asm/hdn_rap_resume.h>
+#include <asm/asm.h>
+#include <asm/unwind_hints.h>
 
 	 /* code below belongs to the image kernel */
 	.align PAGE_SIZE
 SYM_FUNC_START(restore_registers)
+	HDN_RESUME_ENTRY restore_registers
+	UNWIND_HINT_UNDEFINED
 	ENDBR
 	/* go back to the original page tables */
 	movq    %r9, %cr3
@@ -40,8 +48,26 @@ SYM_FUNC_START(restore_registers)
 	movq	%rax, %cr4;  # turn PGE back on
 
 	/* We don't restore %rax, it must be 0 anyway */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* The restored image's sealed checkpoint owns this stack and GSBASE.
+	 * Do not enter instrumented C with the boot kernel's per-CPU base. */
+	movq $hdn_rap_resume_state, %rsi
+	movq saved_context_kernelmode_gs_base(%rsi), %rax
+	movq %rax, %rdx
+	shrq $32, %rdx
+	movl $MSR_GS_BASE, %ecx
+	wrmsr
+	movq pt_regs_sp(%rsi), %rsp
+	UNWIND_HINT_FUNC
+	lgdt saved_context_gdt_desc(%rsi)
+	lidt saved_context_idt(%rsi)
+	movl $HDN_RAP_RESUME_IMAGE, %edi
+	HDN_C_CALL hdn_rap_resume_restore
+#else
 	movq	$saved_context, %rax
+#endif
 	movq	pt_regs_sp(%rax), %rsp
+	UNWIND_HINT_FUNC
 	movq	pt_regs_bp(%rax), %rbp
 	movq	pt_regs_si(%rax), %rsi
 	movq	pt_regs_di(%rax), %rdi
@@ -67,10 +93,15 @@ SYM_FUNC_START(restore_registers)
 	/* tell the hibernation core that we've just restored the memory */
 	movq	%rax, in_suspend(%rip)
 
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(restore_registers)
+/* No incoming C frame exists across the image-copy boundary. The explicit
+ * unwind hints and RAP's complete restoration verifier own this protocol. */
+STACK_FRAME_NON_STANDARD restore_registers
+_ASM_NOKPROBE(restore_registers)
 
-SYM_FUNC_START(swsusp_arch_suspend)
+SYM_TYPED_FUNC_START(swsusp_arch_suspend)
+	HDN_TYPED_FUNC_ENTER swsusp_arch_suspend
 	movq	$saved_context, %rax
 	movq	%rsp, pt_regs_sp(%rax)
 	movq	%rbp, pt_regs_bp(%rax)
@@ -94,13 +125,39 @@ SYM_FUNC_START(swsusp_arch_suspend)
 	movq	%cr3, %rax
 	movq	%rax, restore_cr3(%rip)
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	movq %rsp, %rsi
+	movl $HDN_RAP_RESUME_IMAGE, %edi
+	HDN_C_CALL hdn_rap_resume_save
+#endif
+
 	FRAME_BEGIN
-	call swsusp_save
+	HDN_C_CALL swsusp_save
 	FRAME_END
-	RET
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* The original image also returns here after making the snapshot.
+	 * Retire its checkpoint; the snapshot retains its own live copy. */
+	pushq %rax
+	movl $HDN_RAP_RESUME_IMAGE, %edi
+	HDN_C_CALL hdn_rap_resume_restore
+	popq %rax
+#endif
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(swsusp_arch_suspend)
 
 SYM_FUNC_START(restore_image)
+	HDN_IMAGE_HANDOFF restore_image
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	FRAME_BEGIN
+	HDN_C_CALL hdn_rap_hibernate_enter
+	FRAME_END
+	movq HDN_RAP_IMAGE_ENTRY(%rax), %r8
+	movq HDN_RAP_IMAGE_CR3(%rax), %r9
+	movq HDN_RAP_IMAGE_CR4(%rax), %rbx
+	movq HDN_RAP_IMAGE_PAGES(%rax), %rdx
+	movq HDN_RAP_IMAGE_CODE(%rax), %rcx
+	movq HDN_RAP_IMAGE_TEMP_CR3(%rax), %rax
+#else
 	/* prepare to jump to the image kernel */
 	movq	restore_jump_address(%rip), %r8
 	movq	restore_cr3(%rip), %r9
@@ -114,12 +171,16 @@ SYM_FUNC_START(restore_image)
 
 	/* jump to relocated restore code */
 	movq	relocated_restore_code(%rip), %rcx
+#endif
 	ANNOTATE_RETPOLINE_SAFE
 	jmpq	*%rcx
 SYM_FUNC_END(restore_image)
+_ASM_NOKPROBE(restore_image)
 
 	/* code below has been relocated to a safe page */
 SYM_FUNC_START(core_restore_code)
+	HDN_IMAGE_HANDOFF core_restore_code
+	UNWIND_HINT_UNDEFINED
 	ENDBR
 	/* switch to temporary page tables */
 	movq	%rax, %cr3
@@ -149,3 +210,5 @@ SYM_FUNC_START(core_restore_code)
 	ANNOTATE_RETPOLINE_SAFE
 	jmpq	*%r8
 SYM_FUNC_END(core_restore_code)
+SYM_INNER_LABEL(core_restore_code_end, SYM_L_GLOBAL)
+_ASM_NOKPROBE(core_restore_code)

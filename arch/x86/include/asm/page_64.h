@@ -7,6 +7,7 @@
 #ifndef __ASSEMBLER__
 #include <asm/cpufeatures.h>
 #include <asm/alternative.h>
+#include <asm/hdn_rap_call.h>
 
 #include <linux/kmsan-checks.h>
 #include <linux/mmdebug.h>
@@ -100,12 +101,26 @@ static inline void clear_pages(void *addr, unsigned int npages)
 	 * __clear_pages_unrolled() are part of the inline asm register
 	 * specification.
 	 */
-	asm volatile(ALTERNATIVE_2("call __clear_pages_unrolled",
+	asm volatile(
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+			ALTERNATIVE_2("jmp 990f", "jmp 989f", X86_FEATURE_REP_GOOD,
+				      "", X86_FEATURE_ERMS)
+			"rep stosb\n\tjmp 992f\n\t"
+			"989: shrq $3, %%rcx\n\trep stosq\n\tjmp 992f\n\t"
+			"990:\n\t" HDN_ASM_C_CALL("__clear_pages_unrolled")
+			"992:\n\t"
+#else
+			ALTERNATIVE_2("call __clear_pages_unrolled",
 				   "shrq $3, %%rcx; rep stosq", X86_FEATURE_REP_GOOD,
 				   "rep stosb", X86_FEATURE_ERMS)
+#endif
 			: "+c" (len), "+D" (addr), ASM_CALL_CONSTRAINT
 			: "a" (0)
-			: "cc", "memory");
+			: "cc", "memory"
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+			, "r10", "r11"
+#endif
+			);
 }
 #define clear_pages clear_pages
 

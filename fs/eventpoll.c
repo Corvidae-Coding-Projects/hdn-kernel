@@ -851,6 +851,8 @@ static struct file *epi_fget(const struct epitem *epi)
 	file = epi->ffd.file;
 	if (!file_ref_get(&file->f_ref))
 		file = NULL;
+	else
+		hdn_jitter_check_file(file);
 	return file;
 }
 

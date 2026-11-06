@@ -12,7 +12,7 @@ void __lockfunc __pv_queued_spin_unlock_slowpath(struct qspinlock *lock, u8 lock
  * and restored. So an optimized version of __pv_queued_spin_unlock() is
  * hand-coded for 64-bit, but it isn't worthwhile to do it for 32-bit.
  */
-#ifdef CONFIG_64BIT
+#if defined(CONFIG_64BIT) && !defined(CONFIG_SECURITY_HARDENING_RAP)
 
 __PV_CALLEE_SAVE_REGS_THUNK(__pv_queued_spin_unlock_slowpath, ".spinlock.text");
 #define __pv_queued_spin_unlock	__pv_queued_spin_unlock

@@ -10,6 +10,7 @@
  */
 
 #include <linux/slab.h>
+#include <linux/hdn_alloc.h>
 #include <linux/export.h>
 #include <linux/nsproxy.h>
 #include <linux/init_task.h>
@@ -635,6 +636,7 @@ out:
 
 int __init nsproxy_cache_init(void)
 {
-	nsproxy_cachep = KMEM_CACHE(nsproxy, SLAB_PANIC|SLAB_ACCOUNT);
+	nsproxy_cachep = KMEM_CACHE(nsproxy, SLAB_PANIC|SLAB_ACCOUNT|SLAB_HDN_DOMAIN);
+	hdn_cache_domain(nsproxy_cachep, HDN_ALLOC_NSPROXY);
 	return 0;
 }

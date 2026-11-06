@@ -54,6 +54,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 #define STATE_PTR	%rdi	/* 1st arg */
 #define DATA_PTR	%rsi	/* 2nd arg */
@@ -108,6 +109,7 @@
  */
 .text
 SYM_FUNC_START(sha1_ni_transform)
+	HDN_ASM_FUNCTION sha1_ni_transform
 
 	/* Load the initial state from STATE_PTR. */
 	pxor		E0, E0
@@ -143,7 +145,8 @@ SYM_FUNC_START(sha1_ni_transform)
 	pshufd		$0x1B, ABCD, ABCD
 	movdqu		ABCD, (STATE_PTR)
 
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END sha1_ni_transform
 SYM_FUNC_END(sha1_ni_transform)
 
 .section	.rodata.cst16.PSHUFFLE_BYTE_FLIP_MASK, "aM", @progbits, 16

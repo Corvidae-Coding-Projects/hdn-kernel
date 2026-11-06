@@ -34,19 +34,26 @@
 #include <clocksource/hyperv_timer.h>
 #include <linux/highmem.h>
 #include <linux/export.h>
+#include <linux/hdn_execmem.h>
+#include <asm/hdn_hyperv.h>
 
 void *hv_hypercall_pg;
 
 #ifdef CONFIG_X86_64
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 static u64 __hv_hyperfail(u64 control, u64 param1, u64 param2)
 {
 	return U64_MAX;
 }
 
 DEFINE_STATIC_CALL(__hv_hypercall, __hv_hyperfail);
+#endif
 
 u64 hv_std_hypercall(u64 control, u64 param1, u64 param2)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	return hdn_hv_hypercall(control, param1, param2);
+#else
 	u64 hv_status;
 
 	register u64 __r8 asm("r8") = param2;
@@ -56,6 +63,7 @@ u64 hv_std_hypercall(u64 control, u64 param1, u64 param2)
 		      : : "cc", "memory", "r9", "r10", "r11");
 
 	return hv_status;
+#endif
 }
 
 typedef u64 (*hv_hypercall_f)(u64 control, u64 param1, u64 param2);
@@ -64,9 +72,13 @@ static inline void hv_set_hypercall_pg(void *ptr)
 {
 	hv_hypercall_pg = ptr;
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	hdn_hv_publish(ptr);
+#else
 	if (!ptr)
 		ptr = &__hv_hyperfail;
 	static_call_update(__hv_hypercall, (hv_hypercall_f)ptr);
+#endif
 }
 #else
 static inline void hv_set_hypercall_pg(void *ptr)
@@ -388,6 +400,7 @@ static int hv_suspend(void *data)
 static void hv_resume(void *data)
 {
 	union hv_x64_msr_hypercall_contents hypercall_msr;
+	void *page = hdn_hv_resume_page(hv_hypercall_pg_saved);
 	int ret;
 
 	ret = hv_cpu_init(0);
@@ -397,10 +410,10 @@ static void hv_resume(void *data)
 	rdmsrq(HV_X64_MSR_HYPERCALL, hypercall_msr.as_uint64);
 	hypercall_msr.enable = 1;
 	hypercall_msr.guest_physical_address =
-		vmalloc_to_pfn(hv_hypercall_pg_saved);
+		vmalloc_to_pfn(page);
 	wrmsrq(HV_X64_MSR_HYPERCALL, hypercall_msr.as_uint64);
 
-	hv_set_hypercall_pg(hv_hypercall_pg_saved);
+	hv_set_hypercall_pg(page);
 	hv_hypercall_pg_saved = NULL;
 
 	/*
@@ -523,11 +536,18 @@ void __init hyperv_init(void)
 		goto skip_hypercall_pg_init;
 
 	hv_hypercall_pg = __vmalloc_node_range(PAGE_SIZE, 1, MODULES_VADDR,
-			MODULES_END, GFP_KERNEL, PAGE_KERNEL_ROX,
+			MODULES_END, GFP_KERNEL,
+			IS_ENABLED(CONFIG_SECURITY_HARDENING_EXECMEM) ? PAGE_KERNEL : PAGE_KERNEL_ROX,
 			VM_FLUSH_RESET_PERMS, NUMA_NO_NODE,
 			__builtin_return_address(0));
 	if (hv_hypercall_pg == NULL)
 		goto clean_guest_os_id;
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_EXECMEM) &&
+	    hdn_execmem_claim(hv_hypercall_pg)) {
+		vfree(hv_hypercall_pg);
+		hv_hypercall_pg = NULL;
+		goto clean_guest_os_id;
+	}
 
 	rdmsrq(HV_X64_MSR_HYPERCALL, hypercall_msr.as_uint64);
 	hypercall_msr.enable = 1;
@@ -552,7 +572,10 @@ void __init hyperv_init(void)
 		src = memremap(hypercall_msr.guest_physical_address << PAGE_SHIFT, PAGE_SIZE,
 				MEMREMAP_WB);
 		BUG_ON(!src);
-		memcpy_to_page(pg, 0, src, HV_HYP_PAGE_SIZE);
+		if (IS_ENABLED(CONFIG_SECURITY_HARDENING_EXECMEM))
+			memcpy(hv_hypercall_pg, src, HV_HYP_PAGE_SIZE);
+		else
+			memcpy_to_page(pg, 0, src, HV_HYP_PAGE_SIZE);
 		memunmap(src);
 
 		hv_remap_tsc_clocksource();
@@ -562,6 +585,10 @@ void __init hyperv_init(void)
 		wrmsrq(HV_X64_MSR_HYPERCALL, hypercall_msr.as_uint64);
 	}
 
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_EXECMEM) &&
+	    set_memory_rox((unsigned long)hv_hypercall_pg, 1))
+		panic("Hyper-V: failed to seal hypercall code");
+	hdn_hv_page_init(hv_hypercall_pg);
 	hv_set_hypercall_pg(hv_hypercall_pg);
 
 	if (hv_root_partition())        /* after set hypercall pg */
@@ -642,6 +669,7 @@ void hyperv_cleanup(void)
 	 * after this point, which shouldn't be happening anyway.
 	 */
 	hv_hypercall_pg = NULL;
+	hdn_hv_publish(NULL);
 
 	/* Reset the hypercall page */
 	hypercall_msr.as_uint64 = hv_get_msr(HV_X64_MSR_HYPERCALL);

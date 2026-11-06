@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+#include <asm/hdn_rap.h>
 #include <linux/linkage.h>
 #include <linux/errno.h>
 #include <linux/cfi_types.h>
@@ -14,6 +15,7 @@
  */
 .macro op_safe_regs op
 SYM_TYPED_FUNC_START(\op\()_safe_regs)
+	HDN_TYPED_FUNC_ENTER \op\()_safe_regs, 1
 	pushq %rbx
 	pushq %r12
 	movq	%rdi, %r10	/* Save pointer */
@@ -36,7 +38,7 @@ SYM_TYPED_FUNC_START(\op\()_safe_regs)
 	movl    %edi, 28(%r10)
 	popq %r12
 	popq %rbx
-	RET
+	HDN_ENTRY_ROOT_RETURN
 3:
 	movl    $-EIO, %r11d
 	jmp     2b
@@ -78,7 +80,7 @@ SYM_FUNC_START(\op\()_safe_regs)
 	popl %esi
 	popl %ebp
 	popl %ebx
-	RET
+	HDN_ENTRY_ROOT_RETURN
 3:
 	movl    $-EIO, 4(%esp)
 	jmp     2b

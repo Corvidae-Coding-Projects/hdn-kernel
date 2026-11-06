@@ -1113,9 +1113,11 @@ static int vmw_driver_load(struct vmw_private *dev_priv, u32 pci_id)
 		goto out_no_fifo;
 
 	vmw_print_sm_type(dev_priv);
-	vmw_host_printf("vmwgfx: Module Version: %d.%d.%d (kernel: %s)",
-			VMWGFX_DRIVER_MAJOR, VMWGFX_DRIVER_MINOR,
-			VMWGFX_DRIVER_PATCHLEVEL, UTS_RELEASE);
+	vmw_host_log("vmwgfx: Module Version: "
+		     __stringify(VMWGFX_DRIVER_MAJOR) "."
+		     __stringify(VMWGFX_DRIVER_MINOR) "."
+		     __stringify(VMWGFX_DRIVER_PATCHLEVEL) " (kernel: "
+		     UTS_RELEASE ")");
 	vmw_write_driver_id(dev_priv);
 
 	dev_priv->pm_nb.notifier_call = vmwgfx_pm_notifier;

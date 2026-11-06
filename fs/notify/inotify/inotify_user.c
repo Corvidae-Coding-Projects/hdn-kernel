@@ -16,6 +16,7 @@
 #include <linux/file.h>
 #include <linux/fs.h> /* struct inode */
 #include <linux/fsnotify_backend.h>
+#include <linux/hdn_sysfs.h>
 #include <linux/idr.h>
 #include <linux/init.h> /* fs_initcall */
 #include <linux/inotify.h>
@@ -139,10 +140,20 @@ static inline u32 inotify_mask_to_arg(__u32 mask)
 static __poll_t inotify_poll(struct file *file, poll_table *wait)
 {
 	struct fsnotify_group *group = file->private_data;
+	struct fsnotify_event *event;
 	__poll_t ret = 0;
+	u64 hidden = hdn_sysfs_hidden_classes();
 
 	poll_wait(file, &group->notification_waitq, wait);
-	spin_lock(&group->notification_lock);
+	for (;;) {
+		spin_lock(&group->notification_lock);
+		event = fsnotify_peek_first_event(group);
+		if (!event || !(inotify_event_disclosure(event) & hidden))
+			break;
+		fsnotify_remove_first_event(group);
+		spin_unlock(&group->notification_lock);
+		fsnotify_destroy_event(group, event);
+	}
 	if (!fsnotify_notify_queue_is_empty(group))
 		ret = EPOLLIN | EPOLLRDNORM;
 	spin_unlock(&group->notification_lock);
@@ -168,7 +179,7 @@ static int round_event_name_len(struct fsnotify_event *fsn_event)
  * Called with the group->notification_lock held.
  */
 static struct fsnotify_event *get_one_event(struct fsnotify_group *group,
-					    size_t count)
+					    size_t count, u64 hidden)
 {
 	size_t event_size = sizeof(struct inotify_event);
 	struct fsnotify_event *event;
@@ -179,6 +190,10 @@ static struct fsnotify_event *get_one_event(struct fsnotify_group *group,
 
 	pr_debug("%s: group=%p event=%p\n", __func__, group, event);
 
+	if (inotify_event_disclosure(event) & hidden) {
+		fsnotify_remove_first_event(group);
+		return event;
+	}
 	event_size += round_event_name_len(event);
 	if (event_size > count)
 		return ERR_PTR(-EINVAL);
@@ -260,8 +275,10 @@ static ssize_t inotify_read(struct file *file, char __user *buf,
 
 	add_wait_queue(&group->notification_waitq, &wait);
 	while (1) {
+		u64 hidden = hdn_sysfs_hidden_classes();
+
 		spin_lock(&group->notification_lock);
-		kevent = get_one_event(group, count);
+		kevent = get_one_event(group, count, hidden);
 		spin_unlock(&group->notification_lock);
 
 		pr_debug("%s: group=%p kevent=%p\n", __func__, group, kevent);
@@ -270,6 +287,10 @@ static ssize_t inotify_read(struct file *file, char __user *buf,
 			ret = PTR_ERR(kevent);
 			if (IS_ERR(kevent))
 				break;
+			if (inotify_event_disclosure(kevent) & hidden) {
+				fsnotify_destroy_event(group, kevent);
+				continue;
+			}
 			ret = copy_event_to_user(group, kevent, buf);
 			fsnotify_destroy_event(group, kevent);
 			if (ret < 0)
@@ -326,15 +347,21 @@ static long inotify_ioctl(struct file *file, unsigned int cmd,
 
 	switch (cmd) {
 	case FIONREAD:
+	{
+		u64 hidden = hdn_sysfs_hidden_classes();
+
 		spin_lock(&group->notification_lock);
 		list_for_each_entry(fsn_event, &group->notification_list,
 				    list) {
+			if (inotify_event_disclosure(fsn_event) & hidden)
+				continue;
 			send_len += sizeof(struct inotify_event);
 			send_len += round_event_name_len(fsn_event);
 		}
 		spin_unlock(&group->notification_lock);
 		ret = put_user(send_len, (int __user *) p);
 		break;
+	}
 #ifdef CONFIG_CHECKPOINT_RESTORE
 	case INOTIFY_IOC_SETNEXTWD:
 		ret = -EINVAL;
@@ -672,6 +699,9 @@ static struct fsnotify_group *inotify_new_group(unsigned int max_events)
 	oevent->wd = -1;
 	oevent->sync_cookie = 0;
 	oevent->name_len = 0;
+#ifdef CONFIG_SECURITY_HARDENING_SYSFS_VIEW
+	oevent->hdn_disclosure = 0;
+#endif
 
 	group->max_events = max_events;
 	group->memcg = get_mem_cgroup_from_mm(current->mm);

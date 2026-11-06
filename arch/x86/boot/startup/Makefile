@@ -12,6 +12,16 @@ KBUILD_CFLAGS		+= -D__DISABLE_EXPORTS -mcmodel=small -fPIC \
 # disable ftrace hooks and LTO
 KBUILD_CFLAGS	:= $(subst $(CC_FLAGS_FTRACE),,$(KBUILD_CFLAGS))
 KBUILD_CFLAGS	:= $(filter-out $(CC_FLAGS_LTO),$(KBUILD_CFLAGS))
+ifdef CONFIG_SECURITY_HARDENING_RAP
+# These objects execute through physical aliases before the runtime stack and
+# GS identities exist. Keep compiler coverage in a separate, closed bootstrap
+# domain; the final objtool gate checks its direct-call closure.
+hdn_boot_rap_flags := $(filter -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS))
+KBUILD_CFLAGS := $(filter-out $(GCC_PLUGINS_CFLAGS),$(KBUILD_CFLAGS))
+KBUILD_CFLAGS += $(hdn_boot_rap_flags) -fplugin-arg-hdn_rap_plugin-bootstrap=1
+KBUILD_CFLAGS += -DHDN_PGTABLE_BOOTSTRAP -DHDN_RAP_BOOTSTRAP
+KBUILD_AFLAGS += -DHDN_RAP_BOOTSTRAP
+endif
 KASAN_SANITIZE	:= n
 KCSAN_SANITIZE	:= n
 KMSAN_SANITIZE	:= n
@@ -20,6 +30,7 @@ KCOV_INSTRUMENT	:= n
 
 obj-$(CONFIG_X86_64)		+= gdt_idt.o map_kernel.o
 obj-$(CONFIG_AMD_MEM_ENCRYPT)	+= sme.o sev-startup.o
+obj-$(CONFIG_SECURITY_HARDENING_RAP) += memcpy.o memset.o
 pi-objs				:= $(patsubst %.o,$(obj)/%.o,$(obj-y))
 
 lib-$(CONFIG_X86_64)		+= la57toggle.o

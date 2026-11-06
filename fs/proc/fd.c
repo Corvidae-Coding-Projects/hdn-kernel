@@ -11,8 +11,10 @@
 #include <linux/security.h>
 #include <linux/file.h>
 #include <linux/seq_file.h>
+#include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/filelock.h>
+#include <linux/hdn_sysfs.h>
 
 #include <linux/proc_fs.h>
 
@@ -20,21 +22,27 @@
 #include "internal.h"
 #include "fd.h"
 
+struct proc_fdinfo_context {
+	struct inode *inode;
+	u64 sysfs_hidden;
+};
+
 static int seq_show(struct seq_file *m, void *v)
 {
+	struct proc_fdinfo_context *context = m->private;
 	struct files_struct *files = NULL;
 	int f_flags = 0, ret = -ENOENT;
 	struct file *file = NULL;
 	struct task_struct *task;
 
-	task = get_proc_task(m->private);
+	task = get_proc_task(context->inode);
 	if (!task)
 		return -ENOENT;
 
 	task_lock(task);
 	files = task->files;
 	if (files) {
-		unsigned int fd = proc_fd(m->private);
+		unsigned int fd = proc_fd(context->inode);
 
 		spin_lock(&files->file_lock);
 		file = files_lookup_fd_locked(files, fd);
@@ -53,6 +61,10 @@ static int seq_show(struct seq_file *m, void *v)
 
 	if (ret)
 		return ret;
+	if (hdn_sysfs_file_hidden(file)) {
+		fput(file);
+		return -ENOENT;
+	}
 
 	seq_printf(m, "pos:\t%lli\nflags:\t0%o\nmnt_id:\t%i\nino:\t%lu\n",
 		   (long long)file->f_pos, f_flags,
@@ -72,9 +84,69 @@ out:
 	return 0;
 }
 
+static bool proc_fdinfo_target_hidden(struct inode *inode)
+{
+	struct task_struct *task = get_proc_task(inode);
+	struct file *target = NULL;
+	bool hidden = false;
+
+	if (task) {
+		target = fget_task(task, proc_fd(inode));
+		put_task_struct(task);
+	}
+	if (target) {
+		hidden = hdn_sysfs_file_hidden(target);
+		fput(target);
+	}
+	return hidden;
+}
+
 static int seq_fdinfo_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, seq_show, inode);
+	struct proc_fdinfo_context *context;
+	int error;
+
+	if (proc_fdinfo_target_hidden(inode))
+		return -ENOENT;
+	context = kmalloc_obj(*context, GFP_KERNEL);
+	if (!context)
+		return -ENOMEM;
+	context->inode = inode;
+	context->sysfs_hidden = hdn_sysfs_hidden_classes();
+	error = single_open(file, seq_show, context);
+	if (error)
+		kfree(context);
+	return error;
+}
+
+static ssize_t seq_fdinfo_read(struct file *file, char __user *buf,
+			       size_t count, loff_t *ppos)
+{
+	struct seq_file *m = file->private_data;
+	struct proc_fdinfo_context *context = m->private;
+	u64 hidden = hdn_sysfs_hidden_classes();
+
+	if (proc_fdinfo_target_hidden(context->inode))
+		return -ENOENT;
+	mutex_lock(&m->lock);
+	if (context->sysfs_hidden != hidden) {
+		/* Discard output produced under an earlier subject view. */
+		m->count = 0;
+		m->from = 0;
+		m->read_pos = -1;
+		context->sysfs_hidden = hidden;
+	}
+	mutex_unlock(&m->lock);
+	return seq_read(file, buf, count, ppos);
+}
+
+static int seq_fdinfo_release(struct inode *inode, struct file *file)
+{
+	struct seq_file *m = file->private_data;
+	struct proc_fdinfo_context *context = m->private;
+
+	kfree(context);
+	return single_release(inode, file);
 }
 
 /*
@@ -107,9 +179,9 @@ static const struct inode_operations proc_fdinfo_file_inode_operations = {
 
 static const struct file_operations proc_fdinfo_file_operations = {
 	.open		= seq_fdinfo_open,
-	.read		= seq_read,
+	.read		= seq_fdinfo_read,
 	.llseek		= seq_lseek,
-	.release	= single_release,
+	.release	= seq_fdinfo_release,
 };
 
 static bool tid_fd_mode(struct task_struct *task, unsigned fd, fmode_t *mode)
@@ -183,9 +255,11 @@ static int proc_fd_link(struct dentry *dentry, struct path *path)
 
 		fd_file = fget_task(task, fd);
 		if (fd_file) {
-			*path = fd_file->f_path;
-			path_get(&fd_file->f_path);
-			ret = 0;
+			if (!hdn_sysfs_file_hidden(fd_file)) {
+				*path = fd_file->f_path;
+				path_get(&fd_file->f_path);
+				ret = 0;
+			}
 			fput(fd_file);
 		}
 		put_task_struct(task);

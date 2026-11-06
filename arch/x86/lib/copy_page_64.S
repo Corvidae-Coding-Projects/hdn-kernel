@@ -6,6 +6,7 @@
 #include <linux/cfi_types.h>
 #include <asm/cpufeatures.h>
 #include <asm/alternative.h>
+#include <asm/hdn_rap.h>
 
 /*
  * Some CPUs run faster using the string copy instructions (sane microcode).
@@ -15,14 +16,21 @@
  */
 	ALIGN
 SYM_TYPED_FUNC_START(copy_page)
+	HDN_TYPED_FUNC_ENTER copy_page, 2
 	ALTERNATIVE "jmp copy_page_regs", "", X86_FEATURE_REP_GOOD
 	movl	$4096/8, %ecx
 	rep	movsq
-	RET
+	HDN_ENTRY_ROOT_RETURN
+#ifndef HDN_RAP_ASM_ACTIVE
 SYM_FUNC_END(copy_page)
+#endif
 EXPORT_SYMBOL(copy_page)
 
+#ifdef HDN_RAP_ASM_ACTIVE
+copy_page_regs:
+#else
 SYM_FUNC_START_LOCAL(copy_page_regs)
+#endif
 	subq	$2*8,	%rsp
 	movq	%rbx,	(%rsp)
 	movq	%r12,	1*8(%rsp)
@@ -86,5 +94,9 @@ SYM_FUNC_START_LOCAL(copy_page_regs)
 	movq	(%rsp), %rbx
 	movq	1*8(%rsp), %r12
 	addq	$2*8, %rsp
-	RET
+	HDN_ENTRY_ROOT_RETURN
+#ifdef HDN_RAP_ASM_ACTIVE
+SYM_FUNC_END(copy_page)
+#else
 SYM_FUNC_END(copy_page_regs)
+#endif

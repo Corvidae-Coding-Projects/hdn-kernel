@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <linux/ptrace.h>
+#include <linux/hdn_rap.h>
 #include <asm/bugs.h>
 #include <asm/msr.h>
 #include <asm/traps.h>
@@ -112,14 +113,18 @@ static void ibt_clear_fred_wfe(struct pt_regs *regs)
 
 static void do_kernel_cp_fault(struct pt_regs *regs, unsigned long error_code)
 {
+	u64 sequence;
+
 	if ((error_code & CP_EC) != CP_ENDBR) {
 		do_unexpected_cp(regs, error_code);
 		return;
 	}
+	sequence = hdn_rap_fixup_begin(regs, X86_TRAP_CP);
 
 	if (unlikely(regs->ip == (unsigned long)&ibt_selftest_noendbr)) {
 		regs->ax = 0;
 		ibt_clear_fred_wfe(regs);
+		hdn_rap_cp_end(regs, sequence, true);
 		return;
 	}
 
@@ -128,6 +133,7 @@ static void do_kernel_cp_fault(struct pt_regs *regs, unsigned long error_code)
 		printk(KERN_DEFAULT CUT_HERE);
 		__warn(__FILE__, __LINE__, (void *)regs->ip, TAINT_WARN, regs, NULL);
 		ibt_clear_fred_wfe(regs);
+		hdn_rap_cp_end(regs, sequence, false);
 		return;
 	}
 	BUG();

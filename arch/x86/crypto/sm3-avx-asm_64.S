@@ -12,6 +12,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <linux/cfi_types.h>
 #include <asm/frame.h>
 
@@ -329,6 +330,7 @@
  *                        const u8 *data, int nblocks);
  */
 SYM_TYPED_FUNC_START(sm3_transform_avx)
+	HDN_ASM_FUNCTION sm3_transform_avx, 1
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: data (64*nblks bytes)
@@ -513,5 +515,6 @@ SYM_TYPED_FUNC_START(sm3_transform_avx)
 
 	movq %rbp, %rsp;
 	popq %rbp;
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END sm3_transform_avx
 SYM_FUNC_END(sm3_transform_avx)

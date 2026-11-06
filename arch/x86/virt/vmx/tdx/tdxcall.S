@@ -3,6 +3,7 @@
 #include <asm/frame.h>
 #include <asm/asm.h>
 #include <asm/tdx.h>
+#include <asm/hdn_rap.h>
 
 /*
  * TDCALL and SEAMCALL are supported in Binutils >= 2.36.
@@ -188,7 +189,7 @@
 .endif	/* \saved */
 
 	FRAME_END
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 .if \host
 .Lseamcall_vmfailinvalid\@:

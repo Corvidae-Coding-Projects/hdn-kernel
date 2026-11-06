@@ -13,6 +13,9 @@
 #define DEBUG		/* Enable initcall_debug */
 
 #include <linux/types.h>
+#include <linux/hdn_pgtable.h>
+#include <linux/hdn_rap.h>
+#include <linux/hdn_stack.h>
 #include <linux/export.h>
 #include <linux/extable.h>
 #include <linux/module.h>
@@ -760,6 +763,15 @@ static noinline void __ref __noreturn rest_init(void)
 	cpu_startup_entry(CPUHP_ONLINE);
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+/* Fixed assembly continuation on the new stack; never an indirect callback. */
+void __init __noreturn hdn_stack_bootstrap_continue(void)
+{
+	hdn_stack_bootstrap_retire();
+	rest_init();
+}
+#endif
+
 /* Check for early params. */
 static int __init do_early_param(char *param, char *val,
 				 const char *unused, void *arg)
@@ -1134,6 +1146,7 @@ void start_kernel(void)
 	WARN(!irqs_disabled(), "Interrupts were enabled early\n");
 
 	early_boot_irqs_disabled = false;
+	hdn_rap_cpu_contexts_init();
 	local_irq_enable();
 
 	kmem_cache_init_late();
@@ -1204,8 +1217,14 @@ void start_kernel(void)
 	acpi_subsystem_init();
 	arch_post_acpi_subsys_init();
 	kcsan_init();
+	hdn_pt_init();
+	hdn_rap_context_seal();
+	hdn_rap_failure_init();
 
 	/* Do the rest non-__init'ed, we're now alive */
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_stack_bootstrap();
+#endif
 	rest_init();
 
 	/*
@@ -1527,6 +1546,11 @@ static inline bool arch_parse_debug_rodata(char *str) { return false; }
 
 static int __init set_debug_rodata(char *str)
 {
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_KERNEL_WX) &&
+	    str && !strcmp(str, "off")) {
+		pr_warn("HDN requires read-only kernel sections\n");
+		return 0;
+	}
 	if (arch_parse_debug_rodata(str))
 		return 0;
 

@@ -125,6 +125,7 @@
 //      reduction.  For single-block processing, we use the x^64 optimization.
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 .section .rodata
 .p2align 4
@@ -558,7 +559,7 @@
 	sub		$8, %eax
 	jge		.Lprecompute_next\@
 
-	RET
+	HDN_ASM_RETURN
 .endm
 
 // void aes_gcm_aad_update_aesni(const struct aes_gcm_key_aesni *key,
@@ -617,7 +618,7 @@
 
 .Laad_done\@:
 	movdqu		GHASH_ACC, (GHASH_ACC_PTR)
-	RET
+	HDN_ASM_RETURN
 .endm
 
 // Increment LE_CTR eight times to generate eight little-endian counter blocks,
@@ -974,7 +975,7 @@
 	// Store the updated GHASH accumulator back to memory.
 	movdqu		GHASH_ACC, (GHASH_ACC_PTR)
 
-	RET
+	HDN_ASM_RETURN
 .endm
 
 // void aes_gcm_enc_final_##suffix(const struct aes_gcm_key_aesni *key,
@@ -1085,45 +1086,69 @@
 	_test_mem	(ZEROPAD_MASK_PTR), GHASH_ACC, tmp=%xmm0
 	sete		%al
 .endif
-	RET
+	HDN_ASM_RETURN
 .endm
 
 .set	USE_AVX, 0
 SYM_FUNC_START(aes_gcm_precompute_aesni)
+	HDN_ASM_FUNCTION aes_gcm_precompute_aesni
 	_aes_gcm_precompute
+	HDN_ASM_FUNCTION_END aes_gcm_precompute_aesni
 SYM_FUNC_END(aes_gcm_precompute_aesni)
 SYM_FUNC_START(aes_gcm_aad_update_aesni)
+	HDN_ASM_FUNCTION aes_gcm_aad_update_aesni
 	_aes_gcm_aad_update
+	HDN_ASM_FUNCTION_END aes_gcm_aad_update_aesni
 SYM_FUNC_END(aes_gcm_aad_update_aesni)
 SYM_FUNC_START(aes_gcm_enc_update_aesni)
+	HDN_ASM_FUNCTION aes_gcm_enc_update_aesni
 	_aes_gcm_update	1
+	HDN_ASM_FUNCTION_END aes_gcm_enc_update_aesni
 SYM_FUNC_END(aes_gcm_enc_update_aesni)
 SYM_FUNC_START(aes_gcm_dec_update_aesni)
+	HDN_ASM_FUNCTION aes_gcm_dec_update_aesni
 	_aes_gcm_update	0
+	HDN_ASM_FUNCTION_END aes_gcm_dec_update_aesni
 SYM_FUNC_END(aes_gcm_dec_update_aesni)
 SYM_FUNC_START(aes_gcm_enc_final_aesni)
+	HDN_ASM_FUNCTION aes_gcm_enc_final_aesni
 	_aes_gcm_final	1
+	HDN_ASM_FUNCTION_END aes_gcm_enc_final_aesni
 SYM_FUNC_END(aes_gcm_enc_final_aesni)
 SYM_FUNC_START(aes_gcm_dec_final_aesni)
+	HDN_ASM_FUNCTION aes_gcm_dec_final_aesni
 	_aes_gcm_final	0
+	HDN_ASM_FUNCTION_END aes_gcm_dec_final_aesni
 SYM_FUNC_END(aes_gcm_dec_final_aesni)
 
 .set	USE_AVX, 1
 SYM_FUNC_START(aes_gcm_precompute_aesni_avx)
+	HDN_ASM_FUNCTION aes_gcm_precompute_aesni_avx
 	_aes_gcm_precompute
+	HDN_ASM_FUNCTION_END aes_gcm_precompute_aesni_avx
 SYM_FUNC_END(aes_gcm_precompute_aesni_avx)
 SYM_FUNC_START(aes_gcm_aad_update_aesni_avx)
+	HDN_ASM_FUNCTION aes_gcm_aad_update_aesni_avx
 	_aes_gcm_aad_update
+	HDN_ASM_FUNCTION_END aes_gcm_aad_update_aesni_avx
 SYM_FUNC_END(aes_gcm_aad_update_aesni_avx)
 SYM_FUNC_START(aes_gcm_enc_update_aesni_avx)
+	HDN_ASM_FUNCTION aes_gcm_enc_update_aesni_avx
 	_aes_gcm_update	1
+	HDN_ASM_FUNCTION_END aes_gcm_enc_update_aesni_avx
 SYM_FUNC_END(aes_gcm_enc_update_aesni_avx)
 SYM_FUNC_START(aes_gcm_dec_update_aesni_avx)
+	HDN_ASM_FUNCTION aes_gcm_dec_update_aesni_avx
 	_aes_gcm_update	0
+	HDN_ASM_FUNCTION_END aes_gcm_dec_update_aesni_avx
 SYM_FUNC_END(aes_gcm_dec_update_aesni_avx)
 SYM_FUNC_START(aes_gcm_enc_final_aesni_avx)
+	HDN_ASM_FUNCTION aes_gcm_enc_final_aesni_avx
 	_aes_gcm_final	1
+	HDN_ASM_FUNCTION_END aes_gcm_enc_final_aesni_avx
 SYM_FUNC_END(aes_gcm_enc_final_aesni_avx)
 SYM_FUNC_START(aes_gcm_dec_final_aesni_avx)
+	HDN_ASM_FUNCTION aes_gcm_dec_final_aesni_avx
 	_aes_gcm_final	0
+	HDN_ASM_FUNCTION_END aes_gcm_dec_final_aesni_avx
 SYM_FUNC_END(aes_gcm_dec_final_aesni_avx)

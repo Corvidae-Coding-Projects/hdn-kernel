@@ -7,6 +7,7 @@
  */
 #include <linux/linkage.h>
 #include <asm/alternative.h>
+#include <asm/hdn_rap.h>
 #include <asm/msr.h>
 #include <asm/processor-flags.h>
 #include <asm/nospec-branch.h>
@@ -43,6 +44,7 @@
 	.code32
 
 SYM_CODE_START(hv_crash_asm32)
+	HDN_KEXEC_FUNC hv_crash_asm32, 24
 	UNWIND_HINT_UNDEFINED
 	ENDBR
 	movl	$X86_CR4_PAE, %ecx
@@ -76,11 +78,13 @@ SYM_CODE_START(hv_crash_asm32)
 	add $HV_CRASHDATA_OFFS_CS_JMPTGT, %eax
 	ljmp %cs:*(%eax)
 SYM_CODE_END(hv_crash_asm32)
+_ASM_NOKPROBE(hv_crash_asm32)
 
 	/* we now run in full 64bit IA32-e long mode, CS.L=1 and CS.D=0 */
 	.code64
 	.balign 8
 SYM_CODE_START(hv_crash_asm64)
+	HDN_KEXEC_FUNC hv_crash_asm64, 25
 	UNWIND_HINT_UNDEFINED
 	ENDBR
 	/* restore kernel page tables so we can jump to kernel code */
@@ -99,3 +103,4 @@ SYM_CODE_START(hv_crash_asm64)
 
 SYM_INNER_LABEL(hv_crash_asm_end, SYM_L_GLOBAL)
 SYM_CODE_END(hv_crash_asm64)
+_ASM_NOKPROBE(hv_crash_asm64)

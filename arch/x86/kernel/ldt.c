@@ -22,6 +22,7 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/uaccess.h>
+#include <linux/hdn_execmem.h>
 
 #include <asm/ldt.h>
 #include <asm/tlb.h>
@@ -61,6 +62,10 @@ void load_mm_ldt(struct mm_struct *mm)
 	 */
 
 	if (unlikely(ldt)) {
+		if (IS_ENABLED(CONFIG_SECURITY_HARDENING_LDT) &&
+		    (ldt->nr_entries > LDT_ENTRIES ||
+		     !hdn_execmem_ldt_valid(ldt->entries, ldt->nr_entries * LDT_ENTRY_SIZE)))
+			panic("HDN rejected an unsealed local descriptor table");
 		if (static_cpu_has(X86_FEATURE_PTI)) {
 			if (WARN_ON_ONCE((unsigned long)ldt->slot > 1)) {
 				/*
@@ -145,6 +150,18 @@ static void flush_ldt(void *__mm)
 	refresh_ldt_segments();
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_LDT
+static void hdn_ldt_destroy_work(struct work_struct *work)
+{
+	struct ldt_struct *ldt = container_of(work, struct ldt_struct, destroy_work);
+
+	/* All users and PTI aliases were removed before this work was queued. */
+	if (!hdn_execmem_free(ldt->entries))
+		panic("HDN lost local descriptor storage ownership");
+	kfree(ldt);
+}
+#endif
+
 /* The caller must call finalize_ldt_struct on the result. LDT starts zeroed. */
 static struct ldt_struct *alloc_ldt_struct(unsigned int num_entries)
 {
@@ -167,10 +184,21 @@ static struct ldt_struct *alloc_ldt_struct(unsigned int num_entries)
 	 * Keep it simple: zero the whole allocation and never allocate less
 	 * than PAGE_SIZE.
 	 */
+#ifdef CONFIG_SECURITY_HARDENING_LDT
+	INIT_WORK(&new_ldt->destroy_work, hdn_ldt_destroy_work);
+	new_ldt->entries = __vmalloc_node_range(PAGE_ALIGN(alloc_size), PAGE_SIZE,
+		VMALLOC_START, VMALLOC_END, GFP_KERNEL_ACCOUNT | __GFP_ZERO,
+		PAGE_KERNEL, VM_FLUSH_RESET_PERMS, NUMA_NO_NODE, __builtin_return_address(0));
+	if (new_ldt->entries && hdn_execmem_claim_ldt(new_ldt->entries, alloc_size)) {
+		vfree(new_ldt->entries);
+		new_ldt->entries = NULL;
+	}
+#else
 	if (alloc_size > PAGE_SIZE)
 		new_ldt->entries = __vmalloc(alloc_size, GFP_KERNEL_ACCOUNT | __GFP_ZERO);
 	else
 		new_ldt->entries = (void *)get_zeroed_page(GFP_KERNEL_ACCOUNT);
+#endif
 
 	if (!new_ldt->entries) {
 		kfree(new_ldt);
@@ -413,9 +441,13 @@ static void free_ldt_pgtables(struct mm_struct *mm)
 }
 
 /* After calling this, the LDT is immutable. */
-static void finalize_ldt_struct(struct ldt_struct *ldt)
+static int finalize_ldt_struct(struct ldt_struct *ldt)
 {
+	/* Also satisfies Xen's RO-alias requirement without reopening a direct map. */
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_LDT))
+		return hdn_execmem_seal_data(ldt->entries);
 	paravirt_alloc_ldt(ldt->entries, ldt->nr_entries);
+	return 0;
 }
 
 static void install_ldt(struct mm_struct *mm, struct ldt_struct *ldt)
@@ -436,12 +468,17 @@ static void free_ldt_struct(struct ldt_struct *ldt)
 	if (likely(!ldt))
 		return;
 
+#ifdef CONFIG_SECURITY_HARDENING_LDT
+	if (!queue_work(system_unbound_wq, &ldt->destroy_work))
+		panic("HDN local descriptor retirement repeated");
+#else
 	paravirt_free_ldt(ldt->entries, ldt->nr_entries);
 	if (ldt->nr_entries * LDT_ENTRY_SIZE > PAGE_SIZE)
 		vfree_atomic(ldt->entries);
 	else
 		free_page((unsigned long)ldt->entries);
 	kfree(ldt);
+#endif
 }
 
 /*
@@ -468,7 +505,11 @@ int ldt_dup_context(struct mm_struct *old_mm, struct mm_struct *mm)
 
 	memcpy(new_ldt->entries, old_mm->context.ldt->entries,
 	       new_ldt->nr_entries * LDT_ENTRY_SIZE);
-	finalize_ldt_struct(new_ldt);
+	retval = finalize_ldt_struct(new_ldt);
+	if (retval) {
+		free_ldt_struct(new_ldt);
+		goto out_unlock;
+	}
 
 	retval = map_ldt_struct(mm, new_ldt, 0);
 	if (retval) {
@@ -632,7 +673,11 @@ static int write_ldt(void __user *ptr, unsigned long bytecount, int oldmode)
 		memcpy(new_ldt->entries, old_ldt->entries, old_nr_entries * LDT_ENTRY_SIZE);
 
 	new_ldt->entries[ldt_info.entry_number] = ldt;
-	finalize_ldt_struct(new_ldt);
+	error = finalize_ldt_struct(new_ldt);
+	if (error) {
+		free_ldt_struct(new_ldt);
+		goto out_unlock;
+	}
 
 	/*
 	 * If we are using PTI, map the new LDT into the userspace pagetables.

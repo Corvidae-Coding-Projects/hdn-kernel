@@ -1059,7 +1059,7 @@ static ssize_t debugfs_write_file_str(struct file *file, const char __user *user
 {
 	struct dentry *dentry = F_DENTRY(file);
 	char *old, *new = NULL;
-	int pos = *ppos;
+	loff_t pos = *ppos;
 	int r;
 
 	r = debugfs_file_get(dentry);
@@ -1070,11 +1070,11 @@ static ssize_t debugfs_write_file_str(struct file *file, const char __user *user
 
 	/* only allow strict concatenation */
 	r = -EINVAL;
-	if (pos && pos != strlen(old))
+	if (pos < 0 || (pos && pos != strlen(old)))
 		goto error;
 
 	r = -E2BIG;
-	if (pos + count + 1 > PAGE_SIZE)
+	if (pos >= PAGE_SIZE || count > PAGE_SIZE - (size_t)pos - 1)
 		goto error;
 
 	r = -ENOMEM;

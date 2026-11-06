@@ -23,6 +23,433 @@ menuconfig SECURITY_HARDENING
 
 if SECURITY_HARDENING
 
+config HDN_ARCH_CONTRACT
+	def_bool X86_64 || ARM64 || RISCV
+
+config SECURITY_HARDENING_ARCH_CONTRACT_TEST
+	bool "Architecture capability contract unit fixtures"
+	depends on HDN_ARCH_CONTRACT && KUNIT=y
+	default n
+	help
+	  Enumerate every capability state and backing value, validate the complete
+	  architecture descriptor inventory, and check which states may satisfy a
+	  signed policy requirement. Enable only in qualification kernels.
+
+config SECURITY_HARDENING_SYSFS_VIEW
+	bool "Signed profile sysfs discovery views"
+	depends on SYSFS
+	default n
+	help
+	  Honor signed profile restrictions on kernel, firmware, device and
+	  module discovery. Class membership follows registered kernfs nodes,
+	  their ancestors and symlink targets. Check the current application,
+	  mount namespace and user namespace on each operation, including reads
+	  through transferred descriptors. This reduces discovery; it does not
+	  revoke information already read or copied through an existing mapping.
+	  Profiles without visibility restrictions retain the base system view.
+
+config SECURITY_HARDENING_KERNEL_WX
+	bool "Reject x86 kernel W+X permission transitions"
+	depends on X86_64 && STRICT_KERNEL_RWX
+	select IRQ_WORK
+	default n
+	help
+	  Reject page-attribute transitions that would make a present kernel
+	  mapping both writable and executable. Callers must remove execute
+	  permission before making code writable, then remove write permission
+	  before enabling execution. CPA and vmalloc also reject writable aliases
+	  of finalized built-in text and read-only data by physical page number.
+	  Temporary text-poking aliases carry task/CPU-bound transition tokens;
+	  their PFNs and permissions are checked before use and their removal is
+	  checked after TLB synchronization. Debugger/NMI events use a bounded
+	  deferred mailbox without acquiring audit locks in stopped-CPU contexts;
+	  mailbox overflows are counted explicitly.
+	  Dynamic-image aliases, descriptors, and page-table lifecycle coverage
+	  are separate contracts and must not be inferred from this switch alone.
+
+config SECURITY_HARDENING_GDT
+	bool "Protect GDT and IDT backing aliases"
+	depends on SECURITY_HARDENING_KERNEL_WX
+	default n
+	help
+	  Remove writable backing aliases of native per-CPU GDTs. Descriptor
+	  writes and the hardware LTR busy-bit update use preallocated per-CPU
+	  supervisor-only, non-global, NX windows. Separate emergency contexts
+	  cover terminal NMI/crash paths; raw CR3 preservation covers AP setup
+	  before software TLB state exists. Xen PV keeps its hypervisor protocol.
+	  Finalized IDT pages reject writable aliases and data text-poking.
+	  This is a qualification option, not a measured release default.
+
+config SECURITY_HARDENING_LDT
+	bool "Seal replacement local descriptor tables"
+	depends on SECURITY_HARDENING_GDT && SECURITY_HARDENING_EXECMEM
+	depends on MODIFY_LDT_SYSCALL
+	default n
+	help
+	  Allocate each LDT in private page-backed storage with its direct-map
+	  alias removed. Seal before publication, retain only the canonical
+	  read-only view and the fixed read-only PTI slot, and replace whole
+	  tables on modification. Teardown waits for the existing LDT IPI and
+	  mapping lifetime, then scrubs and frees in process context. Xen uses
+	  the same sealed storage and its normal hypervisor descriptor loading.
+
+config SECURITY_HARDENING_INITIFY
+	bool "Retire kernel image aliases before reclaiming init storage"
+	depends on SECURITY_HARDENING_KERNEL_WX
+	default n
+	help
+	  Remove the high kernel image mapping of reclaimed initialization pages
+	  before returning those pages to the allocator, including when PTI is
+	  inactive. Poison and reclaim through the direct map. Stale init symbol
+	  references then fault instead of reaching a reused allocation. Permission
+	  transition failures stop boot before reclamation. Static lifetime proof
+	  still requires the compiler, relocation and modpost verification gate.
+
+config SECURITY_HARDENING_EXECMEM
+	bool "Private physical pages for executable allocations"
+	depends on SECURITY_HARDENING_KERNEL_WX && EXECMEM && ARCH_HAS_EXECMEM_ROX
+	depends on STRICT_MODULE_RWX
+	default n
+	help
+	  Give fresh executable allocations a single construction mapping, remove
+	  their direct-map aliases before publication, and reject new aliases by
+	  physical page number. Finalization is irreversible; live updates use
+	  the scoped text-poking window. Teardown revokes execution and scrubs
+	  before unmapping, flushing, and returning pages to the allocator.
+	  Whole allocations replace the shared execmem ROX cache. Enable in a
+	  qualification profile before considering release promotion.
+
+config SECURITY_HARDENING_PGTABLE
+	bool "Seal native x86 page-table backing storage"
+	depends on SECURITY_HARDENING_EXECMEM && X86_64
+	depends on !KMSAN
+	default n
+	help
+	  Own and seal ordinary page tables from boot through TLB/RCU retirement.
+	  Typed native setters use guarded per-CPU private CR3 update windows;
+	  atomic allocation and CPA splitting use presealed NUMA-aware reserves.
+	  Initial direct, image, PTI, EFI, and trampoline aliases are reconciled.
+	  Kexec and hibernation contexts are immutable before publication or
+	  quiescence; they belong to the terminal handoff, not ordinary CR3s.
+	  Xen PV and confidential-memory guests report unsupported rather than
+	  claiming that native windows replace their hypervisor protocols.
+	  Keep disabled in release profiles until the transition, sanitizer,
+	  source-write-site, and performance qualification gates have passed.
+
+config SECURITY_HARDENING_PGTABLE_TEST
+	bool "Page-table ownership and destructive write probes"
+	depends on SECURITY_HARDENING_PGTABLE && DEBUG_KERNEL && MODULES
+	default n
+	help
+	  Add a post-boot signed test-module entrypoint. Positive mode exercises
+	  the real allocation, native setter, atomic update, alias, and release
+	  interfaces. Destructive modes require a fresh disposable VM each.
+	  Do not enable this entrypoint in production configurations.
+
+config SECURITY_HARDENING_RAP
+	bool "Native x86-64 return and indirect-transfer integrity with private stacks"
+	depends on X86_64 && SECURITY_HARDENING_PGTABLE && VMAP_STACK
+	depends on OBJTOOL && !COMPILE_TEST
+	depends on CC_IS_GCC && GCC_PLUGINS
+	depends on GCC_VERSION >= 160000 && GCC_VERSION < 170000
+	depends on !RUST && !CFI_CLANG && !LTO
+	depends on !XEN_PV && !AMD_MEM_ENCRYPT && !INTEL_TDX_GUEST
+	depends on !HYPERV_VTL_MODE
+	select OBJTOOL_WERROR
+	select SECURITY_HARDENING_GDT
+	select SECURITY_HARDENING_LDT if MODIFY_LDT_SYSCALL
+	select SECURITY_HARDENING_INITIFY
+	select SECURITY_HARDENING_BPF_EXECMEM if BPF_JIT
+	default n
+	help
+	  Compile C and assembly transfers with matching type, return-site and
+	  protected return-context contracts. Bind task and asynchronous frames
+	  to private stack mappings and sealed CPU identities. Module admission
+	  requires the same compiler, build identity and metadata ABI. Objtool
+	  rejects uncovered transfers; the real-mode image has a separate gate.
+
+	  The initial compiler ABI is GCC 16. Clang, Rust, Xen PV, confidential
+	  guests and Hyper-V VTL kernels do not have a supported implementation
+	  of this combined contract. They cannot silently omit instrumentation.
+	  Native IA32/x32 compatibility, tracing, BPF, KVM, suspend and crash
+	  paths remain subject to the same transfer and ownership checks.
+
+	  Select the source/config/compiler manifest digest below before building.
+	  This is a default-off qualification option. Build coverage is required
+	  but does not establish runtime correctness or acceptable overhead.
+
+config SECURITY_HARDENING_PRIVATE_STACKS
+	def_bool SECURITY_HARDENING_RAP
+	help
+	  The initial private-stack and RAP implementations are one contract:
+	  neither may be selected without the other's entry and return adapters.
+	  Task backing loses its direct and inactive aliases. Per-CPU roots expose
+	  the current task and dedicated interrupt/exception/failure stacks only.
+	  Privileged readers copy bounded data through owned temporary mappings.
+
+config HDN_RAP_BUILD_ID
+	string "RAP source/config/compiler manifest SHA-256"
+	depends on SECURITY_HARDENING_RAP
+	default ""
+	help
+	  Enter the 64 lowercase hexadecimal digits produced by the HDN RAP
+	  identity command for the final source, normalized configuration and
+	  compiler. The digest excludes this field to avoid self-reference.
+	  An empty or malformed identity is a compiler error. Reusing an old
+	  identity after changing its inputs fails the source-bound build gate.
+	  This is public build identity, not a secret or a runtime policy knob.
+
+config SECURITY_HARDENING_RAP_ERROR_TEST
+	bool "RAP function error-injection lifecycle probes"
+	depends on SECURITY_HARDENING_RAP && FUNCTION_ERROR_INJECTION
+	depends on KRETPROBES && DEBUG_KERNEL && MODULES
+	default n
+	help
+	  Build a signed module loader for post-boot entry-probe, repeated error
+	  override, return-hook and unregister/reuse checks. Destructive modes
+	  try a changed stack pointer or an unmarked function and require a
+	  separate disposable guest. No error-injection API is newly exported.
+
+config SECURITY_HARDENING_RAP_TEST
+	bool "RAP transfer and return-integrity probes (disposable guests only)"
+	depends on SECURITY_HARDENING_RAP && DEBUG_KERNEL && MODULES
+	depends on FRAME_POINTER && HIGH_RES_TIMERS && X86_LOCAL_APIC
+	default n
+	help
+	  Build a signed module containing positive typed callbacks, task-switch,
+	  timer-IRQ and NMI paths plus destructive type-confusion, overwritten-return
+	  and copied-return cases. Each destructive mode must run in a fresh guest.
+	  This interface exposes no production control and must remain disabled in
+	  release configurations.
+
+config SECURITY_HARDENING_KVM_STATE_TEST
+	bool "Virtualization host-state ownership probes"
+	depends on SECURITY_HARDENING_PRIVATE_STACKS && DEBUG_KERNEL && MODULES
+	depends on KVM_INTEL || KVM_AMD
+	default n
+	help
+	  Build post-boot signed-module probes for real hardware-state allocation,
+	  alias rejection, and protected VMCS/host-save writes. Destructive modes
+	  require a separate disposable test guest. This does not replace KVM
+	  guest-entry, nested virtualization, or CPU hotplug qualification.
+
+config SECURITY_HARDENING_PRIVATE_STACKS_TEST
+	bool "Private kernel stack mapping probes"
+	depends on SECURITY_HARDENING_PRIVATE_STACKS && DEBUG_KERNEL && MODULES
+	default n
+	help
+	  Build a signed-module interface for private-stack lifecycle and alias
+	  probes in disposable guests. Mode zero checks current and inactive
+	  task ownership, guard pages, zero initialization, bounded diagnostic
+	  reads, and withdrawn direct/construction aliases. Destructive modes
+	  fault on lower/upper guards, withdrawn aliases, NX stack execution,
+	  or a non-current task identity. This interface must remain disabled
+	  in release configurations.
+
+config SECURITY_HARDENING_KERNSEAL
+	bool "Typed immutable policy and mitigation objects"
+	depends on SECURITY_HARDENING_EXECMEM
+	default n
+	help
+	  Allocate policy and mitigation payloads on private page granules.
+	  Validate and seal once, publish with release ordering, and replace
+	  entire objects. Retired objects stay read-only until RCU readers and
+	  explicit references finish; reclamation then runs in process context.
+	  No arbitrary module registration or runtime unseal operation exists.
+	  Keep disabled in release profiles until class-specific qualification.
+
+config SECURITY_HARDENING_BPF_EXECMEM
+	bool "Isolate BPF executable allocations"
+	depends on SECURITY_HARDENING_EXECMEM && BPF_JIT
+	default n
+	help
+	  Reserve a randomized x86 branch-reachable executable domain for BPF
+	  programs, trampolines and dispatchers. Exclude every other execmem
+	  class, randomize allocation search starts, and retain vmalloc guard
+	  pages. Capacity exhaustion fails the allocation without borrowing
+	  module space. Physical ownership and one-way W^X use KERNEXEC.
+	  Enable only in qualification profiles until JIT lifecycle and capacity
+	  measurements have passed.
+
+config SECURITY_HARDENING_BPF_EXECMEM_TEST
+	bool "BPF executable-memory destructive probes"
+	depends on SECURITY_HARDENING_BPF_EXECMEM && X86_64 && DEBUG_KERNEL && MODULES
+	default n
+	help
+	  Add a built-in test service and signed module loader for fresh disposable
+	  guests. Positive mode executes a finalized private image and rejects a
+	  writable alias. Destructive modes execute during construction, write after
+	  finalization, or execute a retired quarantined address and must terminate
+	  the guest. Never enable this interface in production.
+
+config SECURITY_HARDENING_KERNSEAL_TEST
+	bool "KERNSEAL lifecycle and alias probes"
+	depends on SECURITY_HARDENING_KERNSEAL && KUNIT=y && DEBUG_KERNEL && MODULES
+	default n
+	help
+	  Add a test-only payload class and post-boot KUnit loader for lifecycle,
+	  type, physical-alias, and permission failures. Do not ship this class
+	  or loader in production configurations.
+
+config SECURITY_HARDENING_CONSTIFY_TEST
+	bool "Static and module post-init immutable-storage probes"
+	depends on SECURITY_HARDENING_PGTABLE && KUNIT=y && DEBUG_KERNEL && MODULES
+	default n
+	help
+	  Build a test-only target module containing post-init immutable data and
+	  a second KUnit module that must be loaded after the target has completed
+	  initialization. The split permits suspend, CPU-hotplug, and kexec-load
+	  preparation between target and probe loads. Never enable these address
+	  exposure and negative-write fixtures in a production configuration.
+
+config SECURITY_HARDENING_KERNEL_WX_TEST
+	tristate "KERNEXEC CPA and built-in alias test probes"
+	depends on SECURITY_HARDENING_KERNEL_WX && KUNIT=y && DEBUG_KERNEL
+	default n
+	help
+	  Build negative permission-transition and built-in physical-alias probes.
+	  These deliberately attempt denied mappings without executing or writing
+	  through them. Load as a module after boot to test finalized static
+	  sections; built-in KUnit runs before read-only finalization and skips
+	  that case. Use only in the qualification kernel, not production.
+
+config SECURITY_HARDENING_LATENT_ENTROPY
+	bool "Supplemental zero-credit execution-state mixing"
+	depends on GCC_PLUGINS && !GCC_PLUGIN_LATENT_ENTROPY
+	default n
+	help
+	  Instrument only the reviewed boot, fork and interrupt collection sites.
+	  Mix defined control-flow state and legal timing samples into the random
+	  pool without crediting entropy or advancing CRNG readiness. Collection
+	  is sampled and uses per-CPU state; it never reads uninitialized storage.
+	  Leave this off unless a measured entropy-starved platform benefits.
+	  This is not a replacement for device, hardware or OS entropy sources.
+
+config SECURITY_HARDENING_LATENT_ENTROPY_TEST
+	bool "Deterministic latent-mixing test interface"
+	depends on SECURITY_HARDENING_LATENT_ENTROPY && KUNIT=y && DEBUG_KERNEL
+	default n
+	help
+	  Build a deterministic, CPU-local instrumentation fixture and KUnit
+	  suite. The seed interface exists only in this test build, is not
+	  exported, and cannot be enabled by signed policy or a runtime knob.
+	  Never enable this option in a production release configuration.
+
+config GCC_PLUGIN_HDN_SIZE_ANALYSIS
+	bool "Report arithmetic feeding allocation and copy sizes"
+	depends on GCC_PLUGINS
+	default y
+	help
+	  Emit a source-linked inventory of arithmetic feeding allocation and
+	  copy boundaries before inlining removes checked helper contracts.
+	  Reports include unresolved dataflow and reviewed wrapping annotations;
+	  exceptions are enforced by the external verification ledger. This
+	  reporting pass does not change generated kernel code. Source-level
+	  checked arithmetic remains enforced independently of this option.
+
+config GCC_PLUGIN_HDN_LIFETIME
+	bool "Record static object and initialization lifetimes"
+	depends on GCC_PLUGINS
+	default n
+	help
+	  Emit definitions, direct reads and writes, address escapes, call edges,
+	  indirect stores and assembly sites before optimization. The external
+	  CONSTIFY/INITIFY gate combines these records with ELF relocations and
+	  a source-bound review ledger. Unresolved aliases and callbacks require
+	  review; a missing edge never establishes a safe lifetime. This pass
+	  reports evidence without changing generated code.
+
+config GCC_PLUGIN_HDN_LIFETIME_FIXTURE
+	bool "Build static lifetime positive fixtures"
+	depends on GCC_PLUGIN_HDN_LIFETIME && DEBUG_KERNEL
+	default n
+	help
+	  Compile the init-only, post-init immutable and cross-translation-unit
+	  positive seeds into a qualification kernel. This option exists only to
+	  exercise the source, ELF, modpost and objtool evidence pipeline.
+
+config GCC_PLUGIN_HDN_LIFETIME_BAD_FIXTURE
+	bool "Build intentionally invalid static lifetime fixtures"
+	depends on GCC_PLUGIN_HDN_LIFETIME_FIXTURE
+	default n
+	help
+	  Add mutable dispatch, post-seal write, runtime-to-init call, retained
+	  init callback and cross-unit runtime-to-init references. A gate profile
+	  selecting this option must be rejected; it is not a bootable test image.
+
+config GCC_PLUGIN_HDN_PGTABLE_ANALYSIS
+	bool "Record page-table mutation sites"
+	depends on GCC_PLUGINS && X86_64
+	default n
+	help
+	  Record typed page-table stores, bulk writes, mutation API calls,
+	  unresolved indirect stores and assembly in page-table contexts before
+	  optimization. The external KERNEXEC gate binds the complete compilation
+	  inventory and final linked objects to an exact source-review ledger.
+	  This evidence producer does not change generated kernel code and is not
+	  a substitute for runtime page-table ownership enforcement.
+
+config SECURITY_HARDENING_RESPECTRE
+	bool "GCC transient dataflow instrumentation"
+	depends on X86_64 && GCC_PLUGINS && CC_IS_GCC
+	depends on GCC_VERSION >= 160000 && GCC_VERSION < 170000
+	depends on !COMPILE_TEST
+	depends on !AMD_MEM_ENCRYPT
+	default n
+	help
+	  Track untrusted parameters, mutable memory and unknown call results.
+	  Mask proven simple array bounds and serialize other selected loads,
+	  stores and call boundaries. Software store-bypass coverage does not
+	  depend on the runtime SSBD setting. Strict compiler fixtures reject an
+	  unknown assembly boundary until a source-bound annotation describes it.
+	  The release coverage gate also binds excluded assembly and compiler
+	  units, review spans, compiler identity and final machine code. Kernel
+	  compilation records unknown inline assembly as a mandatory review
+	  obligation; the release gate rejects any obligation without an exact,
+	  source-bound disposition. Standalone fixture compilation remains strict.
+	  Uses CPUID serialization on x86-64; encrypted guests whose CPUID can
+	  fault are unsupported. Clang has no equivalent producer and cannot
+	  select this option. GCC versions outside the release GCC 16 producer ABI
+	  cannot select it either. Leave disabled until compatibility, leakage and
+	  workload cost have been qualified on representative hardware.
+
+config SECURITY_HARDENING_RESPECTRE_TEST
+	bool "RESPECTRE module semantic fixture"
+	depends on SECURITY_HARDENING_RESPECTRE && MODULES && DEBUG_KERNEL
+	default n
+	help
+	  Build a signed, post-boot module whose bounded index, pointer selection,
+	  indirect-call and store/load paths must retain ordinary architectural
+	  semantics while being compiled by the same RESPECTRE producer as other
+	  modules. The fixture emits only a bounded pass/fail marker. It is for a
+	  disposable qualification guest and must not be selected in production.
+
+config SECURITY_HARDENING_UDEREF
+	bool "Require audited x86 user-access windows"
+	depends on SECURITY_HARDENING_KERNEL_WX && HAVE_UACCESS_VALIDATION
+	depends on HAVE_OBJTOOL && !COMPILE_TEST && PRINTK
+	select OBJTOOL
+	select OBJTOOL_WERROR
+	select STACKTRACE_BUILD_ID
+	default n
+	help
+	  Use the existing SMAP access windows and pinned CR4 protection. Make
+	  objtool's unbalanced, nested, callback and return-with-access-enabled
+	  diagnostics fatal, and record attempts to change pinned SMAP state in
+	  the deferred hardening event stream after the bit has been restored.
+	  CPUs without SMAP report unsupported; this option does not claim a
+	  software substitute or introduce a policy-controlled relaxation.
+
+config SECURITY_HARDENING_UDEREF_TEST
+	bool "HDN destructive user-access probes (disposable guests only)"
+	depends on SECURITY_HARDENING_UDEREF && X86_64 && X86_LOCAL_APIC
+	depends on DEBUG_KERNEL && MODULES
+	default n
+	help
+	  Build a signed-module loader for real user-mapping access, fault fixup,
+	  SMAP pinning and IRQ/NMI window probes. Direct read/write modes
+	  deliberately crash the guest. This is not a production interface.
+
 config SECURITY_HARDENING_AUDIT
 	bool "Emit hardening denial diagnostics"
 	default y
@@ -699,4 +1126,41 @@ config SECURITY_HARDENING_EXPLOIT_MITIGATIONS
 	  this option makes corruption and information disclosure harder before
 	  policy is involved.
 
+config SECURITY_HARDENING_AUTOSLAB_TEST
+	bool "HDN typed allocation domain fixtures (test kernels only)"
+	depends on SECURITY_HARDENING_AUTOSLAB && KUNIT=y
+	default n
+	help
+	  Exercise isolation and reallocation through the real allocator.
+	  This does not enable fault injection in production kernels.
+
+config SECURITY_HARDENING_AUTOSLAB_MODULE_TEST
+	tristate "HDN module allocation-domain fixture (test kernels only)"
+	depends on SECURITY_HARDENING_AUTOSLAB_TEST && MODULES && m
+	default n
+	help
+	  Build a disposable-guest module whose compiler-typed allocations and
+	  attempted indirect request for a built-in domain must both resolve to
+	  the permanent lower-trust module domain. The loader also uses this
+	  module as the positive input for metadata-section rejection mutations.
+
+config SECURITY_HARDENING_SLAB_JITTER_TEST
+	bool "HDN critical-object corruption fixtures (test kernels only)"
+	depends on SECURITY_HARDENING_SLAB_JITTER && DEBUG_KERNEL && MODULES
+	default n
+	help
+	  Build a loadable driver for deterministic placement and destructive
+	  corruption probes. Load only in a disposable guest. The seeded class
+	  is separate from all production object classes.
+
 endif
+
+config SECURITY_HARDENING_EFI_TEST
+	tristate "Read-only EFI private-stack runtime probes"
+	depends on SECURITY_HARDENING_PRIVATE_STACKS && EFI && DEBUG_KERNEL && m
+	default n
+	help
+	  A signed post-boot module for disposable EFI test guests. Compare
+	  stack-backed and heap-backed SecureBoot reads, required-size queries,
+	  and GetTime output through the actual EFI runtime interfaces. Does
+	  not write variables, reset the machine, or install firmware handlers.

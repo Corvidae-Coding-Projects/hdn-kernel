@@ -8,6 +8,7 @@
 #include <asm/nospec-branch.h>
 #include <asm/mmu_context.h>
 #include <asm/ibt.h>
+#include <asm/hdn_rap_efi.h>
 #include <linux/build_bug.h>
 #include <linux/kernel.h>
 #include <linux/pgtable.h>
@@ -103,13 +104,29 @@ extern bool efi_disable_ibt_for_runtime;
 	__efi_call(__VA_ARGS__);					\
 })
 
-#undef arch_efi_call_virt
-#define arch_efi_call_virt(p, f, args...) ({				\
-	u64 ret, ibt = ibt_save(efi_disable_ibt_for_runtime);		\
-	ret = efi_call((void *)p->f, args);				\
-	ibt_restore(ibt);						\
-	ret;								\
+#undef arch_efi_call_virt_address
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+#define arch_efi_call_virt_address(id, address, args...) ({ \
+	u64 ret, ibt = ibt_save(efi_disable_ibt_for_runtime); \
+	__efi_nargs_check(efi_call, 6, args); \
+	ret = __hdn_efi_call((id), (void *)(address), args, \
+			    0UL, 0UL, 0UL, 0UL, 0UL, 0UL, 0UL, 0UL); \
+	ibt_restore(ibt); \
+	ret; \
 })
+#undef arch_efi_register_prm
+#define arch_efi_register_prm(address) hdn_efi_register(HDN_EFI_PRM, (unsigned long)(address), false)
+#else
+#define arch_efi_call_virt_address(id, address, args...) ({ \
+	u64 ret, ibt = ibt_save(efi_disable_ibt_for_runtime); \
+	ret = efi_call((void *)(address), args); \
+	ibt_restore(ibt); \
+	ret; \
+})
+#endif
+#undef arch_efi_call_virt
+#define arch_efi_call_virt(p, f, args...) \
+	arch_efi_call_virt_address(offsetof(efi_runtime_services_t, f), READ_ONCE((p)->f), args)
 
 #ifdef CONFIG_KASAN
 /*
@@ -137,8 +154,8 @@ extern void __init efi_dump_pagetable(void);
 extern void __init efi_apply_memmap_quirks(void);
 extern int __init efi_reuse_config(u64 tables, int nr_tables);
 extern void efi_delete_dummy_variable(void);
-extern void efi_crash_gracefully_on_page_fault(unsigned long phys_addr,
-					       const struct pt_regs *regs);
+extern bool efi_crash_gracefully_on_page_fault(unsigned long phys_addr,
+					       struct pt_regs *regs);
 extern void efi_unmap_boot_services(void);
 
 void arch_efi_call_virt_setup(void);

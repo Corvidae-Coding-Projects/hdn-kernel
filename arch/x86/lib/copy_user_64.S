@@ -6,6 +6,7 @@
  * Functions to copy from and to user space.
  */
 
+#include <asm/hdn_rap.h>
 #include <linux/export.h>
 #include <linux/linkage.h>
 #include <linux/cfi_types.h>
@@ -33,6 +34,7 @@
  */
 SYM_FUNC_START(rep_movs_alternative)
 	ANNOTATE_NOENDBR
+	HDN_PRIVATE_FUNC_ENTER rep_movs_alternative, 3
 	cmpq $64,%rcx
 	jae .Llarge
 
@@ -50,7 +52,7 @@ SYM_FUNC_START(rep_movs_alternative)
 	dec %rcx
 	jne .Lcopy_user_tail
 .Lexit:
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 	_ASM_EXTABLE_UA( 0b, .Lexit)
 	_ASM_EXTABLE_UA( 1b, .Lexit)
@@ -72,7 +74,7 @@ SYM_FUNC_START(rep_movs_alternative)
 
 .Llarge:
 0:	ALTERNATIVE "jmp .Llarge_movsq", "rep movsb", X86_FEATURE_ERMS
-1:	RET
+1:	HDN_ENTRY_ROOT_RETURN
 
 	_ASM_EXTABLE_UA( 0b, 1b)
 
@@ -102,7 +104,7 @@ SYM_FUNC_START(rep_movs_alternative)
 	movl %eax,%ecx
 	testl %ecx,%ecx
 	jne .Lcopy_user_tail
-	RET
+	HDN_ENTRY_ROOT_RETURN
 
 1:	leaq (%rax,%rcx,8),%rcx
 	jmp .Lcopy_user_tail

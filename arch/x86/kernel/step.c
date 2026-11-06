@@ -10,6 +10,7 @@
 #include <asm/desc.h>
 #include <asm/debugreg.h>
 #include <asm/mmu_context.h>
+#include <asm/hdn_stack.h>
 
 unsigned long convert_ip_to_linear(struct task_struct *child, struct pt_regs *regs)
 {
@@ -112,8 +113,10 @@ static int is_setting_trap_flag(struct task_struct *child, struct pt_regs *regs)
  */
 static int enable_single_step(struct task_struct *child)
 {
-	struct pt_regs *regs = task_pt_regs(child);
+	struct pt_regs snapshot, *regs = &snapshot;
 	unsigned long oflags;
+
+	hdn_task_regs_snapshot(child, regs);
 
 	/*
 	 * If we stepped into a sysenter/syscall insn, it trapped in
@@ -144,6 +147,8 @@ static int enable_single_step(struct task_struct *child)
 
 	/* Set TF on the kernel stack.. */
 	regs->flags |= X86_EFLAGS_TF;
+	BUG_ON(hdn_task_reg_update(child, offsetof(struct pt_regs, flags),
+				   X86_EFLAGS_TF, X86_EFLAGS_TF));
 
 	/*
 	 * ..but if TF is changed by the instruction we will trace,
@@ -240,5 +245,5 @@ void user_disable_single_step(struct task_struct *child)
 
 	/* But touch TF only if it was set by us.. */
 	if (test_and_clear_tsk_thread_flag(child, TIF_FORCED_TF))
-		task_pt_regs(child)->flags &= ~X86_EFLAGS_TF;
+		BUG_ON(hdn_task_reg_update(child, offsetof(struct pt_regs, flags), 0, X86_EFLAGS_TF));
 }

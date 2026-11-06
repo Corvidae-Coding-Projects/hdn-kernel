@@ -8,6 +8,9 @@
  */
 
 #include <linux/gfp.h>
+#include <linux/hdn_pgtable.h>
+#include <linux/hdn_hibernate.h>
+#include <linux/set_memory.h>
 #include <linux/smp.h>
 #include <linux/suspend.h>
 #include <linux/scatterlist.h>
@@ -24,6 +27,7 @@
 #include <asm/sections.h>
 #include <asm/suspend.h>
 #include <asm/tlbflush.h>
+#include <asm/hdn_rap_resume.h>
 
 static int set_up_temporary_text_mapping(pgd_t *pgd)
 {
@@ -124,8 +128,70 @@ static int set_up_temporary_mappings(void)
 	return 0;
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_KERNEL_WX
+static bool restore_context_prepared;
+
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+int hdn_rap_hibernate_copy_seal(struct hdn_hibernate_copy_page *pages,
+		unsigned long count)
+{
+	int error = hdn_pt_hibernate_copy_seal(pages, count);
+
+	if (!error)
+		error = hdn_rap_hibernate_copy_publish(pages ?
+				(unsigned long)&pages->entries[0] : 0);
+	if (error)
+		hdn_pt_hibernate_release();
+	return error;
+}
+#endif
+
+void arch_hibernate_cleanup_restore(void)
+{
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	hdn_rap_hibernate_release();
+#endif
+	hdn_pt_hibernate_release();
+	if (relocated_restore_code) {
+		if (irqs_disabled() || set_memory_nx(relocated_restore_code, 1) ||
+		    set_memory_rw(relocated_restore_code, 1))
+			panic("HDN could not retire the hibernation restore code");
+	}
+	restore_context_prepared = false;
+	relocated_restore_code = 0;
+	temp_pgt = 0;
+}
+
+int arch_hibernate_prepare_restore(void)
+{
+	int error;
+
+	if (restore_context_prepared)
+		return -EBUSY;
+	error = set_up_temporary_mappings();
+	if (!error)
+		error = relocate_restore_code();
+	if (!error)
+		error = hdn_pt_hibernate_seal();
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	if (!error)
+		error = hdn_rap_hibernate_prepare(temp_pgt, relocated_restore_code);
+#endif
+	if (error) {
+		arch_hibernate_cleanup_restore();
+		return error;
+	}
+	restore_context_prepared = true;
+	return 0;
+}
+#endif
+
 asmlinkage int swsusp_arch_resume(void)
 {
+#ifdef CONFIG_SECURITY_HARDENING_KERNEL_WX
+	if (!restore_context_prepared)
+		return -EINVAL;
+#else
 	int error;
 
 	/* We have got enough memory and from now on we cannot recover */
@@ -136,7 +202,7 @@ asmlinkage int swsusp_arch_resume(void)
 	error = relocate_restore_code();
 	if (error)
 		return error;
-
+#endif
 	restore_image();
 	return 0;
 }

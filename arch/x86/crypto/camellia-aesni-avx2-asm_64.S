@@ -6,6 +6,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <linux/cfi_types.h>
 #include <asm/frame.h>
 
@@ -223,17 +224,21 @@
  * larger and would only marginally faster.
  */
 SYM_FUNC_START_LOCAL(roundsm32_x0_x1_x2_x3_x4_x5_x6_x7_y0_y1_y2_y3_y4_y5_y6_y7_cd)
+	HDN_REGS_FUNC roundsm32_x0_x1_x2_x3_x4_x5_x6_x7_y0_y1_y2_y3_y4_y5_y6_y7_cd
 	roundsm32(%ymm0, %ymm1, %ymm2, %ymm3, %ymm4, %ymm5, %ymm6, %ymm7,
 		  %ymm8, %ymm9, %ymm10, %ymm11, %ymm12, %ymm13, %ymm14, %ymm15,
 		  %rcx, (%r9));
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END roundsm32_x0_x1_x2_x3_x4_x5_x6_x7_y0_y1_y2_y3_y4_y5_y6_y7_cd
 SYM_FUNC_END(roundsm32_x0_x1_x2_x3_x4_x5_x6_x7_y0_y1_y2_y3_y4_y5_y6_y7_cd)
 
 SYM_FUNC_START_LOCAL(roundsm32_x4_x5_x6_x7_x0_x1_x2_x3_y4_y5_y6_y7_y0_y1_y2_y3_ab)
+	HDN_REGS_FUNC roundsm32_x4_x5_x6_x7_x0_x1_x2_x3_y4_y5_y6_y7_y0_y1_y2_y3_ab
 	roundsm32(%ymm4, %ymm5, %ymm6, %ymm7, %ymm0, %ymm1, %ymm2, %ymm3,
 		  %ymm12, %ymm13, %ymm14, %ymm15, %ymm8, %ymm9, %ymm10, %ymm11,
 		  %rax, (%r9));
-	RET;
+	HDN_REGS_RETURN;
+	HDN_ASM_FUNCTION_END roundsm32_x4_x5_x6_x7_x0_x1_x2_x3_y4_y5_y6_y7_y0_y1_y2_y3_ab
 SYM_FUNC_END(roundsm32_x4_x5_x6_x7_x0_x1_x2_x3_y4_y5_y6_y7_y0_y1_y2_y3_ab)
 
 /*
@@ -245,7 +250,7 @@ SYM_FUNC_END(roundsm32_x4_x5_x6_x7_x0_x1_x2_x3_y4_y5_y6_y7_y0_y1_y2_y3_ab)
 #define two_roundsm32(x0, x1, x2, x3, x4, x5, x6, x7, y0, y1, y2, y3, y4, y5, \
 		      y6, y7, mem_ab, mem_cd, i, dir, store_ab) \
 	leaq (key_table + (i) * 8)(CTX), %r9; \
-	call roundsm32_x0_x1_x2_x3_x4_x5_x6_x7_y0_y1_y2_y3_y4_y5_y6_y7_cd; \
+	HDN_REGS_CALL roundsm32_x0_x1_x2_x3_x4_x5_x6_x7_y0_y1_y2_y3_y4_y5_y6_y7_cd; \
 	\
 	vmovdqu x0, 4 * 32(mem_cd); \
 	vmovdqu x1, 5 * 32(mem_cd); \
@@ -257,7 +262,7 @@ SYM_FUNC_END(roundsm32_x4_x5_x6_x7_x0_x1_x2_x3_y4_y5_y6_y7_y0_y1_y2_y3_ab)
 	vmovdqu x7, 3 * 32(mem_cd); \
 	\
 	leaq (key_table + ((i) + (dir)) * 8)(CTX), %r9; \
-	call roundsm32_x4_x5_x6_x7_x0_x1_x2_x3_y4_y5_y6_y7_y0_y1_y2_y3_ab; \
+	HDN_REGS_CALL roundsm32_x4_x5_x6_x7_x0_x1_x2_x3_y4_y5_y6_y7_y0_y1_y2_y3_ab; \
 	\
 	store_ab(x0, x1, x2, x3, x4, x5, x6, x7, mem_ab);
 
@@ -748,6 +753,7 @@ SYM_FUNC_END(roundsm32_x4_x5_x6_x7_x0_x1_x2_x3_y4_y5_y6_y7_y0_y1_y2_y3_ab)
 .text
 
 SYM_FUNC_START_LOCAL(__camellia_enc_blk32)
+	HDN_REGS_FUNC __camellia_enc_blk32
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rax: temporary storage, 512 bytes
@@ -812,7 +818,7 @@ SYM_FUNC_START_LOCAL(__camellia_enc_blk32)
 		    %ymm15, (key_table)(CTX, %r8, 8), (%rax), 1 * 32(%rax));
 
 	FRAME_END
-	RET;
+	HDN_REGS_RETURN;
 
 .align 8
 .Lenc_max32:
@@ -831,9 +837,11 @@ SYM_FUNC_START_LOCAL(__camellia_enc_blk32)
 		     %ymm15, %rax, %rcx, 24);
 
 	jmp .Lenc_done;
+	HDN_ASM_FUNCTION_END __camellia_enc_blk32
 SYM_FUNC_END(__camellia_enc_blk32)
 
 SYM_FUNC_START_LOCAL(__camellia_dec_blk32)
+	HDN_REGS_FUNC __camellia_dec_blk32
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rax: temporary storage, 512 bytes
@@ -898,7 +906,7 @@ SYM_FUNC_START_LOCAL(__camellia_dec_blk32)
 		    %ymm15, (key_table)(CTX), (%rax), 1 * 32(%rax));
 
 	FRAME_END
-	RET;
+	HDN_REGS_RETURN;
 
 .align 8
 .Ldec_max32:
@@ -915,9 +923,11 @@ SYM_FUNC_START_LOCAL(__camellia_dec_blk32)
 	      ((key_table + (24) * 8) + 4)(CTX));
 
 	jmp .Ldec_max24;
+	HDN_ASM_FUNCTION_END __camellia_dec_blk32
 SYM_FUNC_END(__camellia_dec_blk32)
 
 SYM_FUNC_START(camellia_ecb_enc_32way)
+	HDN_ASM_FUNCTION camellia_ecb_enc_32way
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst (32 blocks)
@@ -934,7 +944,7 @@ SYM_FUNC_START(camellia_ecb_enc_32way)
 	/* now dst can be used as temporary buffer (even in src == dst case) */
 	movq	%rsi, %rax;
 
-	call __camellia_enc_blk32;
+	HDN_REGS_CALL __camellia_enc_blk32;
 
 	write_output(%ymm7, %ymm6, %ymm5, %ymm4, %ymm3, %ymm2, %ymm1, %ymm0,
 		     %ymm15, %ymm14, %ymm13, %ymm12, %ymm11, %ymm10, %ymm9,
@@ -943,10 +953,12 @@ SYM_FUNC_START(camellia_ecb_enc_32way)
 	vzeroupper;
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END camellia_ecb_enc_32way
 SYM_FUNC_END(camellia_ecb_enc_32way)
 
 SYM_FUNC_START(camellia_ecb_dec_32way)
+	HDN_ASM_FUNCTION camellia_ecb_dec_32way
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst (32 blocks)
@@ -968,7 +980,7 @@ SYM_FUNC_START(camellia_ecb_dec_32way)
 	/* now dst can be used as temporary buffer (even in src == dst case) */
 	movq	%rsi, %rax;
 
-	call __camellia_dec_blk32;
+	HDN_REGS_CALL __camellia_dec_blk32;
 
 	write_output(%ymm7, %ymm6, %ymm5, %ymm4, %ymm3, %ymm2, %ymm1, %ymm0,
 		     %ymm15, %ymm14, %ymm13, %ymm12, %ymm11, %ymm10, %ymm9,
@@ -977,10 +989,12 @@ SYM_FUNC_START(camellia_ecb_dec_32way)
 	vzeroupper;
 
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END camellia_ecb_dec_32way
 SYM_FUNC_END(camellia_ecb_dec_32way)
 
 SYM_FUNC_START(camellia_cbc_dec_32way)
+	HDN_ASM_FUNCTION camellia_cbc_dec_32way
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst (32 blocks)
@@ -1015,7 +1029,7 @@ SYM_FUNC_START(camellia_cbc_dec_32way)
 	movq %rsp, %rax;
 
 .Lcbc_dec_continue:
-	call __camellia_dec_blk32;
+	HDN_REGS_CALL __camellia_dec_blk32;
 
 	vmovdqu %ymm7, (%rax);
 	vpxor %ymm7, %ymm7, %ymm7;
@@ -1044,5 +1058,6 @@ SYM_FUNC_START(camellia_cbc_dec_32way)
 
 	addq $(16 * 32), %rsp;
 	FRAME_END
-	RET;
+	HDN_ASM_RETURN;
+	HDN_ASM_FUNCTION_END camellia_cbc_dec_32way
 SYM_FUNC_END(camellia_cbc_dec_32way)

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 .text
 #include <linux/linkage.h>
+#include <linux/cfi_types.h>
 #include <linux/objtool.h>
 #include <asm/segment.h>
 #include <asm/pgtable_types.h>
@@ -9,6 +10,8 @@
 #include <asm/asm-offsets.h>
 #include <asm/frame.h>
 #include <asm/nospec-branch.h>
+#include <asm/hdn_rap.h>
+#include <asm/hdn_rap_resume.h>
 
 # Copyright 2003 Pavel Machek <pavel@suse.cz
 
@@ -17,7 +20,13 @@
 	 * Hooray, we are in Long 64-bit mode (but still running in low memory)
 	 */
 SYM_FUNC_START(wakeup_long64)
+	HDN_KEXEC_FUNC wakeup_long64, 32
 	ANNOTATE_NOENDBR
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	/* The startup root selected the sealed task stack and GS by APIC ID.
+	 * Resume only at this fixed continuation, never through saved_rip. */
+	jmp __hdn_s3_resume
+#else
 	movq	saved_magic(%rip), %rax
 	movq	$0x123456789abcdef0, %rdx
 	cmpq	%rdx, %rax
@@ -44,13 +53,15 @@ SYM_FUNC_START(wakeup_long64)
 	movq	saved_rip(%rip), %rax
 	ANNOTATE_RETPOLINE_SAFE
 	jmp	*%rax
+#endif
 SYM_FUNC_END(wakeup_long64)
 
-SYM_FUNC_START(do_suspend_lowlevel)
+SYM_TYPED_FUNC_START(do_suspend_lowlevel)
+	HDN_TYPED_FUNC_ENTER do_suspend_lowlevel
 	FRAME_BEGIN
 	subq	$8, %rsp
 	xorl	%eax, %eax
-	call	save_processor_state
+	HDN_C_CALL save_processor_state
 
 	movq	$saved_context, %rax
 	movq	%rsp, pt_regs_sp(%rax)
@@ -71,6 +82,11 @@ SYM_FUNC_START(do_suspend_lowlevel)
 	pushfq
 	popq	pt_regs_flags(%rax)
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	movq %rsp, %rsi
+	movl $HDN_RAP_RESUME_S3, %edi
+	HDN_C_CALL hdn_rap_resume_save
+#else
 	movq	$.Lresume_point, saved_rip(%rip)
 
 	movq	%rsp, saved_rsp(%rip)
@@ -78,19 +94,31 @@ SYM_FUNC_START(do_suspend_lowlevel)
 	movq	%rbx, saved_rbx(%rip)
 	movq	%rdi, saved_rdi(%rip)
 	movq	%rsi, saved_rsi(%rip)
+#endif
 
 	addq	$8, %rsp
 	movl	$3, %edi
 	xorl	%eax, %eax
-	call	x86_acpi_enter_sleep_state
+	HDN_C_CALL x86_acpi_enter_sleep_state
 	/* in case something went wrong, restore the machine status and go on */
 	jmp	.Lresume_point
 
 	.align 4
 .Lresume_point:
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+SYM_INNER_LABEL(__hdn_s3_resume, SYM_L_GLOBAL)
+#endif
 	ANNOTATE_NOENDBR
 	/* We don't restore %rax, it must be 0 anyway */
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	movq $hdn_rap_resume_state, %rax
+	lgdt saved_context_gdt_desc(%rax)
+	lidt saved_context_idt(%rax)
+	movl $HDN_RAP_RESUME_S3, %edi
+	HDN_C_CALL hdn_rap_resume_restore
+#else
 	movq	$saved_context, %rax
+#endif
 	movq	saved_context_cr4(%rax), %rbx
 	movq	%rbx, %cr4
 	movq	saved_context_cr3(%rax), %rbx
@@ -123,17 +151,25 @@ SYM_FUNC_START(do_suspend_lowlevel)
 	 * which we now need to unpoison.
 	 */
 	movq	%rsp, %rdi
-	call	kasan_unpoison_task_stack_below
+	HDN_C_CALL kasan_unpoison_task_stack_below
 #endif
 
 	xorl	%eax, %eax
 	addq	$8, %rsp
 	FRAME_END
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	HDN_C_CALL restore_processor_state
+	jmp __hdn_rap_return
+#else
 	jmp	restore_processor_state
+#endif
 SYM_FUNC_END(do_suspend_lowlevel)
 STACK_FRAME_NON_STANDARD do_suspend_lowlevel
+_ASM_NOKPROBE(do_suspend_lowlevel)
+_ASM_NOKPROBE(wakeup_long64)
 
 .data
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 saved_rbp:		.quad	0
 saved_rsi:		.quad	0
 saved_rdi:		.quad	0
@@ -141,5 +177,6 @@ saved_rbx:		.quad	0
 
 saved_rip:		.quad	0
 saved_rsp:		.quad	0
+#endif
 
 SYM_DATA(saved_magic,	.quad	0)

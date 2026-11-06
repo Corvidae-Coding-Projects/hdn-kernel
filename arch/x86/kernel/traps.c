@@ -41,6 +41,7 @@
 #include <linux/cpu.h>
 #include <linux/io.h>
 #include <linux/hardirq.h>
+#include <linux/hdn_rap.h>
 #include <linux/atomic.h>
 #include <linux/iommu.h>
 #include <linux/ubsan.h>
@@ -70,6 +71,8 @@
 #include <asm/tdx.h>
 #include <asm/cfi.h>
 #include <asm/msr.h>
+#include <asm/hdn_rap_debug.h>
+#include <asm/hdn_rap.h>
 
 #ifdef CONFIG_X86_64
 #include <asm/x86_init.h>
@@ -108,7 +111,7 @@ __always_inline int is_valid_bugaddr(unsigned long addr)
  * Notable, since __WARN_trap can use all registers, the distinction between
  * UD1 users is through R/M.
  */
-__always_inline int decode_bug(unsigned long addr, s32 *imm, int *len)
+noinstr int decode_bug(unsigned long addr, s32 *imm, int *len)
 {
 	unsigned long start = addr;
 	u8 v, reg, rm, rex = 0;
@@ -206,6 +209,7 @@ __always_inline int decode_bug(unsigned long addr, s32 *imm, int *len)
 
 	return type;
 }
+NOKPROBE_SYMBOL(decode_bug);
 
 static inline unsigned long pt_regs_val(struct pt_regs *regs, int nr)
 {
@@ -403,6 +407,7 @@ noinstr bool handle_bug(struct pt_regs *regs)
 	bool handled = false;
 	int ud_type, ud_len;
 	s32 ud_imm;
+	u64 rap_sequence;
 
 	ud_type = decode_bug(addr, &ud_imm, &ud_len);
 	if (ud_type == BUG_NONE)
@@ -418,6 +423,7 @@ noinstr bool handle_bug(struct pt_regs *regs)
 	 * irqentry_enter().
 	 */
 	kmsan_unpoison_entry_regs(regs);
+	rap_sequence = hdn_rap_fixup_begin(regs, X86_TRAP_UD);
 	/*
 	 * Since we're emulating a CALL with exceptions, restore the interrupt
 	 * state to what it was at the exception site.
@@ -472,6 +478,7 @@ noinstr bool handle_bug(struct pt_regs *regs)
 
 	if (regs->flags & X86_EFLAGS_IF)
 		raw_local_irq_disable();
+	hdn_rap_bug_end(regs, rap_sequence, handled);
 	instrumentation_end();
 
 	return handled;
@@ -604,6 +611,10 @@ DEFINE_IDTENTRY_DF(exc_double_fault)
 #endif
 
 #ifdef CONFIG_X86_ESPFIX64
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	if (hdn_rap_espfix(regs))
+		return;
+#else
 	extern unsigned char native_irq_return_iret[];
 
 	/*
@@ -656,6 +667,7 @@ DEFINE_IDTENTRY_DF(exc_double_fault)
 
 		return;
 	}
+#endif
 #endif
 
 	irqentry_nmi_enter(regs);
@@ -1282,7 +1294,7 @@ static noinstr void exc_debug_kernel(struct pt_regs *regs, unsigned long dr6)
 	 * which leaks #DB into the guest and causes IST recursion.
 	 */
 	if (WARN_ON_ONCE(dr6 & DR_STEP))
-		regs->flags &= ~X86_EFLAGS_TF;
+		(void)hdn_rap_debug_update(regs, regs->ip, 0, X86_EFLAGS_TF);
 out:
 	instrumentation_end();
 	irqentry_nmi_exit(regs, irq_state);
@@ -1681,6 +1693,7 @@ void __init trap_init(void)
 {
 	/* Init cpu_entry_area before IST entries are set up */
 	setup_cpu_entry_areas();
+	hdn_rap_boot_contexts_init();
 
 	/* Init GHCB memory pages when running as an SEV-ES guest */
 	sev_es_init_vc_handling();

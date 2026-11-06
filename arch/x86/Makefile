@@ -1,6 +1,29 @@
 # SPDX-License-Identifier: GPL-2.0
 # Unified Makefile for i386 and x86_64
 
+# Also reject inconsistent command-line CONFIG_ overrides.  Kconfig controls
+# normal selection, but a forced partial ABI must never produce a kernel.
+ifeq ($(CONFIG_SECURITY_HARDENING_RAP),y)
+ifneq ($(CONFIG_X86_64)$(CONFIG_CC_IS_GCC)$(CONFIG_GCC_PLUGINS)$(CONFIG_SECURITY_HARDENING_PGTABLE)$(CONFIG_VMAP_STACK)$(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS),yyyyyy)
+$(error HDN RAP requires GCC x86-64, GCC plugins, sealed page tables, VMAP_STACK and private stacks)
+endif
+ifeq ($(filter 16%,$(CONFIG_GCC_VERSION)),)
+$(error HDN RAP requires the GCC 16 compiler ABI)
+endif
+ifeq ($(CONFIG_BPF_JIT),y)
+ifneq ($(CONFIG_SECURITY_HARDENING_BPF_EXECMEM),y)
+$(error HDN RAP BPF registration requires isolated owned executable images)
+endif
+endif
+ifneq ($(filter y,$(CONFIG_RUST) $(CONFIG_CFI_CLANG) $(CONFIG_LTO) $(CONFIG_XEN_PV) $(CONFIG_AMD_MEM_ENCRYPT) $(CONFIG_INTEL_TDX_GUEST) $(CONFIG_HYPERV_VTL_MODE)),)
+$(error HDN RAP has no supported transfer ABI for this compiler/platform configuration)
+endif
+else
+ifeq ($(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS),y)
+$(error HDN private stacks require the complete RAP transfer ABI)
+endif
+endif
+
 # select defconfig based on actual architecture
 ifeq ($(ARCH),x86)
   ifeq ($(shell uname -m | sed -e 's/i.86/i386/'),i386)

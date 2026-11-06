@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
+# EFI stub tables precede the kernel page-table ownership lifetime.
+ccflags-y += -DHDN_PGTABLE_BOOTSTRAP
 #
 # The stub may be linked into the kernel proper or into a separate boot binary,
 # but in either case, it executes before the kernel does (with MMU disabled) so

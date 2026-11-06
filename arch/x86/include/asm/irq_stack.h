@@ -6,6 +6,8 @@
 #include <linux/objtool.h>
 
 #include <asm/processor.h>
+#include <asm/hdn_rap_call.h>
+#include <asm/unwind_hints.h>
 
 #ifdef CONFIG_X86_64
 
@@ -85,12 +87,14 @@
 	tos = ((void *)(stack));					\
 									\
 	asm_inline volatile(						\
+	HDN_ASM_STACK_SAVE						\
 	"movq	%%rsp, (%[tos])				\n"		\
 	"movq	%[tos], %%rsp				\n"		\
+	HDN_ASM_STACK_ENTER						\
 									\
 	asm_call							\
 									\
-	"popq	%%rsp					\n"		\
+	HDN_ASM_STACK_LEAVE						\
 									\
 	: "+r" (tos), ASM_CALL_CONSTRAINT				\
 	: [__func] "i" (func), [tos] "r" (tos) argconstr		\
@@ -100,8 +104,8 @@
 }
 
 #define ASM_CALL_ARG0							\
-	"1: call %c[__func]				\n"		\
-	ANNOTATE_REACHABLE(1b) "			\n"
+	HDN_ASM_C_CALL("%c[__func]")					\
+	ANNOTATE_REACHABLE(994b) "			\n"
 
 #define ASM_CALL_ARG1							\
 	"movq	%[arg1], %%rdi				\n"		\
@@ -167,9 +171,9 @@
  * effort for this asm magic.
  */
 #define ASM_CALL_SYSVEC							\
-	"call irq_enter_rcu				\n"		\
+	HDN_ASM_C_CALL("irq_enter_rcu")					\
 	ASM_CALL_ARG1							\
-	"call irq_exit_rcu				\n"
+	HDN_ASM_C_CALL("irq_exit_rcu")
 
 #define SYSVEC_CONSTRAINTS	, [arg1] "r" (regs)
 
@@ -187,9 +191,9 @@
  * @regs and @vector in callee saved registers.
  */
 #define ASM_CALL_IRQ							\
-	"call irq_enter_rcu				\n"		\
+	HDN_ASM_C_CALL("irq_enter_rcu")					\
 	ASM_CALL_ARG2							\
-	"call irq_exit_rcu				\n"
+	HDN_ASM_C_CALL("irq_exit_rcu")
 
 #define IRQ_CONSTRAINTS	, [arg1] "r" (regs), [arg2] "r" ((unsigned long)vector)
 

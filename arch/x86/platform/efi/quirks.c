@@ -761,18 +761,25 @@ int efi_capsule_setup_info(struct capsule_info *cap_info, void *kbuff,
  * @return: Returns, if the page fault is not handled. This function
  * will never return if the page fault is handled successfully.
  */
-void efi_crash_gracefully_on_page_fault(unsigned long phys_addr,
-					const struct pt_regs *regs)
+bool efi_crash_gracefully_on_page_fault(unsigned long phys_addr,
+					struct pt_regs *regs)
 {
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	if (!hdn_efi_fault_fixup(regs))
+		return false;
+	clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
+	pr_err("Firmware page fault; runtime services disabled\n");
+	return true;
+#else
 	if (!IS_ENABLED(CONFIG_X86_64))
-		return;
+		return false;
 
 	/*
 	 * If we get an interrupt/NMI while processing an EFI runtime service
 	 * then this is a regular OOPS, not an EFI failure.
 	 */
 	if (!in_task())
-		return;
+		return false;
 
 	/*
 	 * Make sure that an efi runtime service caused the page fault.
@@ -781,14 +788,14 @@ void efi_crash_gracefully_on_page_fault(unsigned long phys_addr,
 	 */
 	if (READ_ONCE(efi_rts_work.efi_rts_id) == EFI_NONE ||
 	    current_work() != &efi_rts_work.work)
-		return;
+		return false;
 
 	/*
 	 * Address range 0x0000 - 0x0fff is always mapped in the efi_pgd, so
 	 * page faulting on these addresses isn't expected.
 	 */
 	if (phys_addr <= 0x0fff)
-		return;
+		return false;
 
 	/*
 	 * Print stack trace as it might be useful to know which EFI Runtime
@@ -808,7 +815,7 @@ void efi_crash_gracefully_on_page_fault(unsigned long phys_addr,
 	if (efi_rts_work.efi_rts_id == EFI_RESET_SYSTEM) {
 		pr_info("efi_reset_system() buggy! Reboot through BIOS\n");
 		machine_real_restart(MRR_BIOS);
-		return;
+		return false;
 	}
 
 	/*
@@ -825,11 +832,13 @@ void efi_crash_gracefully_on_page_fault(unsigned long phys_addr,
 	 */
 	arch_efi_call_virt_teardown();
 
+	/* Publish revocation before the waiter releases the runtime semaphore. */
+	clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
+
 	/* Signal error status to the efi caller process */
 	efi_rts_work.status = EFI_ABORTED;
 	complete(&efi_rts_work.efi_rts_comp);
 
-	clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
 	pr_info("Froze efi_rts_wq and disabled EFI Runtime Services\n");
 
 	/*
@@ -840,4 +849,5 @@ void efi_crash_gracefully_on_page_fault(unsigned long phys_addr,
 		set_current_state(TASK_IDLE);
 		schedule();
 	}
+#endif
 }

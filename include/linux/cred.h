@@ -176,13 +176,26 @@ static inline bool cap_ambient_invariant_ok(const struct cred *cred)
 					  cred->cap_inheritable));
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_JITTER
+void hdn_jitter_check_cred(const struct cred *cred);
+#endif
+static inline void hdn_cred_boundary(const struct cred *cred)
+{
+#ifdef CONFIG_SECURITY_HARDENING_SLAB_JITTER
+	if (cred)
+		hdn_jitter_check_cred(cred);
+#endif
+}
+
 static inline const struct cred *override_creds(const struct cred *override_cred)
 {
+	hdn_cred_boundary(override_cred);
 	return rcu_replace_pointer(current->cred, override_cred, 1);
 }
 
 static inline const struct cred *revert_creds(const struct cred *revert_cred)
 {
+	hdn_cred_boundary(revert_cred);
 	return rcu_replace_pointer(current->cred, revert_cred, 1);
 }
 
@@ -215,6 +228,7 @@ static inline const struct cred *get_cred_many(const struct cred *cred, int nr)
 	struct cred *nonconst_cred = (struct cred *) cred;
 	if (!cred)
 		return cred;
+	hdn_cred_boundary(cred);
 	nonconst_cred->non_rcu = 0;
 	atomic_long_add(nr, &nonconst_cred->usage);
 	return cred;
@@ -241,6 +255,7 @@ static inline const struct cred *get_cred_rcu(const struct cred *cred)
 		return NULL;
 	if (!atomic_long_inc_not_zero(&nonconst_cred->usage))
 		return NULL;
+	hdn_cred_boundary(cred);
 	nonconst_cred->non_rcu = 0;
 	return cred;
 }
@@ -262,6 +277,7 @@ static inline void put_cred_many(const struct cred *_cred, int nr)
 	struct cred *cred = (struct cred *) _cred;
 
 	if (cred) {
+		hdn_cred_boundary(cred);
 		if (atomic_long_sub_and_test(nr, &cred->usage))
 			__put_cred(cred);
 	}
@@ -293,7 +309,11 @@ DEFINE_FREE(put_cred, struct cred *, if (!IS_ERR_OR_NULL(_T)) put_cred(_T))
  * since nobody else can modify it.
  */
 #define current_cred() \
-	rcu_dereference_protected(current->cred, 1)
+({ \
+	const struct cred *__cred = rcu_dereference_protected(current->cred, 1); \
+	hdn_cred_boundary(__cred); \
+	__cred; \
+})
 
 /**
  * current_real_cred - Access the current task's objective credentials
@@ -302,7 +322,11 @@ DEFINE_FREE(put_cred, struct cred *, if (!IS_ERR_OR_NULL(_T)) put_cred(_T))
  * since nobody else can modify it.
  */
 #define current_real_cred() \
-	rcu_dereference_protected(current->real_cred, 1)
+({ \
+	const struct cred *__cred = rcu_dereference_protected(current->real_cred, 1); \
+	hdn_cred_boundary(__cred); \
+	__cred; \
+})
 
 /**
  * __task_cred - Access a task's objective credentials
@@ -315,7 +339,11 @@ DEFINE_FREE(put_cred, struct cred *, if (!IS_ERR_OR_NULL(_T)) put_cred(_T))
  * rather get_task_cred() should be used instead.
  */
 #define __task_cred(task)	\
-	rcu_dereference((task)->real_cred)
+({ \
+	const struct cred *__cred = rcu_dereference((task)->real_cred); \
+	hdn_cred_boundary(__cred); \
+	__cred; \
+})
 
 /**
  * get_current_cred - Get the current task's subjective credentials

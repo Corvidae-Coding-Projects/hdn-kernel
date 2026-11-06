@@ -13,6 +13,7 @@
 #include <asm/cache.h>
 #include <asm/cpufeatures.h>
 #include <asm/nospec-branch.h>
+#include <asm/hdn_rap.h>
 
 #include "calling.h"
 
@@ -20,6 +21,7 @@
 
 /* Clobbers AX, CX, DX */
 SYM_FUNC_START(write_ibpb)
+	HDN_KEXEC_FUNC write_ibpb, 27
 	ANNOTATE_NOENDBR
 	movl	$MSR_IA32_PRED_CMD, %ecx
 	movl	_ASM_RIP(x86_pred_cmd), %eax
@@ -34,9 +36,10 @@ EXPORT_SYMBOL_FOR_KVM(write_ibpb);
 
 SYM_FUNC_START(__WARN_trap)
 	ANNOTATE_NOENDBR
+	HDN_TYPED_FUNC_ENTER __WARN_trap
 	ANNOTATE_REACHABLE
 	ud1 (%edx), %_ASM_ARG1
-	RET
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(__WARN_trap)
 EXPORT_SYMBOL(__WARN_trap)
 
@@ -50,17 +53,17 @@ EXPORT_SYMBOL(__WARN_trap)
 .pushsection .entry.text, "ax"
 
 .align L1_CACHE_BYTES, 0xcc
-SYM_CODE_START_NOALIGN(x86_verw_sel)
-	UNWIND_HINT_UNDEFINED
-	ANNOTATE_NOENDBR
+SYM_DATA_START(x86_verw_sel)
 	.word __KERNEL_DS
 .align L1_CACHE_BYTES, 0xcc
-SYM_CODE_END(x86_verw_sel);
+SYM_DATA_END(x86_verw_sel);
 EXPORT_SYMBOL_FOR_KVM(x86_verw_sel);
 
 .popsection
 
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 THUNK warn_thunk_thunk, __warn_thunk
+#endif
 
 /*
  * Clang's implementation of TLS stack cookies requires the variable in

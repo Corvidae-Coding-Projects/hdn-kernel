@@ -9,6 +9,10 @@
  */
 
 #include <linux/vmalloc.h>
+#include <linux/hardening.h>
+#include <linux/hdn_kernexec.h>
+#include <linux/hdn_execmem.h>
+#include <linux/hdn_stack.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/highmem.h>
@@ -313,6 +317,17 @@ static int vmap_range_noflush(unsigned long addr, unsigned long end,
 	 */
 	might_sleep();
 	BUG_ON(addr >= end);
+
+	err = hdn_kernel_mapping_check(PFN_DOWN(phys_addr),
+				       (end - addr) >> PAGE_SHIFT, prot);
+	if (!err)
+		err = hdn_execmem_mapping(addr, PFN_DOWN(phys_addr),
+					  (end - addr) >> PAGE_SHIFT, prot, true);
+	if (err) {
+		if (err == -EACCES || err == -EPERM)
+			hdn_report_kernel_mapping_violation(err);
+		return err;
+	}
 
 	start = addr;
 	pgd = pgd_offset_k(addr);
@@ -663,6 +678,23 @@ int __vmap_pages_range_noflush(unsigned long addr, unsigned long end,
 	unsigned int i, nr = (end - addr) >> PAGE_SHIFT;
 
 	WARN_ON(page_shift < PAGE_SHIFT);
+	/* Admit the complete array before installing even the first PTE. */
+	for (i = 0; i < nr; i++) {
+		int err;
+
+		if (WARN_ON_ONCE(!pages[i]))
+			return -ENOMEM;
+		err = hdn_kernel_mapping_check(page_to_pfn(pages[i]), 1, prot);
+		if (!err)
+			err = hdn_execmem_mapping(addr + ((unsigned long)i << PAGE_SHIFT),
+						  page_to_pfn(pages[i]), 1, prot, true);
+
+		if (err) {
+			if (err == -EACCES || err == -EPERM)
+				hdn_report_kernel_mapping_violation(err);
+			return err;
+		}
+	}
 
 	if (!IS_ENABLED(CONFIG_HAVE_ARCH_HUGE_VMALLOC) ||
 			page_shift == PAGE_SHIFT)
@@ -3387,6 +3419,7 @@ static void vm_reset_perms(struct vm_struct *area)
 	 */
 	set_area_direct_map(area, set_direct_map_invalid_noflush);
 	_vm_unmap_aliases(start, end, flush_dmap);
+	hdn_execmem_unmapped(area);
 	set_area_direct_map(area, set_direct_map_default_noflush);
 }
 
@@ -4362,6 +4395,9 @@ need_realloc:
 		return NULL;
 
 	if (p) {
+#ifdef CONFIG_SECURITY_HARDENING_AUTOSLAB
+		find_vm_area(n)->hdn_alloc_domain = vm->hdn_alloc_domain;
+#endif
 		memcpy(n, p, min(size, old_size));
 		vfree(p);
 	}
@@ -5436,6 +5472,8 @@ void __init vmalloc_init(void)
 	struct vmap_node *vn;
 	struct vm_struct *tmp;
 	int i;
+
+	hdn_stack_reserve();
 
 	/*
 	 * Create the cache for vmap_area objects.

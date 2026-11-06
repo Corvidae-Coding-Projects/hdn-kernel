@@ -31,6 +31,8 @@
  * @EXECMEM_KPROBES: parameters for kprobes
  * @EXECMEM_FTRACE: parameters for ftrace
  * @EXECMEM_BPF: parameters for BPF
+ * @EXECMEM_BPF_TRAMPOLINE: parameters for BPF trampolines
+ * @EXECMEM_BPF_DISPATCHER: parameters for BPF dispatchers
  * @EXECMEM_MODULE_DATA: parameters for module data sections
  * @EXECMEM_TYPE_MAX:
  */
@@ -41,6 +43,8 @@ enum execmem_type {
 	EXECMEM_FTRACE,
 	EXECMEM_BPF,
 	EXECMEM_MODULE_DATA,
+	EXECMEM_BPF_TRAMPOLINE,
+	EXECMEM_BPF_DISPATCHER,
 	EXECMEM_TYPE_MAX,
 };
 
@@ -48,11 +52,37 @@ enum execmem_type {
  * enum execmem_range_flags - options for executable memory allocations
  * @EXECMEM_KASAN_SHADOW:	allocate kasan shadow
  * @EXECMEM_ROX_CACHE:		allocations should use ROX cache of huge pages
+ * @EXECMEM_RANDOMIZE:		choose a fresh randomized search start per allocation
  */
 enum execmem_range_flags {
 	EXECMEM_KASAN_SHADOW	= (1 << 0),
 	EXECMEM_ROX_CACHE	= (1 << 1),
+	EXECMEM_RANDOMIZE	= (1 << 2),
 };
+
+static inline bool execmem_is_bpf(enum execmem_type type)
+{
+	return type == EXECMEM_BPF || type == EXECMEM_BPF_TRAMPOLINE ||
+	       type == EXECMEM_BPF_DISPATCHER;
+}
+
+struct execmem_bpf_stats {
+	u64 allocation_attempts;
+	u64 allocation_successes;
+	u64 allocation_failures;
+	u64 requested_bytes;
+	u64 reserved_bytes;
+	bool exhausted;
+};
+
+unsigned long execmem_bpf_capacity(void);
+u64 execmem_bpf_allocation_failures(void);
+void execmem_bpf_get_stats(struct execmem_bpf_stats *stats);
+bool execmem_bpf_contains(const void *address, size_t size);
+#if IS_ENABLED(CONFIG_SECURITY_HARDENING_BPF_EXECMEM_TEST)
+u64 execmem_bpf_test_base_token(void);
+int execmem_bpf_test_bucket(const void *address);
+#endif
 
 #ifdef CONFIG_ARCH_HAS_EXECMEM_ROX
 /**

@@ -6,6 +6,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 #include <asm/frame.h>
 
 .section	.rodata.cst16.ROT8, "aM", @progbits, 16
@@ -34,6 +35,7 @@ CTRINC:	.octa 0x00000003000000020000000100000000
  * Clobbers: %r8d, %xmm4-%xmm7
  */
 SYM_FUNC_START_LOCAL(chacha_permute)
+	HDN_REGS_FUNC chacha_permute
 
 	movdqa		ROT8(%rip),%xmm4
 	movdqa		ROT16(%rip),%xmm5
@@ -108,10 +110,12 @@ SYM_FUNC_START_LOCAL(chacha_permute)
 	sub		$2,%r8d
 	jnz		.Ldoubleround
 
-	RET
+	HDN_REGS_RETURN
+	HDN_ASM_FUNCTION_END chacha_permute
 SYM_FUNC_END(chacha_permute)
 
 SYM_FUNC_START(chacha_block_xor_ssse3)
+	HDN_ASM_FUNCTION chacha_block_xor_ssse3
 	# %rdi: Input state matrix, s
 	# %rsi: up to 1 data block output, o
 	# %rdx: up to 1 data block input, i
@@ -130,7 +134,7 @@ SYM_FUNC_START(chacha_block_xor_ssse3)
 	movdqa		%xmm3,%xmm11
 
 	mov		%rcx,%rax
-	call		chacha_permute
+	HDN_REGS_CALL chacha_permute
 
 	# o0 = i0 ^ (x0 + s0)
 	paddd		%xmm8,%xmm0
@@ -166,7 +170,7 @@ SYM_FUNC_START(chacha_block_xor_ssse3)
 
 .Ldone:
 	FRAME_END
-	RET
+	HDN_ASM_RETURN
 
 .Lxorpart:
 	# xor remaining bytes from partial register into output
@@ -197,9 +201,11 @@ SYM_FUNC_START(chacha_block_xor_ssse3)
 	lea		-8(%r10),%rsp
 	jmp		.Ldone
 
+	HDN_ASM_FUNCTION_END chacha_block_xor_ssse3
 SYM_FUNC_END(chacha_block_xor_ssse3)
 
 SYM_FUNC_START(hchacha_block_ssse3)
+	HDN_ASM_FUNCTION hchacha_block_ssse3
 	# %rdi: Input state matrix, s
 	# %rsi: output (8 32-bit words)
 	# %edx: nrounds
@@ -211,16 +217,18 @@ SYM_FUNC_START(hchacha_block_ssse3)
 	movdqu		0x30(%rdi),%xmm3
 
 	mov		%edx,%r8d
-	call		chacha_permute
+	HDN_REGS_CALL chacha_permute
 
 	movdqu		%xmm0,0x00(%rsi)
 	movdqu		%xmm3,0x10(%rsi)
 
 	FRAME_END
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END hchacha_block_ssse3
 SYM_FUNC_END(hchacha_block_ssse3)
 
 SYM_FUNC_START(chacha_4block_xor_ssse3)
+	HDN_ASM_FUNCTION chacha_4block_xor_ssse3
 	# %rdi: Input state matrix, s
 	# %rsi: up to 4 data blocks output, o
 	# %rdx: up to 4 data blocks input, i
@@ -762,7 +770,7 @@ SYM_FUNC_START(chacha_4block_xor_ssse3)
 
 .Ldone4:
 	lea		-8(%r10),%rsp
-	RET
+	HDN_ASM_RETURN
 
 .Lxorpart4:
 	# xor remaining bytes from partial register into output
@@ -788,4 +796,5 @@ SYM_FUNC_START(chacha_4block_xor_ssse3)
 
 	jmp		.Ldone4
 
+	HDN_ASM_FUNCTION_END chacha_4block_xor_ssse3
 SYM_FUNC_END(chacha_4block_xor_ssse3)
