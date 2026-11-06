@@ -211,4 +211,5 @@ SYM_FUNC_START(core_restore_code)
 	jmpq	*%r8
 SYM_FUNC_END(core_restore_code)
 SYM_INNER_LABEL(core_restore_code_end, SYM_L_GLOBAL)
+STACK_FRAME_NON_STANDARD core_restore_code
 _ASM_NOKPROBE(core_restore_code)

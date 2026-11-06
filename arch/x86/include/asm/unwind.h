@@ -141,8 +141,10 @@ unsigned long unwind_recover_ret_addr(struct unwind_state *state,
 	if (hdn_stack_address((unsigned long)&(x))) {	\
 		if (hdn_stack_read(task, (unsigned long)&(x), &val, sizeof(x))) \
 			val = 0;				\
-	} else						\
-		val = READ_ONCE_NOCHECK(x);		\
+	} else if (task == current)			\
+		val = READ_ONCE(x);			\
+	else						\
+		val = READ_ONCE_NOCHECK(*(unsigned long *)&(x)); \
 	val;						\
 })
 #else
@@ -152,7 +154,7 @@ unsigned long unwind_recover_ret_addr(struct unwind_state *state,
 	if (task == current)				\
 		val = READ_ONCE(x);			\
 	else						\
-		val = READ_ONCE_NOCHECK(x);		\
+		val = READ_ONCE_NOCHECK(*(unsigned long *)&(x)); \
 	val;						\
 })
 #endif

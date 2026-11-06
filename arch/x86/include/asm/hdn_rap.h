@@ -2,6 +2,8 @@
 #ifndef _ASM_X86_HDN_RAP_H
 #define _ASM_X86_HDN_RAP_H
 
+#include <linux/linkage.h>
+
 #define HDN_RAP_FRAME_IDT 0
 #define HDN_RAP_FRAME_PARANOID 1
 #define HDN_RAP_FRAME_NMI 2

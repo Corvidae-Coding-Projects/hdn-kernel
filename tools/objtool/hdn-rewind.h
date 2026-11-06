@@ -14,8 +14,7 @@ static int verify_rap_rewind(struct objtool_file *file, struct symbol *func)
 	    !rap_sequence_bytes(&s, "\xfa\x41\x89\xfc\x48\x89\xe7\x48\x83\xec\x08", 11) ||
 	    !rap_entry_call(&s, "hdn_rap_fatal_rewind") ||
 	    !rap_sequence_bytes(&s, "\x31\xed\x48\x89\xc4\x44\x89\xe7", 8) ||
-	    !rap_entry_call(&s, "make_task_dead") ||
-	    !rap_sequence_bytes(&s, "\x0f\x0b", 2) || s.pos != func->len ||
+	    !rap_entry_call(&s, "make_task_dead") || s.pos != func->len ||
 	    !root || !exit || (opts.link && (root->rap_kind != 2 || exit->rap_kind != 1)))
 		goto bad;
 	rap_for_each_insn(file, func, insn)

@@ -1625,7 +1625,6 @@ SYM_CODE_START_NOALIGN(rewind_stack_and_make_dead)
 	UNWIND_HINT_REGS
 
 	HDN_C_CALL make_task_dead
-	ud2
 SYM_CODE_END(rewind_stack_and_make_dead)
 _ASM_NOKPROBE(rewind_stack_and_make_dead)
 .popsection
