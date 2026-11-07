@@ -2,33 +2,36 @@
 // Report source-level address-space removal; each use needs semantic review.
 virtual report
 
-@cast@
-type T, U;
-T __user *p;
+@cast expression@
+attribute name __user;
+type T =~ "__user", U !~ "__user";
+idexpression T p;
 position loc;
 @@
-(U *)p@loc
+ (U@loc *)p
 
 @script:python depends on report@
 loc << cast.loc;
 @@
 coccilib.report.print_report(loc[0], "HDN_UDEREF: cast removes __user; review access-window and address validation")
 
-@direct@
-type T;
-T __user *p;
+@direct expression@
+attribute name __user;
+type T =~ "__user";
+idexpression T p;
 position loc;
 @@
-*p@loc
+ *p@loc
 
 @script:python depends on report@
 loc << direct.loc;
 @@
 coccilib.report.print_report(loc[0], "HDN_UDEREF: user dereference candidate; require an approved uaccess primitive")
 
-@array@
-type T;
-T __user *p;
+@array expression@
+attribute name __user;
+type T =~ "__user";
+idexpression T p;
 expression index;
 position loc;
 @@
@@ -39,13 +42,14 @@ loc << array.loc;
 @@
 coccilib.report.print_report(loc[0], "HDN_UDEREF: user array dereference candidate; require an approved uaccess primitive")
 
-@member@
-type T;
-T __user *p;
-identifier field;
+@member expression@
+attribute name __user;
+type T =~ "__user";
+idexpression T p;
+identifier member_name;
 position loc;
 @@
-p@loc->field
+p@loc->member_name
 
 @script:python depends on report@
 loc << member.loc;
