@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Report source-level address-space removal; each use needs semantic review.
 virtual report
+virtual fixture
 
-@cast expression@
+@cast depends on fixture || !(file in "tools/testing/selftests/hardening/hdn_uaccess_bad_source.c") expression@
 attribute name __user;
 type T =~ "__user", U !~ "__user";
 idexpression T p;
@@ -15,7 +16,7 @@ loc << cast.loc;
 @@
 coccilib.report.print_report(loc[0], "HDN_UDEREF: cast removes __user; review access-window and address validation")
 
-@direct expression@
+@direct depends on fixture || !(file in "tools/testing/selftests/hardening/hdn_uaccess_bad_source.c") expression@
 attribute name __user;
 type T =~ "__user";
 idexpression T p;
@@ -28,7 +29,7 @@ loc << direct.loc;
 @@
 coccilib.report.print_report(loc[0], "HDN_UDEREF: user dereference candidate; require an approved uaccess primitive")
 
-@array expression@
+@array depends on fixture || !(file in "tools/testing/selftests/hardening/hdn_uaccess_bad_source.c") expression@
 attribute name __user;
 type T =~ "__user";
 idexpression T p;
@@ -42,7 +43,7 @@ loc << array.loc;
 @@
 coccilib.report.print_report(loc[0], "HDN_UDEREF: user array dereference candidate; require an approved uaccess primitive")
 
-@member expression@
+@member depends on fixture || !(file in "tools/testing/selftests/hardening/hdn_uaccess_bad_source.c") expression@
 attribute name __user;
 type T =~ "__user";
 idexpression T p;
