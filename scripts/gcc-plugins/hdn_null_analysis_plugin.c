@@ -452,7 +452,7 @@ static bool condition_proves_nonnull(tree value, gimple *stmt)
 		edge false_edge;
 		edge nonnull_edge;
 
-			if (!condition || gimple_code(condition) != GIMPLE_COND)
+			if (gimple_code(condition) != GIMPLE_COND)
 				continue;
 			guard_bb = gimple_bb(condition);
 			if (!guard_bb)
