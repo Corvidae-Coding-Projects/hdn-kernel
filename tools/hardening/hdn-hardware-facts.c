@@ -14,6 +14,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
+
 static long long monotonic_ms(void)
 {
 	struct timespec ts;
@@ -131,7 +133,7 @@ int main(int argc, char **argv)
 				value = "external";
 		} else {
 			const char *states[] = { "unknown", "none", "portal", "limited", "full" };
-			for (unsigned int i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
+			for (unsigned int i = 0; i < ARRAY_SIZE(states); i++) {
 				char expected[8];
 				snprintf(expected, sizeof(expected), "u %u\n", i);
 				if (!strcmp(buffer, expected))

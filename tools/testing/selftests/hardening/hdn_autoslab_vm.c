@@ -27,6 +27,7 @@
 #define MODULE_DIRECTORY "/modules"
 #define KEY_SPEC_PROCESS_KEYRING -2
 #define KEYCTL_UNLINK 9
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
 struct autoslab_status {
 	unsigned long long typed, successful, failed, mandatory, early, rejected;
@@ -88,7 +89,7 @@ static int read_status(struct autoslab_status *status, int privileged)
 			stable |= 4U;
 		else if (sscanf(line, "autoslab_caches: %u", &status->caches) == 1)
 			stable |= 8U;
-		for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
 			size_t length = strlen(names[i]);
 
 			if (!strncmp(line, names[i], length)) {
@@ -126,7 +127,7 @@ static int churn_files(void)
 {
 	int files[64];
 
-	for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(files); i++) {
 		files[i] = open("/dev/null", O_RDWR | O_CLOEXEC);
 		if (files[i] < 0) {
 			while (i)
@@ -134,7 +135,7 @@ static int churn_files(void)
 			return -1;
 		}
 	}
-	for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++)
+	for (size_t i = 0; i < ARRAY_SIZE(files); i++)
 		close(files[i]);
 	return 0;
 }
@@ -415,7 +416,7 @@ static int module_checks(void)
 #else
 	return -1;
 #endif
-	for (size_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(rejected); i++) {
 		errno = 0;
 		if (!finit(rejected[i]) || errno != ENOEXEC)
 			return -1;

@@ -155,9 +155,16 @@ fixed_fault:
 	switch (mode) {
 	case 0:
 		if (copy_from_user_nofault(&value, user, sizeof(value)) ||
-		    value != HDN_UDEREF_WORD || get_user(value, user) ||
-		    value != HDN_UDEREF_WORD || put_user(~value, user) ||
-		    get_user(value, user) || value != ~HDN_UDEREF_WORD) {
+		    value != HDN_UDEREF_WORD) {
+			error = -EIO;
+			break;
+		}
+		if (get_user(value, user) || value != HDN_UDEREF_WORD) {
+			error = -EIO;
+			break;
+		}
+		if (put_user(~value, user) || get_user(value, user) ||
+		    value != ~HDN_UDEREF_WORD) {
 			error = -EIO;
 			break;
 		}

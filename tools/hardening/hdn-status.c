@@ -1375,7 +1375,7 @@ static int build_outputs(const struct hdn_status *status, const char *source,
 			"critical_jitter_backing_file_quarantined",
 			"critical_jitter_backing_file_pressure",
 		};
-		for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+		for (size_t i = 0; i < ARRAY_SIZE(fields); i++) {
 			ret = output_status_value(outputs, status, fields[i], "unavailable");
 			if (ret)
 				return ret;

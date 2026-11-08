@@ -92,7 +92,7 @@ int main(int argc, char **argv)
 	if (argc == 4 && !strcmp(argv[1], "transfer")) {
 		char *parent = strdup(argv[3]);
 		char *slash;
-		int bytes;
+		int inotify_bytes, fanotify_bytes;
 
 		if (!parent)
 			return 1;
@@ -119,8 +119,8 @@ int main(int argc, char **argv)
 			perror("sysfs trigger");
 			return 1;
 		}
-		if (ioctl(ifd, FIONREAD, &bytes) || bytes <= 0 ||
-		    ioctl(ffd, FIONREAD, &bytes) || bytes <= 0)
+		if (ioctl(ifd, FIONREAD, &inotify_bytes) || inotify_bytes <= 0 ||
+		    ioctl(ffd, FIONREAD, &fanotify_bytes) || fanotify_bytes <= 0)
 			return 1;
 		ifinfo = open_fdinfo(ifd);
 		ffinfo = open_fdinfo(ffd);

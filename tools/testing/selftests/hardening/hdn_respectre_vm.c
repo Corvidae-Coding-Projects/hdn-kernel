@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #define STATUS "/sys/kernel/security/hardening/status"
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
 static int status_ok(void)
 {
@@ -33,13 +34,13 @@ static int status_ok(void)
 		return 0;
 	while (getline(&line, &capacity, file) >= 0) {
 		line[strcspn(line, "\n")] = 0;
-		for (unsigned int n = 0; n < sizeof(expected) / sizeof(expected[0]); n++)
+		for (unsigned int n = 0; n < ARRAY_SIZE(expected); n++)
 			if (!strcmp(line, expected[n]))
 				seen |= 1U << n;
 	}
 	free(line);
 	fclose(file);
-	return seen == (1U << (sizeof(expected) / sizeof(expected[0]))) - 1;
+	return seen == (1U << ARRAY_SIZE(expected)) - 1;
 }
 
 int main(void)

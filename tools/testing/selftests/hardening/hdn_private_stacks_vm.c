@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #define STATUS "/sys/kernel/security/hardening/status"
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
 static const char *const privileged[] = {
 	"private_stacks_allocation_attempts: ",
@@ -43,7 +44,7 @@ static int status_view(int privileged_view)
 			seen |= 1U << 1;
 		else if (!strcmp(line, "capability.private_stack_aliases: enforced,software\n"))
 			seen |= 1U << 2;
-		for (size_t i = 0; i < sizeof(privileged) / sizeof(privileged[0]); i++) {
+		for (size_t i = 0; i < ARRAY_SIZE(privileged); i++) {
 			if (strncmp(line, privileged[i], strlen(privileged[i])))
 				continue;
 			if (!privileged_view) {
@@ -57,7 +58,7 @@ static int status_view(int privileged_view)
 	free(line);
 	fclose(file);
 	return privileged_view ? seen == 0x7 &&
-		privileged_seen == sizeof(privileged) / sizeof(privileged[0]) :
+		privileged_seen == ARRAY_SIZE(privileged) :
 		seen == 0x7;
 }
 

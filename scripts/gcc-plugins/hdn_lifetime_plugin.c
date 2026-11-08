@@ -17,6 +17,13 @@ static const char *name(tree decl)
 	return decl && DECL_NAME(decl) ? IDENTIFIER_POINTER(DECL_NAME(decl)) : "<anonymous>";
 }
 
+static const char *json_boolean(bool value)
+{
+	if (value)
+		return "true";
+	return "false";
+}
+
 static const char *relative_file(const char *file)
 {
 	if (!file)
@@ -145,9 +152,9 @@ static void emit(const char *kind, tree target, tree caller, location_t loc)
 		field(out, "symbol_asm", DECL_ASSEMBLER_NAME_SET_P(target) ?
 		      IDENTIFIER_POINTER(DECL_ASSEMBLER_NAME(target)) : name(target));
 		fprintf(out, ",\"symbol_line\":%d,\"public\":%s,\"readonly\":%s,\"dispatch\":%s",
-			DECL_SOURCE_LINE(target), TREE_PUBLIC(target) ? "true" : "false",
-			TREE_READONLY(target) ? "true" : "false",
-			dispatch_type(TREE_TYPE(target)) ? "true" : "false");
+			DECL_SOURCE_LINE(target), json_boolean(TREE_PUBLIC(target)),
+			json_boolean(TREE_READONLY(target)),
+			json_boolean(dispatch_type(TREE_TYPE(target))));
 	}
 	if (!strcmp(kind, "unit"))
 		fprintf(out, ",\"records\":%lu,\"compiler_errors\":%d", records, errorcount);

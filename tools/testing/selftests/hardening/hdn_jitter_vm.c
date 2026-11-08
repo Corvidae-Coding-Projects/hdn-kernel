@@ -19,6 +19,7 @@
 
 #define STATUS "/sys/kernel/security/hardening/status"
 #define ITERATIONS 192
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
 enum jitter_class { JITTER_CRED, JITTER_FILE, JITTER_BACKING, JITTER_CLASSES };
 
@@ -59,7 +60,7 @@ static int module_mutations(void)
 	};
 	char path[128];
 
-	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
 		snprintf(path, sizeof(path), "/mutations/jitter-%s.ko", names[i]);
 		errno = 0;
 		if (!finit(path, "mode=0") || errno != ENOEXEC)
@@ -123,7 +124,7 @@ static int read_status(struct jitter_status *status, int privileged)
 			stable |= 16U;
 		else if (sscanf(line, "critical_jitter_quarantined: %u", &status->quarantined) == 1)
 			private |= 1U << 7;
-		for (size_t i = 0; i < sizeof(aggregate_names) / sizeof(aggregate_names[0]); i++) {
+		for (size_t i = 0; i < ARRAY_SIZE(aggregate_names); i++) {
 			size_t length = strlen(aggregate_names[i]);
 
 			if (!strncmp(line, aggregate_names[i], length)) {

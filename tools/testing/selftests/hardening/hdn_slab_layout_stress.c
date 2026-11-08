@@ -23,6 +23,7 @@
 
 #define STATUS "/sys/kernel/security/hardening/status"
 #define LIVE_FDS 64
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
 static const char *const aggregate_fields[] = {
 	"slab_layout_allocation_attempts: ", "slab_layout_allocation_failures: ",
@@ -74,7 +75,7 @@ static int read_status(struct counters *values, int privileged)
 			state |= 1U;
 		else if (!strcmp(line, "slab_layout_test_interface: 1\n"))
 			state |= 2U;
-		for (size_t i = 0; i < sizeof(aggregate_fields) / sizeof(aggregate_fields[0]); i++) {
+		for (size_t i = 0; i < ARRAY_SIZE(aggregate_fields); i++) {
 			size_t length = strlen(aggregate_fields[i]);
 
 			if (strncmp(line, aggregate_fields[i], length))

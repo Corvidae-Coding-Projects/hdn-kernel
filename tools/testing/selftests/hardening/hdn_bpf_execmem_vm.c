@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #define STATUS "/sys/kernel/security/hardening/status"
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
 static int status_ok(void)
 {
@@ -64,7 +65,7 @@ static int unprivileged_status_view_ok(void)
 	while (getline(&line, &capacity, file) >= 0) {
 		if (!strncmp(line, "bpf_execmem_state: ", 19))
 			state = 1;
-		for (size_t i = 0; i < sizeof(privileged) / sizeof(privileged[0]); i++)
+		for (size_t i = 0; i < ARRAY_SIZE(privileged); i++)
 			if (!strncmp(line, privileged[i], strlen(privileged[i]))) {
 				free(line);
 				fclose(file);

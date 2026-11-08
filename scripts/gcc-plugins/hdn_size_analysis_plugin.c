@@ -27,6 +27,13 @@ static const char *decl_name(tree decl)
 	return decl && DECL_NAME(decl) ? IDENTIFIER_POINTER(DECL_NAME(decl)) : "";
 }
 
+static const char *json_boolean(bool value)
+{
+	if (value)
+		return "true";
+	return "false";
+}
+
 static const char *relative_file(const char *file)
 {
 	size_t n = strlen(source_root);
@@ -127,7 +134,7 @@ static void emit(gimple *stmt, gimple *sink, unsigned int argument,
 		LOCATION_COLUMN(sink_loc), argument + 1);
 	fprintf(out, ",\"precision\":%u,\"unsigned\":%s",
 		type && INTEGRAL_TYPE_P(type) ? TYPE_PRECISION(type) : 0,
-		type && INTEGRAL_TYPE_P(type) && TYPE_UNSIGNED(type) ? "true" : "false");
+		json_boolean(type && INTEGRAL_TYPE_P(type) && TYPE_UNSIGNED(type)));
 	if (annotation) {
 		tree args = TREE_VALUE(annotation);
 		const char *keys[] = { "owner", "reason", "invalidation" };
