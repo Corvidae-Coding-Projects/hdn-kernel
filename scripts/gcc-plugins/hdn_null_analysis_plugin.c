@@ -647,6 +647,7 @@ static void emit_finding(tree pointer, gimple *stmt, tree ref,
 	const char *probe_invalidation;
 	basic_block entry_successor;
 	bool must_execute;
+	char esc_profile[sizeof(analysis_profile) * 2];
 	char esc_file[HDN_NULL_PATH_MAX];
 	char esc_function[1024];
 	char esc_callee[1024];
@@ -700,6 +701,7 @@ static void emit_finding(tree pointer, gimple *stmt, tree ref,
 	hash = fnv1a_update(hash, position);
 	snprintf(id, sizeof(id), "HDN-NULL-v1-%016" PRIx64, hash);
 
+	json_escape(esc_profile, sizeof(esc_profile), analysis_profile);
 	json_escape(esc_file, sizeof(esc_file), file);
 	json_escape(esc_function, sizeof(esc_function), function);
 	json_escape(esc_callee, sizeof(esc_callee),
@@ -718,7 +720,7 @@ static void emit_finding(tree pointer, gimple *stmt, tree ref,
 		"\"range\":\"%s\",\"path_scope\":\"%s\",\"origin\":\"%s\","
 		"\"probe_owner\":\"%s\",\"probe_invalidation\":\"%s\"}\n",
 		HDN_NULL_SCHEMA_VERSION, HDN_NULL_ANALYZER_VERSION, id,
-		analysis_profile, category, kind, esc_file, LOCATION_LINE(loc),
+		esc_profile, category, kind, esc_file, LOCATION_LINE(loc),
 		LOCATION_COLUMN(loc), esc_function, taint, state_name(state),
 		must_execute ? "must_execute" : "conditional",
 		esc_callee, esc_probe_owner, esc_probe_invalidation);

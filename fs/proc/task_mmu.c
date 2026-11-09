@@ -1234,6 +1234,10 @@ static void show_smap_vma_flags(struct seq_file *m, struct vm_area_struct *vma)
 #ifdef CONFIG_64BIT
 		[ilog2(VM_SEALED)] = "sl",
 #endif
+#if defined(CONFIG_SECURITY_HARDENING_USER_WX) && defined(CONFIG_64BIT)
+		/* Internal write-history state; it is not a userspace VMA property. */
+		[ilog2(VM_HDN_WAS_WRITABLE)] = "",
+#endif
 	};
 	size_t i;
 

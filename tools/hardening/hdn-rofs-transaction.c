@@ -228,10 +228,12 @@ static int run_command(char **argv, const sigset_t *cancel_set,
 	}
 
 	if (!child) {
-		if (setpgid(0, 0))
+		if (setpgid(0, 0)) {
 			fprintf(stderr,
 				"hdn-rofs-transaction: worker process group failed: %s\n",
 				strerror(errno));
+			_exit(126);
+		}
 		if (sigprocmask(SIG_SETMASK, old_mask, NULL)) {
 			fprintf(stderr,
 				"hdn-rofs-transaction: worker signal restore failed: %s\n",
