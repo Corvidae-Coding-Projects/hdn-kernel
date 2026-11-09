@@ -480,7 +480,7 @@ static int validate_status(const char *helper)
 		return ret;
 	}
 
-	if (!strstr(status, "available=1")) {
+	if (!status || !strstr(status, "available=1")) {
 		fprintf(stderr,
 			"hdn-settings-ui: settings status is not available\n");
 		free(status);

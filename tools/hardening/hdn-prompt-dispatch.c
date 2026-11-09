@@ -561,6 +561,7 @@ static int run_rule(const char *broker, const char *token,
 	char **argv;
 	unsigned int argc = 0;
 	unsigned int i;
+	int exec_errno;
 
 	argv = calloc((size_t)rule->argc + 6, sizeof(*argv));
 	if (!argv) {
@@ -594,10 +595,11 @@ static int run_rule(const char *broker, const char *token,
 
 		if (!child) {
 			execv(broker, argv);
+			exec_errno = errno;
 			fprintf(stderr,
 				"hdn-prompt-dispatch: exec %s failed: %s\n",
-				broker, strerror(errno));
-			_exit(errno == ENOENT ? 127 : 126);
+				broker, strerror(exec_errno));
+			_exit(exec_errno == ENOENT ? 127 : 126);
 		}
 
 		ret = child_status_result(child);
@@ -612,12 +614,13 @@ static int run_rule(const char *broker, const char *token,
 		return ret;
 	}
 
-	execv(broker, argv);
+		execv(broker, argv);
+	exec_errno = errno;
 	fprintf(stderr, "hdn-prompt-dispatch: exec %s failed: %s\n",
-		broker, strerror(errno));
+		broker, strerror(exec_errno));
 	free(argv);
 	unlink(token);
-	return errno == ENOENT ? 127 : 126;
+	return exec_errno == ENOENT ? 127 : 126;
 }
 
 int main(int argc, char **argv)
