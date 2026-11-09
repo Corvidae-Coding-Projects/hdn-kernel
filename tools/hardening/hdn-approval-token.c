@@ -390,11 +390,9 @@ static int issue_token(const char *dir, const char *intent,
 	}
 
 	if (close(fd)) {
-		fd = -1;
 		ret = 1;
 		goto out_unlink_name;
 	}
-	fd = -1;
 
 	printf("%s\n", path);
 	ret = 0;
@@ -403,7 +401,6 @@ static int issue_token(const char *dir, const char *intent,
 out_unlink:
 	if (fd >= 0)
 		close(fd);
-	fd = -1;
 out_unlink_name:
 	unlinkat(dirfd, name, 0);
 out_dir:

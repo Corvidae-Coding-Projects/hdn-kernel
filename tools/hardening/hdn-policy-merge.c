@@ -548,6 +548,8 @@ static int copy_base_policy(FILE *out, const char *path)
 			return -EIO;
 		}
 		last = (unsigned char)buf[len - 1];
+		if (len < sizeof(buf))
+			break;
 	}
 
 	if (ferror(in)) {
