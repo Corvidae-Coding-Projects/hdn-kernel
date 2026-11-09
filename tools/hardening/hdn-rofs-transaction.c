@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -200,6 +201,29 @@ static void signal_worker(pid_t child, bool worker_group, int signal)
 			strerror(errno));
 }
 
+static void reap_worker_group(pid_t child)
+{
+	int status;
+
+	for (;;) {
+		pid_t ret;
+
+		/* Each reap can adopt a deeper process-group member. */
+		signal_worker(child, true, SIGKILL);
+		ret = waitpid(-child, &status, 0);
+
+		if (ret > 0)
+			continue;
+		if (ret < 0 && errno == EINTR)
+			continue;
+		if (ret < 0 && errno != ECHILD)
+			fprintf(stderr,
+				"hdn-rofs-transaction: descendant wait failed: %s\n",
+				strerror(errno));
+		return;
+	}
+}
+
 static void cancel_worker(pid_t child, bool worker_group, int signal,
 			  int *status)
 {
@@ -245,7 +269,12 @@ static void cancel_worker(pid_t child, bool worker_group, int signal,
 	while (child_waitable) {
 		pid_t ret = waitpid(child, status, 0);
 
-		if (ret == child || (ret < 0 && errno == ECHILD))
+		if (ret == child) {
+			if (worker_group)
+				reap_worker_group(child);
+			return;
+		}
+		if (ret < 0 && errno == ECHILD)
 			return;
 		if (ret < 0 && errno != EINTR) {
 			fprintf(stderr,
@@ -270,8 +299,11 @@ static int finish_worker(pid_t child, bool worker_group, int *status)
 	for (;;) {
 		pid_t ret = waitpid(child, status, 0);
 
-		if (ret == child)
+		if (ret == child) {
+			if (worker_group)
+				reap_worker_group(child);
 			return status_code(*status);
+		}
 		if (ret < 0 && errno == EINTR)
 			continue;
 		if (ret < 0)
@@ -410,6 +442,13 @@ int main(int argc, char **argv)
 	if (signal) {
 		sigprocmask(SIG_SETMASK, &old_mask, NULL);
 		return signal > 0 ? 128 + signal : 1;
+	}
+	if (prctl(PR_SET_CHILD_SUBREAPER, 1)) {
+		fprintf(stderr,
+			"hdn-rofs-transaction: subreaper setup failed: %s\n",
+			strerror(errno));
+		sigprocmask(SIG_SETMASK, &old_mask, NULL);
+		return 1;
 	}
 
 	if (remount_state(mountpoint, false)) {

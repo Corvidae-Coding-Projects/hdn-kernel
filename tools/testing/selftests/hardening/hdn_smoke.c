@@ -15454,8 +15454,16 @@ static int product_rofs_orphan_worker(const char *pid_path)
 	child = fork();
 	if (child < 0)
 		return 2;
-	if (!child)
-		return product_rofs_cancel_worker(pid_path);
+	if (!child) {
+		pid_t grandchild = fork();
+
+		if (grandchild < 0)
+			return 2;
+		if (!grandchild)
+			return product_rofs_cancel_worker(pid_path);
+		for (;;)
+			pause();
+	}
 
 	for (i = 0; i < 100; i++) {
 		if (!read_text_file_small(pid_path, pid_text, sizeof(pid_text)))
