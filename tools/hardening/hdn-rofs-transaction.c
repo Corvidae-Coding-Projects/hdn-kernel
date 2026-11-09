@@ -133,20 +133,23 @@ static void cancel_worker(pid_t child, bool worker_group, int signal,
 	const struct timespec delay = {
 		.tv_nsec = HDN_CANCEL_POLL_NS,
 	};
-	bool reaped = false;
+	bool child_exited = false;
+	bool child_waitable = true;
 	unsigned int attempt;
 
 	signal_worker(child, worker_group, signal);
 	for (attempt = 0; attempt < HDN_CANCEL_GRACE_POLLS; attempt++) {
-		pid_t ret = waitpid(child, status, WNOHANG);
+		siginfo_t info = {};
+		int ret;
 
-		if (ret == child) {
-			reaped = true;
+		ret = waitid(P_PID, child, &info, WEXITED | WNOHANG | WNOWAIT);
+		if (!ret && info.si_pid == child) {
+			child_exited = true;
 			break;
 		}
-		if (ret < 0 && errno != EINTR) {
+		if (ret && errno != EINTR) {
 			if (errno == ECHILD)
-				reaped = true;
+				child_waitable = false;
 			else
 				fprintf(stderr,
 					"hdn-rofs-transaction: wait failed: %s\n",
@@ -156,13 +159,17 @@ static void cancel_worker(pid_t child, bool worker_group, int signal,
 		nanosleep(&delay, NULL);
 	}
 
-	/* Stop descendants in the worker's process group as well. */
-	if (worker_group)
+	/*
+	 * Stop descendants in the worker's process group before reaping the
+	 * direct child. Keeping the child waitable pins its PID and prevents a
+	 * reused process-group ID from being signaled here.
+	 */
+	if (worker_group && child_waitable)
 		signal_worker(child, true, SIGKILL);
-	else if (!reaped)
+	else if (!child_exited && child_waitable)
 		signal_worker(child, false, SIGKILL);
 
-	while (!reaped) {
+	while (child_waitable) {
 		pid_t ret = waitpid(child, status, 0);
 
 		if (ret == child || (ret < 0 && errno == ECHILD))
