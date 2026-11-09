@@ -15757,6 +15757,7 @@ static int product_rofs_transaction_preserves_mount_restrictions(void)
 {
 	const unsigned long restrictions = MS_NOSUID | MS_NODEV | MS_NOEXEC;
 	struct statvfs state;
+	pid_t child;
 	int ret;
 
 	/* Force the helper through its legacy superblock remount fallback. */
@@ -15767,7 +15768,16 @@ static int product_rofs_transaction_preserves_mount_restrictions(void)
 		return 2;
 	}
 
-	ret = product_rofs_transaction_updates_and_reseals(false, 1, false);
+	child = fork();
+	if (child < 0)
+		return 2;
+	if (!child) {
+		execl(HDN_ROFS_TRANSACTION_EXEC, "hdn-rofs-transaction",
+		      HDN_PRODUCT_ROFS_DIR, "--", "/hdn_smoke",
+		      "--product-rofs-noop-worker", NULL);
+		_exit(2);
+	}
+	ret = child_exit_result(child);
 	if (ret)
 		return ret;
 	if (statvfs(HDN_PRODUCT_ROFS_DIR, &state))
@@ -32109,6 +32119,8 @@ int main(int argc, char **argv)
 		return product_rofs_cancel_worker(argv[2]);
 	if (argc == 3 && !strcmp(argv[1], "--product-rofs-orphan-worker"))
 		return product_rofs_orphan_worker(argv[2]);
+	if (argc == 2 && !strcmp(argv[1], "--product-rofs-noop-worker"))
+		return 0;
 	if (argc == 3 && !strcmp(argv[1], "--recovery-confirm-allow"))
 		return recovery_confirm_sentinel(argv[2], true);
 	if (argc == 3 && !strcmp(argv[1], "--recovery-confirm-deny"))
