@@ -591,6 +591,8 @@ static void print_argv(char *const argv[])
 
 static int exec_intent(const char *intent, char *const argv[], bool dry_run)
 {
+	int exec_errno;
+
 	if (dry_run) {
 		printf("hdn-admin-broker: intent=%s\n", intent);
 		printf("hdn-admin-broker: exec");
@@ -599,9 +601,10 @@ static int exec_intent(const char *intent, char *const argv[], bool dry_run)
 	}
 
 	execv(argv[0], argv);
+	exec_errno = errno;
 	fprintf(stderr, "hdn-admin-broker: exec %s failed: %s\n", argv[0],
-		strerror(errno));
-	return errno == ENOENT ? 127 : 126;
+		strerror(exec_errno));
+	return exec_errno == ENOENT ? 127 : 126;
 }
 
 static int run_rofs_apply(const char *intent, int argc, char **argv,
