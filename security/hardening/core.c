@@ -4416,6 +4416,8 @@ int hdn_mprotect_validate(struct hdn_mprotect_request *req)
 	adds_read = !(req->oldflags & VM_READ) && (req->newflags & VM_READ);
 	adds_exec = !(req->oldflags & VM_EXEC) && (req->newflags & VM_EXEC);
 	adds_write = !(req->oldflags & VM_WRITE) && (req->newflags & VM_WRITE);
+	if (req->newflags & VM_WRITE)
+		req->newflags |= VM_HDN_WAS_WRITABLE;
 	removes_write = (req->oldflags & VM_WRITE) &&
 			!(req->newflags & VM_WRITE);
 	if (adds_read && req->vma && req->vma->vm_file) {
@@ -4490,7 +4492,8 @@ int hdn_mprotect_validate(struct hdn_mprotect_request *req)
 				       HDN_REASON_TEXTREL_MPROTECT,
 				       -EACCES, hdn_vma_object_id(req->vma));
 
-	if (adds_exec && (req->oldflags & VM_WRITE) &&
+	if (adds_exec &&
+	    (req->oldflags & (VM_WRITE | VM_HDN_WAS_WRITABLE)) &&
 	    !hdn_memory_allows(HDN_MEM_ALLOW_EXEC_AFTER_WRITE) &&
 	    !hdn_jit_mprotect_allows(req) &&
 	    !(textrel_allowed && textrel_mprotect)) {

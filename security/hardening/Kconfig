@@ -505,10 +505,12 @@ config SECURITY_HARDENING_MOUNT_AUDIT
 config SECURITY_HARDENING_USER_WX
 	bool "Deny writable executable userspace mappings"
 	default y
+	depends on 64BIT
 	help
 	  Deny mmap() and mprotect() transitions that create writable and
 	  executable userspace mappings. Also deny adding execute permission to
-	  a mapping that is currently writable.
+	  a mapping that has been writable at any point in its lifetime, including
+	  after VMA splits, merges, and forks.
 	  Profiles can grant a narrow JIT exception for private anonymous
 	  write-to-execute transitions without allowing simultaneous W+X.
 	  This option provides the default no-ambient-WX baseline.

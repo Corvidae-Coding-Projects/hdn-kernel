@@ -357,6 +357,7 @@ enum {
 #endif
 	DECLARE_VMA_BIT(UFFD_MINOR, 41),
 	DECLARE_VMA_BIT(SEALED, 42),
+	DECLARE_VMA_BIT(HDN_WAS_WRITABLE, 43),
 	/* Flags that reuse flags above. */
 	DECLARE_VMA_BIT_ALIAS(PKEY_BIT0, HIGH_ARCH_0),
 	DECLARE_VMA_BIT_ALIAS(PKEY_BIT1, HIGH_ARCH_1),
@@ -505,6 +506,11 @@ enum {
 #define VM_ALLOW_ANY_UNCACHED	VM_NONE
 #define VM_SEALED		VM_NONE
 #endif
+#if defined(CONFIG_SECURITY_HARDENING_USER_WX) && defined(CONFIG_64BIT)
+#define VM_HDN_WAS_WRITABLE	INIT_VM_FLAG(HDN_WAS_WRITABLE)
+#else
+#define VM_HDN_WAS_WRITABLE	VM_NONE
+#endif
 #if defined(CONFIG_64BIT) || defined(CONFIG_PPC32)
 #define VM_DROPPABLE		INIT_VM_FLAG(DROPPABLE)
 #else
@@ -598,8 +604,12 @@ enum {
  *                  mapped page tables may contain metadata not described by the
  *                  VMA and thus any merged VMA may also contain this metadata,
  *                  and thus we must make this flag sticky.
+ *
+ * VM_HDN_WAS_WRITABLE - A merged VMA must retain write history from every
+ *                       contributing range so removing VM_WRITE cannot erase
+ *                       the exec-after-write policy state.
  */
-#define VM_STICKY (VM_SOFTDIRTY | VM_MAYBE_GUARD)
+#define VM_STICKY (VM_SOFTDIRTY | VM_MAYBE_GUARD | VM_HDN_WAS_WRITABLE)
 
 /*
  * VMA flags we ignore for the purposes of merge, i.e. one VMA possessing one
@@ -921,6 +931,8 @@ static inline void vm_flags_init(struct vm_area_struct *vma,
 				 vm_flags_t flags)
 {
 	VM_WARN_ON_ONCE(!pgtable_supports_soft_dirty() && (flags & VM_SOFTDIRTY));
+	if (flags & VM_WRITE)
+		flags |= VM_HDN_WAS_WRITABLE;
 	vma_flags_clear_all(&vma->flags);
 	vma_flags_overwrite_word(&vma->flags, flags);
 }

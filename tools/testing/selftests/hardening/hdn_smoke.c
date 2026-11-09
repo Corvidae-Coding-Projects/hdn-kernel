@@ -795,6 +795,7 @@ struct hdn_pidfd_info {
 #define HDN_APPROVAL_TOKEN_ISSUER_BAD "/hdn-approvals/bad-issuer.token"
 #define HDN_PRODUCT_ROFS_DIR "/hdn-product-rofs"
 #define HDN_PRODUCT_ROFS_SENTINEL "/hdn-product-rofs/sentinel"
+#define HDN_PRODUCT_ROFS_CANCEL_PID "/hdn-rofs-cancel-worker.pid"
 #define HDN_PRODUCT_ROFS_BROKER_DIR "/hdn-product-rofs-broker"
 #define HDN_PRODUCT_ROFS_BROKER_SENTINEL \
 	"/hdn-product-rofs-broker/sentinel"
@@ -15425,6 +15426,23 @@ static int product_rofs_write_sentinel(void)
 	return 0;
 }
 
+static int product_rofs_cancel_worker(const char *pid_path)
+{
+	int fd;
+
+	fd = open(pid_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	if (fd < 0)
+		return 2;
+	if (dprintf(fd, "%ld\n", (long)getpid()) < 0 || fsync(fd)) {
+		close(fd);
+		return 2;
+	}
+	close(fd);
+
+	for (;;)
+		pause();
+}
+
 static unsigned int product_rofs_sentinel_update_count(void)
 {
 	unsigned char *buf = NULL;
@@ -15534,6 +15552,84 @@ static int product_rofs_transaction_updates_and_reseals(bool via_broker,
 			"post-transaction write-open failed with %s\n",
 			strerror(saved_errno));
 	return saved_errno == EROFS ? 0 : 2;
+}
+
+static int product_rofs_transaction_cancel_reseals(void)
+{
+	char pid_text[64];
+	char *end;
+	long parsed_pid = -1;
+	bool worker_dead;
+	int saved_errno;
+	pid_t guardian;
+	pid_t worker;
+	int result;
+	int fd;
+	int i;
+
+	unlink(HDN_PRODUCT_ROFS_CANCEL_PID);
+	guardian = fork();
+	if (guardian < 0)
+		return 2;
+	if (!guardian) {
+		execl(HDN_ROFS_TRANSACTION_EXEC, "hdn-rofs-transaction",
+		      HDN_PRODUCT_ROFS_DIR, "--", "/hdn_smoke",
+		      "--product-rofs-cancel-worker",
+		      HDN_PRODUCT_ROFS_CANCEL_PID, NULL);
+		_exit(2);
+	}
+
+	for (i = 0; i < 100; i++) {
+		if (!read_text_file_small(HDN_PRODUCT_ROFS_CANCEL_PID, pid_text,
+					  sizeof(pid_text))) {
+			errno = 0;
+			parsed_pid = strtol(pid_text, &end, 10);
+			if (!errno && end != pid_text && parsed_pid > 1 &&
+			    parsed_pid <= INT_MAX)
+				break;
+		}
+		usleep(50000);
+	}
+	if (i == 100) {
+		kill(guardian, SIGKILL);
+		(void)child_exit_result(guardian);
+		unlink(HDN_PRODUCT_ROFS_CANCEL_PID);
+		return 2;
+	}
+	worker = (pid_t)parsed_pid;
+
+	if (kill(guardian, SIGTERM)) {
+		kill(guardian, SIGKILL);
+		(void)child_exit_result(guardian);
+		kill(worker, SIGKILL);
+		unlink(HDN_PRODUCT_ROFS_CANCEL_PID);
+		return 2;
+	}
+	result = child_exit_result(guardian);
+
+	errno = 0;
+	worker_dead = kill(worker, 0) && errno == ESRCH;
+	if (!worker_dead)
+		kill(worker, SIGKILL);
+
+	errno = 0;
+	fd = open(HDN_PRODUCT_ROFS_SENTINEL,
+		  O_WRONLY | O_APPEND | O_CLOEXEC);
+	saved_errno = errno;
+	if (fd >= 0)
+		close(fd);
+	unlink(HDN_PRODUCT_ROFS_CANCEL_PID);
+
+	if (result == 128 + SIGTERM && worker_dead && fd < 0 &&
+	    saved_errno == EROFS)
+		return 0;
+
+	fprintf(stderr,
+		"canceled ROFS transaction status=%d worker_dead=%d write_errno=%s\n",
+		result, worker_dead, fd < 0 ? strerror(saved_errno) : "none");
+	if (fd >= 0)
+		(void)product_rofs_apply_seals_mount_readonly();
+	return 1;
 }
 
 static int product_rofs_broker_denied(const char *broker_path,
@@ -19736,6 +19832,10 @@ static int jit_exec_after_write_allowed(void)
 		    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (addr == MAP_FAILED)
 		return 2;
+	if (mprotect(addr, page_size, PROT_READ)) {
+		munmap(addr, page_size);
+		return 2;
+	}
 
 	errno = 0;
 	ret = mprotect(addr, page_size, PROT_READ | PROT_EXEC);
@@ -23626,6 +23726,7 @@ static void test_signed_policy_transaction(void)
 	int image_seal_unsafe_config_result = 2;
 	int image_seal_result = 2;
 	int product_rofs_transaction_result = 2;
+	int product_rofs_transaction_cancel_result = 2;
 	int product_rofs_broker_missing_config_result = 2;
 	int product_rofs_broker_unsafe_config_result = 2;
 	int product_rofs_broker_denial_result = 2;
@@ -24073,6 +24174,7 @@ static void test_signed_policy_transaction(void)
 		ksft_test_result_skip("image seal denies unsafe config\n");
 		ksft_test_result_skip("image seal applies read-only mount list\n");
 		ksft_test_result_skip("product ROFS transaction updates and reseals mount\n");
+		ksft_test_result_skip("canceled ROFS transaction stops worker and reseals mount\n");
 		ksft_test_result_skip("admin broker denies missing allowlist\n");
 		ksft_test_result_skip("admin broker denies writable allowlist\n");
 		ksft_test_result_skip("admin broker denies unapproved ROFS worker\n");
@@ -25774,6 +25876,16 @@ static void test_signed_policy_transaction(void)
 			     product_rofs_apply_result :
 			     product_rofs_transaction_result) : 2,
 			    "product ROFS transaction updates and reseals mount");
+	if (mount_ro_policy_committed && !product_rofs_apply_result &&
+	    !product_rofs_transaction_result)
+		product_rofs_transaction_cancel_result =
+			product_rofs_transaction_cancel_reseals();
+	report_child_result(mount_ro_policy_committed ?
+			    (product_rofs_apply_result ?
+			     product_rofs_apply_result :
+			     (product_rofs_transaction_result ? KSFT_SKIP :
+			      product_rofs_transaction_cancel_result)) : 2,
+			    "canceled ROFS transaction stops worker and reseals mount");
 	if (mount_ro_policy_committed && !product_rofs_apply_result &&
 	    !product_rofs_transaction_result)
 		product_rofs_broker_missing_config_result =
@@ -30080,6 +30192,135 @@ static void test_exec_after_write_denied(void)
 			 "mprotect exec-after-write is denied\n");
 }
 
+static void test_exec_after_write_history_denied(void)
+{
+	size_t page_size = sysconf(_SC_PAGESIZE);
+	void *addr;
+	int ret;
+	int saved_errno = 0;
+
+	addr = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
+		    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (addr == MAP_FAILED || mprotect(addr, page_size, PROT_READ)) {
+		ksft_test_result_fail("write-history mmap setup failed: %s\n",
+				      strerror(errno));
+		if (addr != MAP_FAILED)
+			munmap(addr, page_size);
+		return;
+	}
+
+	errno = 0;
+	ret = mprotect(addr, page_size, PROT_READ | PROT_EXEC);
+	if (ret)
+		saved_errno = errno;
+
+	munmap(addr, page_size);
+	ksft_test_result(ret && errno_is_denial(saved_errno),
+			 "mprotect preserves exec-after-write history\n");
+}
+
+static void test_exec_after_write_split_history_denied(void)
+{
+	size_t page_size = sysconf(_SC_PAGESIZE);
+	void *middle;
+	void *addr;
+	int ret;
+	int saved_errno = 0;
+
+	addr = mmap(NULL, page_size * 3, PROT_READ | PROT_WRITE,
+		    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (addr == MAP_FAILED) {
+		ksft_test_result_fail("write-history split mmap failed: %s\n",
+				      strerror(errno));
+		return;
+	}
+	middle = (char *)addr + page_size;
+	if (mprotect(middle, page_size, PROT_READ)) {
+		ksft_test_result_fail("write-history VMA split failed: %s\n",
+				      strerror(errno));
+		munmap(addr, page_size * 3);
+		return;
+	}
+
+	errno = 0;
+	ret = mprotect(middle, page_size, PROT_READ | PROT_EXEC);
+	if (ret)
+		saved_errno = errno;
+
+	munmap(addr, page_size * 3);
+	ksft_test_result(ret && errno_is_denial(saved_errno),
+			 "VMA splits preserve exec-after-write history\n");
+}
+
+static void test_exec_after_write_merge_history_denied(void)
+{
+	size_t page_size = sysconf(_SC_PAGESIZE);
+	void *middle;
+	void *addr;
+	int ret;
+	int saved_errno = 0;
+
+	addr = mmap(NULL, page_size * 3, PROT_READ,
+		    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (addr == MAP_FAILED) {
+		ksft_test_result_fail("write-history merge mmap failed: %s\n",
+				      strerror(errno));
+		return;
+	}
+	middle = (char *)addr + page_size;
+	if (mprotect(middle, page_size, PROT_READ | PROT_WRITE) ||
+	    mprotect(addr, page_size * 3, PROT_READ)) {
+		ksft_test_result_fail("write-history VMA merge setup failed: %s\n",
+				      strerror(errno));
+		munmap(addr, page_size * 3);
+		return;
+	}
+
+	errno = 0;
+	ret = mprotect(addr, page_size, PROT_READ | PROT_EXEC);
+	if (ret)
+		saved_errno = errno;
+
+	munmap(addr, page_size * 3);
+	ksft_test_result(ret && errno_is_denial(saved_errno),
+			 "VMA merges preserve exec-after-write history\n");
+}
+
+static void test_exec_after_write_fork_history_denied(void)
+{
+	size_t page_size = sysconf(_SC_PAGESIZE);
+	void *addr;
+	pid_t child;
+	int ret;
+
+	addr = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
+		    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (addr == MAP_FAILED || mprotect(addr, page_size, PROT_READ)) {
+		ksft_test_result_fail("write-history fork mmap setup failed: %s\n",
+				      strerror(errno));
+		if (addr != MAP_FAILED)
+			munmap(addr, page_size);
+		return;
+	}
+
+	child = fork();
+	if (child < 0) {
+		ksft_test_result_fail("write-history fork failed: %s\n",
+				      strerror(errno));
+		munmap(addr, page_size);
+		return;
+	}
+	if (!child) {
+		errno = 0;
+		ret = mprotect(addr, page_size, PROT_READ | PROT_EXEC);
+		_exit(ret && errno_is_denial(errno) ? 0 : 1);
+	}
+
+	ret = child_exit_result(child);
+	munmap(addr, page_size);
+	ksft_test_result(!ret, "fork preserves exec-after-write history\n");
+}
+
 static void test_rwx_mprotect_audit_logged(void)
 {
 	unsigned int before;
@@ -31688,6 +31929,8 @@ int main(int argc, char **argv)
 		return rofs_updater_writable_mount_sentinel();
 	if (argc == 2 && !strcmp(argv[1], "--product-rofs-write-sentinel"))
 		return product_rofs_write_sentinel();
+	if (argc == 3 && !strcmp(argv[1], "--product-rofs-cancel-worker"))
+		return product_rofs_cancel_worker(argv[2]);
 	if (argc == 3 && !strcmp(argv[1], "--recovery-confirm-allow"))
 		return recovery_confirm_sentinel(argv[2], true);
 	if (argc == 3 && !strcmp(argv[1], "--recovery-confirm-deny"))
@@ -31714,7 +31957,7 @@ int main(int argc, char **argv)
 	if (access(HDN_STATUS, R_OK))
 		ksft_exit_skip("hardening securityfs status not present\n");
 
-	ksft_set_plan(1111);
+	ksft_set_plan(1116);
 	report_child_result(prompt_session_unprivileged_authorized_denied(),
 			    "prompt session rejects unprivileged authorized bypass");
 	test_securityfs_status();
@@ -32074,6 +32317,10 @@ int main(int argc, char **argv)
 	test_audit_flood_control();
 	test_file_backed_rwx_denied();
 	test_exec_after_write_denied();
+	test_exec_after_write_history_denied();
+	test_exec_after_write_split_history_denied();
+	test_exec_after_write_merge_history_denied();
+	test_exec_after_write_fork_history_denied();
 	report_child_result(elf_note_jit_exec_after_write_allowed(),
 			    "ELF memory note allows private anonymous exec-after-write");
 	report_child_result(elf_note_exec_stack_elf_allowed(),
