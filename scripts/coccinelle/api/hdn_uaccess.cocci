@@ -2,8 +2,11 @@
 // Report source-level address-space removal; each use needs semantic review.
 virtual report
 virtual fixture
+virtual hdn_uderef_analysis
 
-@cast depends on fixture || !(file in "tools/testing/selftests/hardening/hdn_uaccess_bad_source.c") expression@
+@cast depends on fixture ||
+	(!(file in "tools/testing/selftests/hardening/hdn_uaccess_bad_source.c") &&
+	 (hdn_uderef_analysis || !(file in "security/hardening/uderef_test.c"))) expression@
 attribute name __user;
 type T =~ "__user", U !~ "__user";
 idexpression T p;
@@ -16,7 +19,9 @@ loc << cast.loc;
 @@
 coccilib.report.print_report(loc[0], "HDN_UDEREF: cast removes __user; review access-window and address validation")
 
-@direct depends on fixture || !(file in "tools/testing/selftests/hardening/hdn_uaccess_bad_source.c") expression@
+@direct depends on fixture ||
+	(!(file in "tools/testing/selftests/hardening/hdn_uaccess_bad_source.c") &&
+	 (hdn_uderef_analysis || !(file in "security/hardening/uderef_test.c"))) expression@
 attribute name __user;
 type T =~ "__user";
 idexpression T p;
@@ -29,7 +34,9 @@ loc << direct.loc;
 @@
 coccilib.report.print_report(loc[0], "HDN_UDEREF: user dereference candidate; require an approved uaccess primitive")
 
-@array depends on fixture || !(file in "tools/testing/selftests/hardening/hdn_uaccess_bad_source.c") expression@
+@array depends on fixture ||
+	(!(file in "tools/testing/selftests/hardening/hdn_uaccess_bad_source.c") &&
+	 (hdn_uderef_analysis || !(file in "security/hardening/uderef_test.c"))) expression@
 attribute name __user;
 type T =~ "__user";
 idexpression T p;
@@ -43,7 +50,9 @@ loc << array.loc;
 @@
 coccilib.report.print_report(loc[0], "HDN_UDEREF: user array dereference candidate; require an approved uaccess primitive")
 
-@member depends on fixture || !(file in "tools/testing/selftests/hardening/hdn_uaccess_bad_source.c") expression@
+@member depends on fixture ||
+	(!(file in "tools/testing/selftests/hardening/hdn_uaccess_bad_source.c") &&
+	 (hdn_uderef_analysis || !(file in "security/hardening/uderef_test.c"))) expression@
 attribute name __user;
 type T =~ "__user";
 idexpression T p;
