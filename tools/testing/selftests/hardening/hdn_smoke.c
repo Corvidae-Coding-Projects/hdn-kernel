@@ -796,6 +796,7 @@ struct hdn_pidfd_info {
 #define HDN_PRODUCT_ROFS_DIR "/hdn-product-rofs"
 #define HDN_PRODUCT_ROFS_SENTINEL "/hdn-product-rofs/sentinel"
 #define HDN_PRODUCT_ROFS_CANCEL_PID "/hdn-rofs-cancel-worker.pid"
+#define HDN_PRODUCT_ROFS_ORPHAN_PID "/hdn-rofs-orphan-worker.pid"
 #define HDN_PRODUCT_ROFS_BROKER_DIR "/hdn-product-rofs-broker"
 #define HDN_PRODUCT_ROFS_BROKER_SENTINEL \
 	"/hdn-product-rofs-broker/sentinel"
@@ -15443,6 +15444,51 @@ static int product_rofs_cancel_worker(const char *pid_path)
 		pause();
 }
 
+static int product_rofs_orphan_worker(const char *pid_path)
+{
+	char pid_text[64];
+	int i;
+	pid_t child;
+
+	child = fork();
+	if (child < 0)
+		return 2;
+	if (!child)
+		return product_rofs_cancel_worker(pid_path);
+
+	for (i = 0; i < 100; i++) {
+		if (!read_text_file_small(pid_path, pid_text, sizeof(pid_text)))
+			return 0;
+		usleep(50000);
+	}
+
+	kill(child, SIGKILL);
+	(void)waitpid(child, NULL, 0);
+	return 2;
+}
+
+static bool process_is_gone_or_zombie(pid_t pid)
+{
+	char path[64];
+	char stat_line[512];
+	char *name_end;
+	FILE *stream;
+
+	snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+	stream = fopen(path, "r");
+	if (!stream)
+		return errno == ENOENT;
+	if (!fgets(stat_line, sizeof(stat_line), stream)) {
+		fclose(stream);
+		return false;
+	}
+	fclose(stream);
+
+	name_end = strrchr(stat_line, ')');
+	return name_end && name_end[1] == ' ' &&
+	       (name_end[2] == 'Z' || name_end[2] == 'X');
+}
+
 static unsigned int product_rofs_sentinel_update_count(void)
 {
 	unsigned char *buf = NULL;
@@ -15627,6 +15673,72 @@ static int product_rofs_transaction_cancel_reseals(void)
 	fprintf(stderr,
 		"canceled ROFS transaction status=%d worker_dead=%d write_errno=%s\n",
 		result, worker_dead, fd < 0 ? strerror(saved_errno) : "none");
+	if (fd >= 0)
+		(void)product_rofs_apply_seals_mount_readonly();
+	return 1;
+}
+
+static int product_rofs_transaction_stops_background_worker(void)
+{
+	char pid_text[64];
+	char *end;
+	long parsed_pid = -1;
+	bool worker_stopped = false;
+	int saved_errno;
+	pid_t guardian;
+	pid_t worker;
+	int result;
+	int fd;
+	int i;
+
+	unlink(HDN_PRODUCT_ROFS_ORPHAN_PID);
+	guardian = fork();
+	if (guardian < 0)
+		return 2;
+	if (!guardian) {
+		execl(HDN_ROFS_TRANSACTION_EXEC, "hdn-rofs-transaction",
+		      HDN_PRODUCT_ROFS_DIR, "--", "/hdn_smoke",
+		      "--product-rofs-orphan-worker",
+		      HDN_PRODUCT_ROFS_ORPHAN_PID, NULL);
+		_exit(2);
+	}
+
+	result = child_exit_result(guardian);
+	if (!read_text_file_small(HDN_PRODUCT_ROFS_ORPHAN_PID, pid_text,
+				  sizeof(pid_text))) {
+		errno = 0;
+		parsed_pid = strtol(pid_text, &end, 10);
+		if (errno || end == pid_text || parsed_pid <= 1 ||
+		    parsed_pid > INT_MAX)
+			parsed_pid = -1;
+	}
+	worker = (pid_t)parsed_pid;
+	if (parsed_pid > 1) {
+		for (i = 0; i < 100; i++) {
+			if (process_is_gone_or_zombie(worker)) {
+				worker_stopped = true;
+				break;
+			}
+			usleep(50000);
+		}
+		if (!worker_stopped)
+			kill(worker, SIGKILL);
+	}
+
+	errno = 0;
+	fd = open(HDN_PRODUCT_ROFS_SENTINEL,
+		  O_WRONLY | O_APPEND | O_CLOEXEC);
+	saved_errno = errno;
+	if (fd >= 0)
+		close(fd);
+	unlink(HDN_PRODUCT_ROFS_ORPHAN_PID);
+
+	if (!result && worker_stopped && fd < 0 && saved_errno == EROFS)
+		return 0;
+
+	fprintf(stderr,
+		"completed ROFS transaction status=%d worker_stopped=%d write_errno=%s\n",
+		result, worker_stopped, fd < 0 ? strerror(saved_errno) : "none");
 	if (fd >= 0)
 		(void)product_rofs_apply_seals_mount_readonly();
 	return 1;
@@ -23727,6 +23839,7 @@ static void test_signed_policy_transaction(void)
 	int image_seal_result = 2;
 	int product_rofs_transaction_result = 2;
 	int product_rofs_transaction_cancel_result = 2;
+	int product_rofs_transaction_orphan_result = 2;
 	int product_rofs_broker_missing_config_result = 2;
 	int product_rofs_broker_unsafe_config_result = 2;
 	int product_rofs_broker_denial_result = 2;
@@ -24175,6 +24288,7 @@ static void test_signed_policy_transaction(void)
 		ksft_test_result_skip("image seal applies read-only mount list\n");
 		ksft_test_result_skip("product ROFS transaction updates and reseals mount\n");
 		ksft_test_result_skip("canceled ROFS transaction stops worker and reseals mount\n");
+		ksft_test_result_skip("ROFS transaction stops background worker before reseal\n");
 		ksft_test_result_skip("admin broker denies missing allowlist\n");
 		ksft_test_result_skip("admin broker denies writable allowlist\n");
 		ksft_test_result_skip("admin broker denies unapproved ROFS worker\n");
@@ -25886,6 +26000,16 @@ static void test_signed_policy_transaction(void)
 			     (product_rofs_transaction_result ? KSFT_SKIP :
 			      product_rofs_transaction_cancel_result)) : 2,
 			    "canceled ROFS transaction stops worker and reseals mount");
+	if (mount_ro_policy_committed && !product_rofs_apply_result &&
+	    !product_rofs_transaction_result)
+		product_rofs_transaction_orphan_result =
+			product_rofs_transaction_stops_background_worker();
+	report_child_result(mount_ro_policy_committed ?
+			    (product_rofs_apply_result ?
+			     product_rofs_apply_result :
+			     (product_rofs_transaction_result ? KSFT_SKIP :
+			      product_rofs_transaction_orphan_result)) : 2,
+			    "ROFS transaction stops background worker before reseal");
 	if (mount_ro_policy_committed && !product_rofs_apply_result &&
 	    !product_rofs_transaction_result)
 		product_rofs_broker_missing_config_result =
@@ -31931,6 +32055,8 @@ int main(int argc, char **argv)
 		return product_rofs_write_sentinel();
 	if (argc == 3 && !strcmp(argv[1], "--product-rofs-cancel-worker"))
 		return product_rofs_cancel_worker(argv[2]);
+	if (argc == 3 && !strcmp(argv[1], "--product-rofs-orphan-worker"))
+		return product_rofs_orphan_worker(argv[2]);
 	if (argc == 3 && !strcmp(argv[1], "--recovery-confirm-allow"))
 		return recovery_confirm_sentinel(argv[2], true);
 	if (argc == 3 && !strcmp(argv[1], "--recovery-confirm-deny"))
@@ -31957,7 +32083,7 @@ int main(int argc, char **argv)
 	if (access(HDN_STATUS, R_OK))
 		ksft_exit_skip("hardening securityfs status not present\n");
 
-	ksft_set_plan(1116);
+	ksft_set_plan(1117);
 	report_child_result(prompt_session_unprivileged_authorized_denied(),
 			    "prompt session rejects unprivileged authorized bypass");
 	test_securityfs_status();

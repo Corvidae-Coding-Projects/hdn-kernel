@@ -183,6 +183,32 @@ static void cancel_worker(pid_t child, bool worker_group, int signal,
 	}
 }
 
+static int finish_worker(pid_t child, bool worker_group, int *status)
+{
+	/*
+	 * A successful direct worker must not be able to leave a background
+	 * writer behind. The waitid(WNOWAIT) caller keeps the direct child (and
+	 * therefore its process-group ID) pinned until the complete group has
+	 * been stopped and the child can be reaped safely.
+	 */
+	if (worker_group)
+		signal_worker(child, true, SIGKILL);
+
+	for (;;) {
+		pid_t ret = waitpid(child, status, 0);
+
+		if (ret == child)
+			return status_code(*status);
+		if (ret < 0 && errno == EINTR)
+			continue;
+		if (ret < 0)
+			fprintf(stderr,
+				"hdn-rofs-transaction: wait failed: %s\n",
+				strerror(errno));
+		return 1;
+	}
+}
+
 static int run_command(char **argv, const sigset_t *cancel_set,
 		       const sigset_t *old_mask, int *cancel_signal)
 {
@@ -222,8 +248,9 @@ static int run_command(char **argv, const sigset_t *cancel_set,
 		worker_group = true;
 
 	for (;;) {
-		pid_t waited;
+		siginfo_t info = {};
 		int signal;
+		int ret;
 
 		signal = next_cancel_signal(cancel_set, &no_wait);
 		if (signal < 0) {
@@ -236,10 +263,10 @@ static int run_command(char **argv, const sigset_t *cancel_set,
 			return 128 + signal;
 		}
 
-		waited = waitpid(child, &status, WNOHANG);
-		if (waited == child)
-			return status_code(status);
-		if (waited < 0 && errno != EINTR) {
+		ret = waitid(P_PID, child, &info, WEXITED | WNOHANG | WNOWAIT);
+		if (!ret && info.si_pid == child)
+			return finish_worker(child, worker_group, &status);
+		if (ret && errno != EINTR) {
 			fprintf(stderr, "hdn-rofs-transaction: wait failed: %s\n",
 				strerror(errno));
 			cancel_worker(child, worker_group, SIGTERM, &status);

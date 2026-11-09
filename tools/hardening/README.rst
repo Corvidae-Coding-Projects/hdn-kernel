@@ -26,7 +26,10 @@ those paths out.
 a product read-only mount, running one worker command, and resealing the mount
 read-only before returning. Read-only resealing retries bounded transient
 ``EBUSY`` failures after syncing, while still returning failure if a writer
-does not release the protected filesystem.
+does not release the protected filesystem. The helper blocks ordinary
+termination signals while the writable window is open, stops and reaps the
+complete worker process group on cancellation or direct-worker completion,
+and restores signal delivery only after the mount has been resealed.
 
 ``hdn-package-worker`` composes that primitive across the fixed boot paths used
 by system updates. After the broker opens ``/usr``, the worker inspects
@@ -1515,7 +1518,11 @@ later write-open. It then proves the package/update path:
 ``hdn-rofs-transaction`` runs under a
 ``MOUNT_ADMIN`` + ``ROFS_RELAX`` profile, temporarily remounts the product path
 writable, runs the worker command, reseals the mount read-only, and leaves a
-post-transaction write-open failing with ``EROFS``. It also proves the brokered
+post-transaction write-open failing with ``EROFS``. Cancellation is checked by
+terminating the guardian while its worker is live and requiring the worker to
+stop before the mount becomes read-only again. Normal completion is also
+checked with a worker that tries to leave a background descendant behind; the
+guardian stops that process group before resealing. It also proves the brokered
 path: ``hdn-admin-broker`` enters a product admin profile, accepts the typed
 ``rofs-transaction`` intent only when the mountpoint and worker are listed in
 the broker allowlist, execs the transaction helper, and leaves the same
