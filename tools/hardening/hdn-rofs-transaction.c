@@ -165,15 +165,13 @@ static void cancel_worker(pid_t child, bool worker_group, int signal,
 	while (!reaped) {
 		pid_t ret = waitpid(child, status, 0);
 
-		if (ret == child || (ret < 0 && errno == ECHILD)) {
-			reaped = true;
-			break;
-		}
+		if (ret == child || (ret < 0 && errno == ECHILD))
+			return;
 		if (ret < 0 && errno != EINTR) {
 			fprintf(stderr,
 				"hdn-rofs-transaction: wait failed: %s\n",
 				strerror(errno));
-			break;
+			return;
 		}
 	}
 }
