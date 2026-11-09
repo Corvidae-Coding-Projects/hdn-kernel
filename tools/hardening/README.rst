@@ -29,7 +29,10 @@ read-only before returning. Read-only resealing retries bounded transient
 does not release the protected filesystem. The helper blocks ordinary
 termination signals while the writable window is open, stops and reaps the
 complete worker process group on cancellation or direct-worker completion,
-and restores signal delivery only after the mount has been resealed.
+and restores signal delivery only after the mount has been resealed. If a
+superblock-level read-only state requires the legacy remount fallback, the
+helper preserves the mount's existing ``nosuid``, ``nodev``, ``noexec``, and
+other observable VFS restrictions and verifies the requested final state.
 
 ``hdn-package-worker`` composes that primitive across the fixed boot paths used
 by system updates. After the broker opens ``/usr``, the worker inspects
@@ -1522,7 +1525,9 @@ post-transaction write-open failing with ``EROFS``. Cancellation is checked by
 terminating the guardian while its worker is live and requiring the worker to
 stop before the mount becomes read-only again. Normal completion is also
 checked with a worker that tries to leave a background descendant behind; the
-guardian stops that process group before resealing. It also proves the brokered
+guardian stops that process group before resealing. A restricted read-only
+mount forces the legacy remount path and verifies that ``nosuid``, ``nodev``,
+and ``noexec`` survive both the writable window and reseal. It also proves the brokered
 path: ``hdn-admin-broker`` enters a product admin profile, accepts the typed
 ``rofs-transaction`` intent only when the mountpoint and worker are listed in
 the broker allowlist, execs the transaction helper, and leaves the same

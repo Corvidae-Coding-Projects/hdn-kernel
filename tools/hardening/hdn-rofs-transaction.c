@@ -22,6 +22,66 @@
 #define HDN_CANCEL_POLL_NS 50000000L
 #define HDN_CANCEL_GRACE_POLLS 40
 
+static unsigned long legacy_remount_flags(const struct statvfs *state,
+					  bool readonly)
+{
+	unsigned long flags = MS_REMOUNT;
+
+	if (readonly)
+		flags |= MS_RDONLY;
+#ifdef ST_NOSUID
+	if (state->f_flag & ST_NOSUID)
+		flags |= MS_NOSUID;
+#endif
+#ifdef ST_NODEV
+	if (state->f_flag & ST_NODEV)
+		flags |= MS_NODEV;
+#endif
+#ifdef ST_NOEXEC
+	if (state->f_flag & ST_NOEXEC)
+		flags |= MS_NOEXEC;
+#endif
+#ifdef ST_SYNCHRONOUS
+	if (state->f_flag & ST_SYNCHRONOUS)
+		flags |= MS_SYNCHRONOUS;
+#endif
+#ifdef ST_MANDLOCK
+	if (state->f_flag & ST_MANDLOCK)
+		flags |= MS_MANDLOCK;
+#endif
+#ifdef ST_NOATIME
+	if (state->f_flag & ST_NOATIME)
+		flags |= MS_NOATIME;
+#endif
+#ifdef ST_NODIRATIME
+	if (state->f_flag & ST_NODIRATIME)
+		flags |= MS_NODIRATIME;
+#endif
+#ifdef ST_RELATIME
+	if (state->f_flag & ST_RELATIME)
+		flags |= MS_RELATIME;
+#endif
+#ifdef ST_NOSYMFOLLOW
+	if (state->f_flag & ST_NOSYMFOLLOW)
+		flags |= MS_NOSYMFOLLOW;
+#endif
+
+	return flags;
+}
+
+static int read_mount_state(const char *path, struct statvfs *state)
+{
+	if (!statvfs(path, state))
+		return 0;
+
+	return -errno;
+}
+
+static bool mount_state_matches(const struct statvfs *state, bool readonly)
+{
+	return !!(state->f_flag & ST_RDONLY) == readonly;
+}
+
 static void usage(const char *prog)
 {
 	fprintf(stderr, "Usage: %s MOUNTPOINT -- COMMAND [ARG...]\n", prog);
@@ -29,7 +89,9 @@ static void usage(const char *prog)
 
 static int remount_state_once(const char *path, bool readonly)
 {
-	unsigned long flags = MS_REMOUNT;
+	struct statvfs state;
+	unsigned long flags;
+	int ret;
 
 #ifdef __NR_mount_setattr
 	struct mount_attr attr = {
@@ -39,25 +101,36 @@ static int remount_state_once(const char *path, bool readonly)
 
 	if (!syscall(__NR_mount_setattr, AT_FDCWD, path, 0, &attr,
 		     sizeof(attr))) {
-		struct statvfs state;
-
-		if (readonly || statvfs(path, &state) ||
-		    !(state.f_flag & ST_RDONLY))
+		ret = read_mount_state(path, &state);
+		if (ret)
+			return ret;
+		if (mount_state_matches(&state, readonly))
 			return 0;
-		/* A legacy remount may also have set the superblock read-only. */
+		/* The superblock can remain read-only after clearing the mount bit. */
 	} else if (errno != ENOSYS && errno != EINVAL &&
 		   errno != EOPNOTSUPP) {
 		return -errno;
+	} else {
+		ret = read_mount_state(path, &state);
+		if (ret)
+			return ret;
 	}
+#else
+	ret = read_mount_state(path, &state);
+	if (ret)
+		return ret;
 #endif
 
-	if (readonly)
-		flags |= MS_RDONLY;
+	flags = legacy_remount_flags(&state, readonly);
+	if (mount(NULL, path, NULL, flags, NULL))
+		return -errno;
+	ret = read_mount_state(path, &state);
+	if (ret)
+		return ret;
+	if (!mount_state_matches(&state, readonly))
+		return readonly ? -EIO : -EROFS;
 
-	if (!mount(NULL, path, NULL, flags, NULL))
-		return 0;
-
-	return -errno;
+	return 0;
 }
 
 static int remount_state(const char *path, bool readonly)

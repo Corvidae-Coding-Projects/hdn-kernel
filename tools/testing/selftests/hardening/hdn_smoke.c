@@ -50,6 +50,7 @@
 #include <sys/inotify.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/un.h>
@@ -15744,6 +15745,36 @@ static int product_rofs_transaction_stops_background_worker(void)
 	return 1;
 }
 
+static int product_rofs_transaction_preserves_mount_restrictions(void)
+{
+	const unsigned long restrictions = MS_NOSUID | MS_NODEV | MS_NOEXEC;
+	struct statvfs state;
+	int ret;
+
+	/* Force the helper through its legacy superblock remount fallback. */
+	if (mount(NULL, HDN_PRODUCT_ROFS_DIR, NULL,
+		  MS_REMOUNT | MS_RDONLY | restrictions, NULL)) {
+		fprintf(stderr, "restricted ROFS remount failed: %s\n",
+			strerror(errno));
+		return 2;
+	}
+
+	ret = product_rofs_transaction_updates_and_reseals(false, 1, false);
+	if (ret)
+		return ret;
+	if (statvfs(HDN_PRODUCT_ROFS_DIR, &state))
+		return 2;
+	if (!(state.f_flag & ST_RDONLY) || !(state.f_flag & ST_NOSUID) ||
+	    !(state.f_flag & ST_NODEV) || !(state.f_flag & ST_NOEXEC)) {
+		fprintf(stderr,
+			"ROFS transaction dropped mount restrictions: flags=%#lx\n",
+			(unsigned long)state.f_flag);
+		return 1;
+	}
+
+	return 0;
+}
+
 static int product_rofs_broker_denied(const char *broker_path,
 				      const char *broker_name,
 				      const char *worker_path,
@@ -23840,6 +23871,7 @@ static void test_signed_policy_transaction(void)
 	int product_rofs_transaction_result = 2;
 	int product_rofs_transaction_cancel_result = 2;
 	int product_rofs_transaction_orphan_result = 2;
+	int product_rofs_transaction_restrictions_result = 2;
 	int product_rofs_broker_missing_config_result = 2;
 	int product_rofs_broker_unsafe_config_result = 2;
 	int product_rofs_broker_denial_result = 2;
@@ -26010,6 +26042,18 @@ static void test_signed_policy_transaction(void)
 			     (product_rofs_transaction_result ? KSFT_SKIP :
 			      product_rofs_transaction_orphan_result)) : 2,
 			    "ROFS transaction stops background worker before reseal");
+	if (mount_ro_policy_committed && !product_rofs_apply_result &&
+	    !product_rofs_transaction_result &&
+	    !product_rofs_transaction_orphan_result)
+		product_rofs_transaction_restrictions_result =
+			product_rofs_transaction_preserves_mount_restrictions();
+	report_child_result(mount_ro_policy_committed ?
+			    (product_rofs_apply_result ?
+			     product_rofs_apply_result :
+			     ((product_rofs_transaction_result ||
+			       product_rofs_transaction_orphan_result) ? KSFT_SKIP :
+			      product_rofs_transaction_restrictions_result)) : 2,
+			    "ROFS transaction preserves mount restrictions");
 	if (mount_ro_policy_committed && !product_rofs_apply_result &&
 	    !product_rofs_transaction_result)
 		product_rofs_broker_missing_config_result =
@@ -32083,7 +32127,7 @@ int main(int argc, char **argv)
 	if (access(HDN_STATUS, R_OK))
 		ksft_exit_skip("hardening securityfs status not present\n");
 
-	ksft_set_plan(1117);
+	ksft_set_plan(1118);
 	report_child_result(prompt_session_unprivileged_authorized_denied(),
 			    "prompt session rejects unprivileged authorized bypass");
 	test_securityfs_status();
