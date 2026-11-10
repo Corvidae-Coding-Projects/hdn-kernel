@@ -29,6 +29,22 @@
 #include "rtmutex_common.h"
 #include "lock_events.h"
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+struct rt_mutex_waiter *hdn_rt_mutex_waiter_acquire(void)
+{
+	BUG_ON(current->hdn_lock_waiter_active != HDN_LOCK_WAITER_NONE);
+	current->hdn_lock_waiter_active = HDN_LOCK_WAITER_RT_MUTEX;
+	return &current->hdn_lock_waiter.rt_mutex;
+}
+
+void hdn_rt_mutex_waiter_release(struct rt_mutex_waiter *waiter)
+{
+	BUG_ON(current->hdn_lock_waiter_active != HDN_LOCK_WAITER_RT_MUTEX);
+	BUG_ON(waiter != &current->hdn_lock_waiter.rt_mutex);
+	current->hdn_lock_waiter_active = HDN_LOCK_WAITER_NONE;
+}
+#endif
+
 #ifndef WW_RT
 # define build_ww_mutex()	(false)
 # define ww_container_of(rtm)	NULL
@@ -1754,16 +1770,24 @@ static inline int __rt_mutex_slowlock_locked(struct rt_mutex_base *lock,
 					     unsigned int state,
 					     struct wake_q_head *wake_q)
 {
-	struct rt_mutex_waiter waiter;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct rt_mutex_waiter *waiter = hdn_rt_mutex_waiter_acquire();
+#else
+	struct rt_mutex_waiter stack_waiter;
+	struct rt_mutex_waiter *waiter = &stack_waiter;
+#endif
 	int ret;
 
-	rt_mutex_init_waiter(&waiter);
-	waiter.ww_ctx = ww_ctx;
+	rt_mutex_init_waiter(waiter);
+	waiter->ww_ctx = ww_ctx;
 
 	ret = __rt_mutex_slowlock(lock, ww_ctx, state, RT_MUTEX_MIN_CHAINWALK,
-				  &waiter, wake_q);
+				  waiter, wake_q);
 
-	debug_rt_mutex_free_waiter(&waiter);
+	debug_rt_mutex_free_waiter(waiter);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_rt_mutex_waiter_release(waiter);
+#endif
 	lockevent_cond_inc(rtmutex_slow_wake, !wake_q_empty(wake_q));
 	return ret;
 }
@@ -1833,7 +1857,12 @@ static void __sched rtlock_slowlock_locked(struct rt_mutex_base *lock,
 					   struct wake_q_head *wake_q)
 	__releases(&lock->wait_lock) __acquires(&lock->wait_lock)
 {
-	struct rt_mutex_waiter waiter;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct rt_mutex_waiter *waiter;
+#else
+	struct rt_mutex_waiter stack_waiter;
+	struct rt_mutex_waiter *waiter = &stack_waiter;
+#endif
 	struct task_struct *owner;
 
 	lockdep_assert_held(&lock->wait_lock);
@@ -1844,29 +1873,32 @@ static void __sched rtlock_slowlock_locked(struct rt_mutex_base *lock,
 		return;
 	}
 
-	rt_mutex_init_rtlock_waiter(&waiter);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	waiter = hdn_rt_mutex_waiter_acquire();
+#endif
+	rt_mutex_init_rtlock_waiter(waiter);
 
 	/* Save current state and set state to TASK_RTLOCK_WAIT */
 	current_save_and_set_rtlock_wait_state();
 
 	trace_contention_begin(lock, LCB_F_RT);
 
-	task_blocks_on_rt_mutex(lock, &waiter, current, NULL, RT_MUTEX_MIN_CHAINWALK, wake_q);
+	task_blocks_on_rt_mutex(lock, waiter, current, NULL, RT_MUTEX_MIN_CHAINWALK, wake_q);
 
 	for (;;) {
 		/* Try to acquire the lock again */
-		if (try_to_take_rt_mutex(lock, current, &waiter)) {
+		if (try_to_take_rt_mutex(lock, current, waiter)) {
 			lockevent_inc(rtlock_slow_acq2);
 			break;
 		}
 
-		if (&waiter == rt_mutex_top_waiter(lock))
+		if (waiter == rt_mutex_top_waiter(lock))
 			owner = rt_mutex_owner(lock);
 		else
 			owner = NULL;
 		raw_spin_unlock_irq_wake(&lock->wait_lock, wake_q);
 
-		if (!owner || !rtmutex_spin_on_owner(lock, &waiter, owner)) {
+		if (!owner || !rtmutex_spin_on_owner(lock, waiter, owner)) {
 			lockevent_inc(rtlock_slow_sleep);
 			schedule_rtlock();
 		}
@@ -1883,7 +1915,10 @@ static void __sched rtlock_slowlock_locked(struct rt_mutex_base *lock,
 	 * We might have to fix that up:
 	 */
 	fixup_rt_mutex_waiters(lock, true);
-	debug_rt_mutex_free_waiter(&waiter);
+	debug_rt_mutex_free_waiter(waiter);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_rt_mutex_waiter_release(waiter);
+#endif
 
 	trace_contention_end(lock, 0);
 	lockevent_cond_inc(rtlock_slow_wake, !wake_q_empty(wake_q));

@@ -7,6 +7,8 @@
 #include <linux/sched/task_stack.h>
 #include <linux/uaccess.h>
 
+#include "private_stack_test.h"
+
 struct hdn_private_stack_sleeper {
 	struct completion ready;
 	struct completion release;

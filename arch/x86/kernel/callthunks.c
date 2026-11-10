@@ -80,7 +80,9 @@ extern u8 skl_call_thunk_tail[];
 	((unsigned int)(skl_call_thunk_tail - skl_call_thunk_template))
 
 extern void error_entry(void);
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 extern void xen_error_entry(void);
+#endif
 extern void paranoid_entry(void);
 
 static inline bool within_coretext(const struct core_text *ct, void *addr)
@@ -120,8 +122,11 @@ static bool skip_addr(void *dest)
 		return true;
 	if (dest == paranoid_entry)
 		return true;
+
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 	if (dest == xen_error_entry)
 		return true;
+#endif
 	/* Does FILL_RSB... */
 	if (dest == __switch_to_asm)
 		return true;

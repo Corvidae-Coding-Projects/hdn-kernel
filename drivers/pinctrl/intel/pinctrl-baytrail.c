@@ -27,6 +27,8 @@
 #include <linux/pinctrl/pinconf.h>
 #include <linux/pinctrl/pinconf-generic.h>
 
+#define intel_pad_context byt_intel_pad_context
+#define intel_community_context byt_intel_community_context
 #include "pinctrl-intel.h"
 
 /* memory mapped register offsets */
@@ -100,6 +102,11 @@ struct intel_pad_context {
 	u32 conf0;
 	u32 val;
 };
+
+static struct intel_pad_context *byt_pad_context(struct intel_pinctrl *vg)
+{
+	return vg->context.pads;
+}
 
 #define BYT_COMMUNITY(p, n, g, map)	\
 	{				\
@@ -1525,7 +1532,8 @@ static int byt_gpio_probe(struct intel_pinctrl *vg)
 	gc->ngpio	= vg->soc->npins;
 
 #ifdef CONFIG_PM_SLEEP
-	vg->context.pads = devm_kcalloc(vg->dev, gc->ngpio, sizeof(*vg->context.pads),
+	vg->context.pads = devm_kcalloc(vg->dev, gc->ngpio,
+				       sizeof(struct intel_pad_context),
 					GFP_KERNEL);
 	if (!vg->context.pads)
 		return -ENOMEM;
@@ -1645,7 +1653,7 @@ static int byt_gpio_suspend(struct device *dev)
 			continue;
 		}
 		value = readl(reg) & BYT_CONF0_RESTORE_MASK;
-		vg->context.pads[i].conf0 = value;
+		byt_pad_context(vg)[i].conf0 = value;
 
 		reg = byt_gpio_reg(vg, pin, BYT_VAL_REG);
 		if (!reg) {
@@ -1653,7 +1661,7 @@ static int byt_gpio_suspend(struct device *dev)
 			continue;
 		}
 		value = readl(reg) & BYT_VAL_RESTORE_MASK;
-		vg->context.pads[i].val = value;
+		byt_pad_context(vg)[i].val = value;
 	}
 
 	return 0;
@@ -1678,9 +1686,9 @@ static int byt_gpio_resume(struct device *dev)
 		}
 		value = readl(reg);
 		if ((value & BYT_CONF0_RESTORE_MASK) !=
-		     vg->context.pads[i].conf0) {
+		     byt_pad_context(vg)[i].conf0) {
 			value &= ~BYT_CONF0_RESTORE_MASK;
-			value |= vg->context.pads[i].conf0;
+			value |= byt_pad_context(vg)[i].conf0;
 			writel(value, reg);
 			dev_info(dev, "restored pin %d CONF0 %#08x", i, value);
 		}
@@ -1692,11 +1700,11 @@ static int byt_gpio_resume(struct device *dev)
 		}
 		value = readl(reg);
 		if ((value & BYT_VAL_RESTORE_MASK) !=
-		     vg->context.pads[i].val) {
+		     byt_pad_context(vg)[i].val) {
 			u32 v;
 
 			v = value & ~BYT_VAL_RESTORE_MASK;
-			v |= vg->context.pads[i].val;
+			v |= byt_pad_context(vg)[i].val;
 			if (v != value) {
 				writel(v, reg);
 				dev_dbg(dev, "restored pin %d VAL %#08x\n", i, v);

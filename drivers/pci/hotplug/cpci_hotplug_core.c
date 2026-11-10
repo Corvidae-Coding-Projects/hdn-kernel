@@ -70,7 +70,7 @@ static const struct hotplug_slot_ops cpci_hotplug_slot_ops = {
 static int
 enable_slot(struct hotplug_slot *hotplug_slot)
 {
-	struct slot *slot = to_slot(hotplug_slot);
+	struct cpci_slot *slot = to_slot(hotplug_slot);
 
 	dbg("%s - physical_slot = %s", __func__, slot_name(slot));
 
@@ -80,7 +80,7 @@ enable_slot(struct hotplug_slot *hotplug_slot)
 static int
 disable_slot(struct hotplug_slot *hotplug_slot)
 {
-	struct slot *slot = to_slot(hotplug_slot);
+	struct cpci_slot *slot = to_slot(hotplug_slot);
 	int retval = 0;
 
 	dbg("%s - physical_slot = %s", __func__, slot_name(slot));
@@ -118,7 +118,7 @@ disable_error:
 }
 
 static u8
-cpci_get_power_status(struct slot *slot)
+cpci_get_power_status(struct cpci_slot *slot)
 {
 	return 1;
 }
@@ -126,7 +126,7 @@ cpci_get_power_status(struct slot *slot)
 static int
 get_power_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct slot *slot = to_slot(hotplug_slot);
+	struct cpci_slot *slot = to_slot(hotplug_slot);
 
 	*value = cpci_get_power_status(slot);
 	return 0;
@@ -135,7 +135,7 @@ get_power_status(struct hotplug_slot *hotplug_slot, u8 *value)
 static int
 get_attention_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct slot *slot = to_slot(hotplug_slot);
+	struct cpci_slot *slot = to_slot(hotplug_slot);
 
 	*value = cpci_get_attention_status(slot);
 	return 0;
@@ -150,7 +150,7 @@ set_attention_status(struct hotplug_slot *hotplug_slot, u8 status)
 static int
 get_adapter_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct slot *slot = to_slot(hotplug_slot);
+	struct cpci_slot *slot = to_slot(hotplug_slot);
 
 	*value = slot->adapter_status;
 	return 0;
@@ -159,13 +159,13 @@ get_adapter_status(struct hotplug_slot *hotplug_slot, u8 *value)
 static int
 get_latch_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct slot *slot = to_slot(hotplug_slot);
+	struct cpci_slot *slot = to_slot(hotplug_slot);
 
 	*value = slot->latch_status;
 	return 0;
 }
 
-static void release_slot(struct slot *slot)
+static void release_slot(struct cpci_slot *slot)
 {
 	pci_dev_put(slot->dev);
 	kfree(slot);
@@ -176,7 +176,7 @@ static void release_slot(struct slot *slot)
 int
 cpci_hp_register_bus(struct pci_bus *bus, u8 first, u8 last)
 {
-	struct slot *slot;
+	struct cpci_slot *slot;
 	char name[SLOT_NAME_SIZE];
 	int status;
 	int i;
@@ -189,7 +189,7 @@ cpci_hp_register_bus(struct pci_bus *bus, u8 first, u8 last)
 	 * with the pci_hotplug subsystem.
 	 */
 	for (i = first; i <= last; ++i) {
-		slot = kzalloc_obj(struct slot);
+		slot = kzalloc_obj(struct cpci_slot);
 		if (!slot) {
 			status = -ENOMEM;
 			goto error;
@@ -228,8 +228,8 @@ EXPORT_SYMBOL_GPL(cpci_hp_register_bus);
 int
 cpci_hp_unregister_bus(struct pci_bus *bus)
 {
-	struct slot *slot;
-	struct slot *tmp;
+	struct cpci_slot *slot;
+	struct cpci_slot *tmp;
 	int status = 0;
 
 	down_write(&list_rwsem);
@@ -281,7 +281,7 @@ cpci_hp_intr(int irq, void *data)
 static int
 init_slots(int clear_ins)
 {
-	struct slot *slot;
+	struct cpci_slot *slot;
 	struct pci_dev *dev;
 
 	dbg("%s - enter", __func__);
@@ -310,7 +310,7 @@ init_slots(int clear_ins)
 static int
 check_slots(void)
 {
-	struct slot *slot;
+	struct cpci_slot *slot;
 	int extracted;
 	int inserted;
 	u16 hs_csr;
@@ -533,8 +533,8 @@ EXPORT_SYMBOL_GPL(cpci_hp_register_controller);
 static void
 cleanup_slots(void)
 {
-	struct slot *slot;
-	struct slot *tmp;
+	struct cpci_slot *slot;
+	struct cpci_slot *tmp;
 
 	/*
 	 * Unregister all of our slots with the pci_hotplug subsystem,

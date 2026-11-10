@@ -45,6 +45,7 @@ void hdn_execmem_unmapped(struct vm_struct *vm);
 int hdn_execmem_mapping(unsigned long address, unsigned long pfn,
 			unsigned long nr, pgprot_t prot, bool new_alias);
 int hdn_execmem_leaf(unsigned long pfn, unsigned long nr, unsigned long flags);
+bool hdn_execmem_retiring_pte(unsigned long address, unsigned long pfn);
 bool hdn_execmem_snapshot_page(void *destination, struct page *page, bool *zeros_only);
 int hdn_execmem_seal_begin(unsigned long address, int nr);
 void hdn_execmem_seal_end(unsigned long address, int error);
@@ -76,6 +77,8 @@ static inline int hdn_execmem_mapping(unsigned long address, unsigned long pfn,
 		unsigned long nr, pgprot_t prot, bool new_alias) { return 0; }
 static inline int hdn_execmem_leaf(unsigned long pfn, unsigned long nr,
 		unsigned long flags) { return 0; }
+static inline bool hdn_execmem_retiring_pte(unsigned long address,
+		unsigned long pfn) { return false; }
 static inline bool hdn_execmem_snapshot_page(void *destination, struct page *page,
 		bool *zeros_only) { return false; }
 static inline int hdn_execmem_seal_begin(unsigned long address, int nr) { return 0; }

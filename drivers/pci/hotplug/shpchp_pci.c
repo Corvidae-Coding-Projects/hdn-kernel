@@ -20,10 +20,10 @@
 #include "../pci.h"
 #include "shpchp.h"
 
-int shpchp_configure_device(struct slot *p_slot)
+int shpchp_configure_device(struct shpchp_slot *p_slot)
 {
 	struct pci_dev *dev;
-	struct controller *ctrl = p_slot->ctrl;
+	struct shpchp_controller *ctrl = p_slot->ctrl;
 	struct pci_dev *bridge = ctrl->pci_dev;
 	struct pci_bus *parent = bridge->subordinate;
 	int num, ret = 0;
@@ -61,11 +61,11 @@ int shpchp_configure_device(struct slot *p_slot)
 	return ret;
 }
 
-void shpchp_unconfigure_device(struct slot *p_slot)
+void shpchp_unconfigure_device(struct shpchp_slot *p_slot)
 {
 	struct pci_bus *parent = p_slot->ctrl->pci_dev->subordinate;
 	struct pci_dev *dev, *temp;
-	struct controller *ctrl = p_slot->ctrl;
+	struct shpchp_controller *ctrl = p_slot->ctrl;
 
 	ctrl_dbg(ctrl, "%s: domain:bus:dev = %04x:%02x:%02x\n",
 		 __func__, pci_domain_nr(parent), p_slot->bus, p_slot->device);

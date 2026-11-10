@@ -34,6 +34,9 @@ __ADDRESSABLE(copy_page);
 __ADDRESSABLE(rdmsr_safe_regs);
 __ADDRESSABLE(wrmsr_safe_regs);
 __ADDRESSABLE(asm_load_gs_index);
+__ADDRESSABLE(native_save_fl);
+extern unsigned long sev_verify_cbit(unsigned long cr3);
+__ADDRESSABLE(sev_verify_cbit);
 #ifdef CONFIG_INTEL_TDX_HOST
 __ADDRESSABLE(__seamcall);
 __ADDRESSABLE(__seamcall_ret);

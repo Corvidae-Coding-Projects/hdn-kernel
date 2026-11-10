@@ -17,46 +17,11 @@
 #include <linux/rtmutex.h>
 #include <linux/sched/wake_q.h>
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+struct rt_mutex_waiter *hdn_rt_mutex_waiter_acquire(void);
+void hdn_rt_mutex_waiter_release(struct rt_mutex_waiter *waiter);
+#endif
 
-/*
- * This is a helper for the struct rt_mutex_waiter below. A waiter goes in two
- * separate trees and they need their own copy of the sort keys because of
- * different locking requirements.
- *
- * @entry:		rbtree node to enqueue into the waiters tree
- * @prio:		Priority of the waiter
- * @deadline:		Deadline of the waiter if applicable
- *
- * See rt_waiter_node_less() and waiter_*_prio().
- */
-struct rt_waiter_node {
-	struct rb_node	entry;
-	int		prio;
-	u64		deadline;
-};
-
-/*
- * This is the control structure for tasks blocked on a rt_mutex,
- * which is allocated on the kernel stack on of the blocked task.
- *
- * @tree:		node to enqueue into the mutex waiters tree
- * @pi_tree:		node to enqueue into the mutex owner waiters tree
- * @task:		task reference to the blocked task
- * @lock:		Pointer to the rt_mutex on which the waiter blocks
- * @wake_state:		Wakeup state to use (TASK_NORMAL or TASK_RTLOCK_WAIT)
- * @ww_ctx:		WW context pointer
- *
- * @tree is ordered by @lock->wait_lock
- * @pi_tree is ordered by rt_mutex_owner(@lock)->pi_lock
- */
-struct rt_mutex_waiter {
-	struct rt_waiter_node	tree;
-	struct rt_waiter_node	pi_tree;
-	struct task_struct	*task;
-	struct rt_mutex_base	*lock;
-	unsigned int		wake_state;
-	struct ww_acquire_ctx	*ww_ctx;
-};
 
 /**
  * struct rt_wake_q_head - Wrapper around regular wake_q_head to support

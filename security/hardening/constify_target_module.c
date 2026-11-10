@@ -4,6 +4,8 @@
 #include <linux/init.h>
 #include <linux/module.h>
 
+#include "constify_test.h"
+
 #define HDN_CONSTIFY_MODULE_MAGIC 0xc0571f1ed5ea1edULL
 
 static u64 hdn_constify_module_value __ro_after_init;
@@ -19,7 +21,13 @@ static int __init hdn_constify_target_init(void)
 	hdn_constify_module_value = HDN_CONSTIFY_MODULE_MAGIC;
 	return 0;
 }
+
+static void __exit hdn_constify_target_exit(void)
+{
+}
+
 module_init(hdn_constify_target_init);
+module_exit(hdn_constify_target_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("HDN post-init immutable module target");

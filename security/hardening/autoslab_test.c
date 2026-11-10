@@ -147,9 +147,15 @@ static void bulk_rcu_and_shrink(struct kunit *test)
 {
 	struct kmem_cache *first, *second;
 	struct autoslab_rcu_object *delayed;
-	DECLARE_COMPLETION_ONSTACK(done);
-	void *objects[256];
+	struct completion *done;
+	void **objects;
 	unsigned int count;
+
+	objects = kunit_kcalloc(test, 256, sizeof(*objects), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, objects);
+	done = kunit_kzalloc(test, sizeof(*done), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, done);
+	init_completion(done);
 
 	first = kmem_cache_create("hdn-autoslab-bulk-a",
 				  sizeof(struct autoslab_rcu_object), 0,
@@ -171,8 +177,8 @@ static void bulk_rcu_and_shrink(struct kunit *test)
 	KUNIT_ASSERT_PTR_NE(test, first, second);
 
 	count = kmem_cache_alloc_bulk(first, GFP_KERNEL_ACCOUNT,
-				      ARRAY_SIZE(objects), objects);
-	if (count != ARRAY_SIZE(objects)) {
+				      256, objects);
+	if (count != 256) {
 		kmem_cache_free_bulk(first, count, objects);
 		kmem_cache_destroy(first);
 		kmem_cache_destroy(second);
@@ -185,12 +191,12 @@ static void bulk_rcu_and_shrink(struct kunit *test)
 				(unsigned int)HDN_ALLOC_JITTER_META);
 	}
 	delayed = objects[--count];
-	delayed->done = &done;
+	delayed->done = done;
 	delayed->cache = first;
 	delayed->payload = HDN_TEST_ID_A;
 	call_rcu(&delayed->rcu, autoslab_rcu_free);
 	kmem_cache_free_bulk(first, count, objects);
-	wait_for_completion(&done);
+	wait_for_completion(done);
 	rcu_barrier();
 	KUNIT_EXPECT_EQ(test, kmem_cache_shrink(first), 0);
 	KUNIT_EXPECT_EQ(test, kmem_cache_shrink(second), 0);

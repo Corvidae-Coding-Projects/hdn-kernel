@@ -238,11 +238,21 @@ EXPORT_SYMBOL(up);
 
 /* Functions for the contended case */
 
-struct semaphore_waiter {
-	struct list_head list;
-	struct task_struct *task;
-	bool up;
-};
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+static struct semaphore_waiter *hdn_semaphore_waiter_acquire(void)
+{
+	BUG_ON(current->hdn_lock_waiter_active != HDN_LOCK_WAITER_NONE);
+	current->hdn_lock_waiter_active = HDN_LOCK_WAITER_SEMAPHORE;
+	return &current->hdn_lock_waiter.semaphore;
+}
+
+static void hdn_semaphore_waiter_release(struct semaphore_waiter *waiter)
+{
+	BUG_ON(current->hdn_lock_waiter_active != HDN_LOCK_WAITER_SEMAPHORE);
+	BUG_ON(waiter != &current->hdn_lock_waiter.semaphore);
+	current->hdn_lock_waiter_active = HDN_LOCK_WAITER_NONE;
+}
+#endif
 
 /*
  * Because this function is inlined, the 'state' parameter will be
@@ -252,11 +262,16 @@ struct semaphore_waiter {
 static inline int __sched ___down_common(struct semaphore *sem, long state,
 								long timeout)
 {
-	struct semaphore_waiter waiter;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct semaphore_waiter *waiter = hdn_semaphore_waiter_acquire();
+#else
+	struct semaphore_waiter stack_waiter;
+	struct semaphore_waiter *waiter = &stack_waiter;
+#endif
 
-	list_add_tail(&waiter.list, &sem->wait_list);
-	waiter.task = current;
-	waiter.up = false;
+	list_add_tail(&waiter->list, &sem->wait_list);
+	waiter->task = current;
+	waiter->up = false;
 
 	for (;;) {
 		if (signal_pending_state(state, current))
@@ -267,18 +282,27 @@ static inline int __sched ___down_common(struct semaphore *sem, long state,
 		raw_spin_unlock_irq(&sem->lock);
 		timeout = schedule_timeout(timeout);
 		raw_spin_lock_irq(&sem->lock);
-		if (waiter.up) {
+		if (waiter->up) {
 			hung_task_sem_set_holder(sem);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+			hdn_semaphore_waiter_release(waiter);
+#endif
 			return 0;
 		}
 	}
 
  timed_out:
-	list_del(&waiter.list);
+	list_del(&waiter->list);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_semaphore_waiter_release(waiter);
+#endif
 	return -ETIME;
 
  interrupted:
-	list_del(&waiter.list);
+	list_del(&waiter->list);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_semaphore_waiter_release(waiter);
+#endif
 	return -EINTR;
 }
 

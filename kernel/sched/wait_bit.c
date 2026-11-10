@@ -12,6 +12,40 @@
 
 static wait_queue_head_t bit_wait_table[WAIT_TABLE_SIZE] __cacheline_aligned;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+struct wait_bit_queue_entry *hdn_wait_bit_acquire(void)
+{
+	if (unlikely(current->hdn_wait_bit_active))
+		BUG();
+	current->hdn_wait_bit_active = true;
+	return &current->hdn_wait_bit;
+}
+
+void hdn_wait_bit_release(struct wait_bit_queue_entry *wait)
+{
+	if (unlikely(wait != &current->hdn_wait_bit ||
+		     !current->hdn_wait_bit_active ||
+		     !list_empty(&wait->wq_entry.entry)))
+		BUG();
+	current->hdn_wait_bit_active = false;
+}
+EXPORT_SYMBOL_GPL(hdn_wait_bit_acquire);
+EXPORT_SYMBOL_GPL(hdn_wait_bit_release);
+
+static void init_wait_bit_entry(struct wait_bit_queue_entry *wait,
+		unsigned long *word, int bit)
+{
+	*wait = (struct wait_bit_queue_entry) {
+		.key = __WAIT_BIT_KEY_INITIALIZER(word, bit),
+		.wq_entry = {
+			.private = current,
+			.func = wake_bit_function,
+			.entry = LIST_HEAD_INIT(wait->wq_entry.entry),
+		},
+	};
+}
+#endif
+
 wait_queue_head_t *bit_waitqueue(unsigned long *word, int bit)
 {
 	const int shift = BITS_PER_LONG == 32 ? 5 : 6;
@@ -62,9 +96,19 @@ int __sched out_of_line_wait_on_bit(unsigned long *word, int bit,
 				    wait_bit_action_f *action, unsigned mode)
 {
 	struct wait_queue_head *wq_head = bit_waitqueue(word, bit);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct wait_bit_queue_entry *wq_entry = hdn_wait_bit_acquire();
+	int ret;
+
+	init_wait_bit_entry(wq_entry, word, bit);
+	ret = __wait_on_bit(wq_head, wq_entry, action, mode);
+	hdn_wait_bit_release(wq_entry);
+	return ret;
+#else
 	DEFINE_WAIT_BIT(wq_entry, word, bit);
 
 	return __wait_on_bit(wq_head, &wq_entry, action, mode);
+#endif
 }
 EXPORT_SYMBOL(out_of_line_wait_on_bit);
 
@@ -73,11 +117,22 @@ int __sched out_of_line_wait_on_bit_timeout(
 	unsigned mode, unsigned long timeout)
 {
 	struct wait_queue_head *wq_head = bit_waitqueue(word, bit);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct wait_bit_queue_entry *wq_entry = hdn_wait_bit_acquire();
+	int ret;
+
+	init_wait_bit_entry(wq_entry, word, bit);
+	wq_entry->key.timeout = jiffies + timeout;
+	ret = __wait_on_bit(wq_head, wq_entry, action, mode);
+	hdn_wait_bit_release(wq_entry);
+	return ret;
+#else
 	DEFINE_WAIT_BIT(wq_entry, word, bit);
 
 	wq_entry.key.timeout = jiffies + timeout;
 
 	return __wait_on_bit(wq_head, &wq_entry, action, mode);
+#endif
 }
 EXPORT_SYMBOL_GPL(out_of_line_wait_on_bit_timeout);
 
@@ -115,9 +170,19 @@ int __sched out_of_line_wait_on_bit_lock(unsigned long *word, int bit,
 					 wait_bit_action_f *action, unsigned mode)
 {
 	struct wait_queue_head *wq_head = bit_waitqueue(word, bit);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct wait_bit_queue_entry *wq_entry = hdn_wait_bit_acquire();
+	int ret;
+
+	init_wait_bit_entry(wq_entry, word, bit);
+	ret = __wait_on_bit_lock(wq_head, wq_entry, action, mode);
+	hdn_wait_bit_release(wq_entry);
+	return ret;
+#else
 	DEFINE_WAIT_BIT(wq_entry, word, bit);
 
 	return __wait_on_bit_lock(wq_head, &wq_entry, action, mode);
+#endif
 }
 EXPORT_SYMBOL(out_of_line_wait_on_bit_lock);
 

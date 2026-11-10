@@ -44,7 +44,7 @@ extern bool shpchp_debug;
 
 
 #define SLOT_NAME_SIZE 10
-struct slot {
+struct shpchp_slot {
 	u8 bus;
 	u8 device;
 	u16 status;
@@ -55,7 +55,7 @@ struct slot {
 	u8 presence_save;
 	u8 latch_save;
 	u8 pwr_save;
-	struct controller *ctrl;
+	struct shpchp_controller *ctrl;
 	struct hotplug_slot hotplug_slot;
 	struct list_head	slot_list;
 	struct delayed_work work;	/* work for button event */
@@ -66,11 +66,11 @@ struct slot {
 
 struct event_info {
 	u32 event_type;
-	struct slot *p_slot;
+	struct shpchp_slot *p_slot;
 	struct work_struct work;
 };
 
-struct controller {
+struct shpchp_controller {
 	struct mutex crit_sect;		/* critical section mutex */
 	struct mutex cmd_lock;		/* command lock */
 	int num_slots;			/* Number of slots on ctlr */
@@ -137,21 +137,21 @@ struct controller {
 #define WRONG_BUS_FREQUENCY		0x0000000D
 #define POWER_FAILURE			0x0000000E
 
-int __must_check shpchp_create_ctrl_files(struct controller *ctrl);
-void shpchp_remove_ctrl_files(struct controller *ctrl);
-int shpchp_sysfs_enable_slot(struct slot *slot);
-int shpchp_sysfs_disable_slot(struct slot *slot);
-u8 shpchp_handle_attention_button(u8 hp_slot, struct controller *ctrl);
-u8 shpchp_handle_switch_change(u8 hp_slot, struct controller *ctrl);
-u8 shpchp_handle_presence_change(u8 hp_slot, struct controller *ctrl);
-u8 shpchp_handle_power_fault(u8 hp_slot, struct controller *ctrl);
-int shpchp_configure_device(struct slot *p_slot);
-void shpchp_unconfigure_device(struct slot *p_slot);
-void cleanup_slots(struct controller *ctrl);
+int __must_check shpchp_create_ctrl_files(struct shpchp_controller *ctrl);
+void shpchp_remove_ctrl_files(struct shpchp_controller *ctrl);
+int shpchp_sysfs_enable_slot(struct shpchp_slot *slot);
+int shpchp_sysfs_disable_slot(struct shpchp_slot *slot);
+u8 shpchp_handle_attention_button(u8 hp_slot, struct shpchp_controller *ctrl);
+u8 shpchp_handle_switch_change(u8 hp_slot, struct shpchp_controller *ctrl);
+u8 shpchp_handle_presence_change(u8 hp_slot, struct shpchp_controller *ctrl);
+u8 shpchp_handle_power_fault(u8 hp_slot, struct shpchp_controller *ctrl);
+int shpchp_configure_device(struct shpchp_slot *p_slot);
+void shpchp_unconfigure_device(struct shpchp_slot *p_slot);
+void cleanup_slots(struct shpchp_controller *ctrl);
 void shpchp_queue_pushbutton_work(struct work_struct *work);
-int shpc_init(struct controller *ctrl, struct pci_dev *pdev);
+int shpc_init(struct shpchp_controller *ctrl, struct pci_dev *pdev);
 
-static inline const char *slot_name(struct slot *slot)
+static inline const char *slot_name(struct shpchp_slot *slot)
 {
 	return hotplug_slot_name(&slot->hotplug_slot);
 }
@@ -189,14 +189,14 @@ enum ctrl_offsets {
 	SLOT1		 = offsetof(struct ctrl_reg, slot1),
 };
 
-static inline struct slot *get_slot(struct hotplug_slot *hotplug_slot)
+static inline struct shpchp_slot *get_slot(struct hotplug_slot *hotplug_slot)
 {
-	return container_of(hotplug_slot, struct slot, hotplug_slot);
+	return container_of(hotplug_slot, struct shpchp_slot, hotplug_slot);
 }
 
-static inline struct slot *shpchp_find_slot(struct controller *ctrl, u8 device)
+static inline struct shpchp_slot *shpchp_find_slot(struct shpchp_controller *ctrl, u8 device)
 {
-	struct slot *slot;
+	struct shpchp_slot *slot;
 
 	list_for_each_entry(slot, &ctrl->slot_list, slot_list) {
 		if (slot->device == device)
@@ -207,7 +207,7 @@ static inline struct slot *shpchp_find_slot(struct controller *ctrl, u8 device)
 	return NULL;
 }
 
-static inline void amd_pogo_errata_save_misc_reg(struct slot *p_slot)
+static inline void amd_pogo_errata_save_misc_reg(struct shpchp_slot *p_slot)
 {
 	u32 pcix_misc2_temp;
 
@@ -225,7 +225,7 @@ static inline void amd_pogo_errata_save_misc_reg(struct slot *p_slot)
 	pci_write_config_dword(p_slot->ctrl->pci_dev, PCIX_MISCII_OFFSET, pcix_misc2_temp);
 }
 
-static inline void amd_pogo_errata_restore_misc_reg(struct slot *p_slot)
+static inline void amd_pogo_errata_restore_misc_reg(struct shpchp_slot *p_slot)
 {
 	u32 pcix_misc2_temp;
 	u32 pcix_bridge_errors_reg;
@@ -282,22 +282,22 @@ static inline void amd_pogo_errata_restore_misc_reg(struct slot *p_slot)
 	pci_write_config_dword(p_slot->ctrl->pci_dev, PCIX_MISCII_OFFSET, pcix_misc2_temp);
 }
 
-int shpchp_power_on_slot(struct slot *slot);
-int shpchp_slot_enable(struct slot *slot);
-int shpchp_slot_disable(struct slot *slot);
-int shpchp_set_bus_speed_mode(struct slot *slot, enum pci_bus_speed speed);
-int shpchp_get_power_status(struct slot *slot, u8 *status);
-int shpchp_get_attention_status(struct slot *slot, u8 *status);
-int shpchp_set_attention_status(struct slot *slot, u8 status);
-int shpchp_get_latch_status(struct slot *slot, u8 *status);
-int shpchp_get_adapter_status(struct slot *slot, u8 *status);
-int shpchp_get_adapter_speed(struct slot *slot, enum pci_bus_speed *speed);
-int shpchp_get_prog_int(struct slot *slot, u8 *prog_int);
-int shpchp_query_power_fault(struct slot *slot);
-void shpchp_green_led_on(struct slot *slot);
-void shpchp_green_led_off(struct slot *slot);
-void shpchp_green_led_blink(struct slot *slot);
-void shpchp_release_ctlr(struct controller *ctrl);
-int shpchp_check_cmd_status(struct controller *ctrl);
+int shpchp_power_on_slot(struct shpchp_slot *slot);
+int shpchp_slot_enable(struct shpchp_slot *slot);
+int shpchp_slot_disable(struct shpchp_slot *slot);
+int shpchp_set_bus_speed_mode(struct shpchp_slot *slot, enum pci_bus_speed speed);
+int shpchp_get_power_status(struct shpchp_slot *slot, u8 *status);
+int shpchp_get_attention_status(struct shpchp_slot *slot, u8 *status);
+int shpchp_set_attention_status(struct shpchp_slot *slot, u8 status);
+int shpchp_get_latch_status(struct shpchp_slot *slot, u8 *status);
+int shpchp_get_adapter_status(struct shpchp_slot *slot, u8 *status);
+int shpchp_get_adapter_speed(struct shpchp_slot *slot, enum pci_bus_speed *speed);
+int shpchp_get_prog_int(struct shpchp_slot *slot, u8 *prog_int);
+int shpchp_query_power_fault(struct shpchp_slot *slot);
+void shpchp_green_led_on(struct shpchp_slot *slot);
+void shpchp_green_led_off(struct shpchp_slot *slot);
+void shpchp_green_led_blink(struct shpchp_slot *slot);
+void shpchp_release_ctlr(struct shpchp_controller *ctrl);
+int shpchp_check_cmd_status(struct shpchp_controller *ctrl);
 
 #endif				/* _SHPCHP_H */

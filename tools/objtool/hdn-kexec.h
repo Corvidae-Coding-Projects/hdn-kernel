@@ -150,7 +150,7 @@ static int verify_rap_kexec(struct objtool_file *file, struct symbol *func)
 	} else if (!strcmp(func->name, "identity_mapped")) {
 		K_BYTES("\x6a\0\x52");
 		K_REF("\x48\x8d\x05", "kexec_debug_gdt", true);
-		K_BYTES("\x50\x66\xff\x30\x0f\x01\x14\x24\x48\x83\xc4\x0a\x48\x8c\xd8\x8e\xd8");
+		K_BYTES("\x50\x66\xff\x30\x0f\x01\x14\x24\x48\x83\xc4\x0a\x8c\xd8\x8e\xd8");
 		K_REF("\x48\x8d\x35", "kexec_debug_idt", true);
 		K_BYTES("\x56\x66\x68\xff\0\x0f\x01\x1c\x24\x48\x83\xc4\x0a"
 			"\x0f\x20\xe0\x48\x25\xff\xff\x7f\xff\x0f\x22\xe0"
@@ -343,9 +343,16 @@ static int verify_rap_kexec(struct objtool_file *file, struct symbol *func)
 		struct symbol *start = find_symbol_by_name(file->elf, "__relocate_kernel_start");
 		struct symbol *end = find_symbol_by_name(file->elf, "__relocate_kernel_end");
 
-		if (!start || !end || start->sec != func->sec || end->sec != func->sec ||
-		    start->offset > func->offset || end->offset < func->offset + func->len ||
-		    end->offset < start->offset || end->offset - start->offset > 2048)
+		if (strcmp(func->sec->name, ".text..relocate_kernel") ||
+		    sec_size(func->sec) > 2048 || func->offset > sec_size(func->sec) ||
+		    func->len > sec_size(func->sec) - func->offset || !start || !end ||
+		    is_weak_sym(start) || is_weak_sym(end) ||
+		    (is_undef_sym(start) != is_undef_sym(end)))
+			goto bad;
+		if (!is_undef_sym(start) &&
+		    (start->sec != func->sec || end->sec != func->sec ||
+		     start->offset > func->offset || end->offset < func->offset + func->len ||
+		     end->offset < start->offset || end->offset - start->offset > 2048))
 			goto bad;
 	} else if (terminal && strcmp(func->sec->name, ".text..relocate_kernel")) {
 		goto bad;

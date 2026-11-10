@@ -58,7 +58,9 @@ static int verify_rap_pvh(struct objtool_file *file, struct symbol *func)
 #define PVH_REF(b, n) do { if (!rap_sequence_reference(s, b, sizeof(b) - 1, n, true)) goto bad; } while (0)
 #define PVH_LABEL(n) do { if (!rap_kexec_label(&k, n)) goto bad; } while (0)
 #define PVH_BRANCH(op, n) do { if (!rap_kexec_branch(&k, op, n)) goto bad; } while (0)
-	if (is_weak_sym(func) || !func->sec->init || func->rap_kind != rap_pvh_kind(func->name))
+	if (is_weak_sym(func) ||
+	    (!func->sec->init && strcmp(func->sec->name, ".init.text.hdn_pvh32")) ||
+	    func->rap_kind != rap_pvh_kind(func->name))
 		goto bad;
 	if (func->rap_kind == 52) {
 		if (strcmp(func->sec->name, ".init.text.hdn_pvh32") || func->offset ||
@@ -145,7 +147,8 @@ static struct symbol *rap_pvh_data(struct objtool_file *file, const char *name, 
 	struct symbol *sym = find_symbol_by_name(file->elf, name);
 
 	if (!sym || is_undef_sym(sym) || is_weak_sym(sym) || sym->len != size ||
-	    !sym->sec->init || is_text_sec(sym->sec) ||
+	    (!sym->sec->init && strcmp(sym->sec->name, ".init.data") &&
+	     strcmp(sym->sec->name, ".init.rodata")) || is_text_sec(sym->sec) ||
 	    sym->offset > sec_size(sym->sec) || size > sec_size(sym->sec) - sym->offset)
 		return NULL;
 	return sym;

@@ -171,13 +171,13 @@ static int verify_rap_startup(struct objtool_file *file, struct symbol *func)
 		if (!rap_sequence_edge_match(s, "verify_cpu", true, false))
 			goto bad;
 		HEAD_REF("\x48\x8d\x3d", "common_startup_64");
-		HEAD_REF("\x48\x2b\x3d", ".Lcommon_startup_64");
+		HEAD_REF("\x48\x2b\x3d", "hdn_common_startup_64_ptr");
 		HEAD_BYTES("\x4c\x89\xfe");
 		if (!rap_sequence_edge_match(s, "__pi___startup_64", true, false))
 			goto bad;
 		HEAD_REF("\x48\x8d\x0d", "early_top_pgt");
 		HEAD_BYTES("\x48\x01\xc8\x0f\x22\xd8");
-		HEAD_REF("\xff\x25", ".Lcommon_startup_64");
+		HEAD_REF("\xff\x25", "hdn_common_startup_64_ptr");
 	} else if (func->rap_kind == 49) {
 		if (!rap_sequence_edge_match(s, "verify_cpu", true, false) ||
 		    !rap_thunk_symbol(file, "secondary_startup_64_no_verify", func->sec, func->offset + s->pos))
@@ -191,7 +191,10 @@ static int verify_rap_startup(struct objtool_file *file, struct symbol *func)
 	} else {
 		HEAD_BYTES("\xba\x20\x10\0\0");
 		rap_sequence_bytes(s, "\x83\xca\x40", 3); /* CONFIG_X86_MCE */
-		HEAD_BYTES("\x0f\x20\xe1\x21\xd1\x0f\xba\xe9\x04\x0f\x22\xe1\x0f\xba\xe9\x07\x0f\x22\xe1");
+		HEAD_BYTES("\x0f\x20\xe1\x21\xd1\x0f\xba\xe9\x04\x0f\x22\xe1\x0f\xba\xe9\x07");
+		if (!rap_hw_fixed_alt(s, "X86_FEATURE_FSGSBASE", "\x0f\xba\xe9\x10", 4))
+			goto bad;
+		HEAD_BYTES("\x0f\x22\xe1");
 		if (!rap_head_ready(s))
 			goto bad;
 		HEAD_BRANCH(0x75, 0);
@@ -279,13 +282,13 @@ static int verify_rap_startup(struct objtool_file *file, struct symbol *func)
 		HEAD_CALL("start_secondary");
 		HEAD_BYTES("\x0f\x0b");
 		HEAD_LABEL(12);
-		HEAD_CALL("x86_64_start_kernel");
+		HEAD_CALL("hdn_x86_64_start_kernel");
 		HEAD_BYTES("\x0f\x0b");
 	}
 	if (s->pos != func->len || !rap_hw_local_edges(&k))
 		goto bad;
 	rap_for_each_insn(file, func, insn)
-		if (insn->alts)
+		if (insn->alts && !insn->rap_hw_alt)
 			goto bad;
 	func->rap_startup_protocol = true;
 	return 0;
@@ -304,7 +307,7 @@ static int validate_rap_startup_peers(struct objtool_file *file)
 	struct symbol *boot = find_symbol_by_name(file->elf, "startup_64");
 	struct symbol *ap = find_symbol_by_name(file->elf, "secondary_startup_64");
 	struct symbol *common = find_symbol_by_name(file->elf, "common_startup_64");
-	struct symbol *pointer = find_symbol_by_name(file->elf, ".Lcommon_startup_64");
+	struct symbol *pointer = find_symbol_by_name(file->elf, "hdn_common_startup_64_ptr");
 	struct reloc *reloc;
 	struct instruction *insn;
 	unsigned int i;
@@ -312,7 +315,7 @@ static int validate_rap_startup_peers(struct objtool_file *file)
 		{ "__pi_startup_64_setup_gdt_idt", 7 }, { "__pi___startup_64", 7 },
 		{ "verify_cpu", 29 }, { "hdn_stack_mm_cpu_enter", 2 },
 		{ "hdn_rap_cpu_restart", 2 }, { "early_setup_idt", 1 },
-		{ "start_secondary", 1 }, { "x86_64_start_kernel", 1 },
+		{ "start_secondary", 1 }, { "hdn_x86_64_start_kernel", 1 },
 	};
 	static const char * const data[] = {
 		"hdn_stack_mm_ready", "hdn_stack_startup", "phys_base", "apic_mmio_base", "trampoline_lock",

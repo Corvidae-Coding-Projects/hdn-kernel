@@ -15,6 +15,7 @@
 #include <linux/rcupdate_wait.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
+#include <linux/slab.h>
 #include <linux/srcu.h>
 
 #include <linux/rcu_node_tree.h>
@@ -238,7 +239,12 @@ EXPORT_SYMBOL_GPL(call_srcu);
  */
 void synchronize_srcu(struct srcu_struct *ssp)
 {
-	struct rcu_synchronize rs;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct rcu_synchronize *rs;
+#else
+	struct rcu_synchronize rs_storage;
+	struct rcu_synchronize *rs = &rs_storage;
+#endif
 
 	srcu_lock_sync(&ssp->dep_map);
 
@@ -252,11 +258,21 @@ void synchronize_srcu(struct srcu_struct *ssp)
 		return;
 
 	might_sleep();
-	init_rcu_head_on_stack(&rs.head);
-	init_completion(&rs.completion);
-	call_srcu(ssp, &rs.head, wakeme_after_rcu);
-	wait_for_completion(&rs.completion);
-	destroy_rcu_head_on_stack(&rs.head);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* The SRCU worker consumes this callback after the caller can switch
+	 * away from its private stack.  Keep it in ordinary heap storage. */
+	rs = kzalloc(sizeof(*rs), GFP_KERNEL | __GFP_NOFAIL);
+#else
+	init_rcu_head_on_stack(&rs->head);
+#endif
+	init_completion(&rs->completion);
+	call_srcu(ssp, &rs->head, wakeme_after_rcu);
+	wait_for_completion(&rs->completion);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	kfree(rs);
+#else
+	destroy_rcu_head_on_stack(&rs->head);
+#endif
 }
 EXPORT_SYMBOL_GPL(synchronize_srcu);
 

@@ -82,6 +82,7 @@ SYM_FUNC_START(xen_hypercall_hvm)
 	ENDBR
 #ifdef CONFIG_SECURITY_HARDENING_RAP
 	HDN_TYPED_FUNC_ENTER xen_hypercall_hvm
+	FRAME_BEGIN
 	/* Preserve the six C arguments across lazy vendor discovery. */
 	pushq %rdi
 	pushq %rsi
@@ -89,16 +90,13 @@ SYM_FUNC_START(xen_hypercall_hvm)
 	pushq %rcx
 	pushq %r8
 	pushq %r9
-	subq $8, %rsp
 	HDN_C_CALL __xen_hypercall_setfunc
-	addq $8, %rsp
 	popq %r9
 	popq %r8
 	popq %rcx
 	popq %rdx
 	popq %rsi
 	popq %rdi
-	subq $8, %rsp
 	leaq xen_hypercall_amd(%rip), %r10
 	cmpq %r10, %rax
 	jne .Lhdn_xen_intel
@@ -107,7 +105,7 @@ SYM_FUNC_START(xen_hypercall_hvm)
 .Lhdn_xen_intel:
 	HDN_C_CALL xen_hypercall_intel
 .Lhdn_xen_done:
-	addq $8, %rsp
+	FRAME_END
 	HDN_ENTRY_ROOT_RETURN
 #else
 	FRAME_BEGIN

@@ -243,6 +243,10 @@ def padding(data, bits):
         "90", "66 90", "0f 1f 00", "0f 1f 40 00", "0f 1f 44 00 00",
         "66 0f 1f 44 00 00", "0f 1f 80 00 00 00 00",
         "0f 1f 84 00 00 00 00 00", "66 0f 1f 84 00 00 00 00 00")]
+    if bits == 64:
+        # GAS -mtune=generic64 also aligns with a CS-prefixed 64-bit LEA.
+        # This exact base/index/displacement preserves RSI and touches no memory.
+        nops += [bytes.fromhex("2e 48 8d b4 26 00 00 00 00")]
     if bits == 32:
         nops += [bytes.fromhex(s) for s in (
             "89 f6", "8d 76 00", "8d 74 26 00", "8d b6 00 00 00 00",

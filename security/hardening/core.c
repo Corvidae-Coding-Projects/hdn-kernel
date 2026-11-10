@@ -840,14 +840,19 @@ static bool hdn_record_event_object_flags(enum hdn_authority authority,
 		.error = error,
 		.pid = task_pid_nr(current),
 		.uid = from_kuid_munged(&init_user_ns, current_uid()),
-		.timestamp_ns = ktime_get_real_ns(),
+		/*
+		 * Private-stack page construction can report before
+		 * timekeeping_init().  The fast clocks have an early-boot dummy
+		 * clock and remain safe in every context used by this audit path.
+		 */
+		.timestamp_ns = ktime_get_real_fast_ns(),
 		.profile_id = hdn_mm_profile_id(current->mm),
 		.subject_id = task_pid_nr(current),
 		.object_id = object_id,
 		.flags = event_flags,
 	};
 	unsigned long flags;
-	u64 now_ns = ktime_get_ns();
+	u64 now_ns = ktime_get_mono_fast_ns();
 	u64 sequence;
 	bool recorded = true;
 
@@ -2015,6 +2020,7 @@ int hdn_authorize(enum hdn_authority authority,
 
 	return hdn_deny(authority, transition, reason, error);
 }
+EXPORT_SYMBOL_GPL(hdn_authorize);
 
 int hdn_authorize_profile(enum hdn_authority authority,
 			  enum hdn_transition transition,
@@ -6660,6 +6666,7 @@ int hdn_authorize_usb_monitor(unsigned int busnum)
 	return hdn_deny_object(HDN_AUTH_USB_MONITOR, HDN_TRANS_USB_MONITOR,
 			       HDN_REASON_PROFILE_DENIED, -EPERM, busnum);
 }
+EXPORT_SYMBOL_GPL(hdn_authorize_usb_monitor);
 
 static bool hdn_socket_family_is_local(int family)
 {

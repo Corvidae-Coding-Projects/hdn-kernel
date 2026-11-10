@@ -3295,10 +3295,12 @@ bool __weak bpf_jit_supports_timed_may_goto(void)
 	return false;
 }
 
+#if !defined(CONFIG_X86_64) || !defined(CONFIG_BPF_JIT)
 u64 __weak arch_bpf_timed_may_goto(void)
 {
 	return 0;
 }
+#endif
 
 static noinline void bpf_prog_report_may_goto_violation(void)
 {

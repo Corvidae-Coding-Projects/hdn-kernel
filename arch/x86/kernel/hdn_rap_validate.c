@@ -25,6 +25,19 @@ static __always_inline bool in_section(const void *address, size_t size,
 	return inside((unsigned long)address, size, (unsigned long)section.data, section.size);
 }
 
+static noinstr bool noinstr_address(unsigned long address)
+{
+	const struct hdn_rap_module *view;
+
+	if (inside(address, 1, (unsigned long)__noinstr_text_start,
+		   __noinstr_text_end - __noinstr_text_start))
+		return true;
+	for (view = READ_ONCE(hdn_rap_modules); view; view = READ_ONCE(view->next))
+		if (inside(address, 1, view->noinstr_text, view->noinstr_size))
+			return true;
+	return false;
+}
+
 static noinstr bool valid_type(const struct hdn_rap_type *type, struct hdn_rap_section section)
 {
 	unsigned int i;
@@ -163,9 +176,24 @@ static noinstr const struct hdn_rap_target *record(unsigned long address, bool c
 	     inside(address, 1, (unsigned long)_sinittext, _einittext - _sinittext))) {
 		entry = call_site ? __hdn_rap_sites_start : __hdn_rap_targets_start;
 		end = call_site ? __hdn_rap_sites_end : __hdn_rap_targets_end;
-		for (; entry < end; entry++)
-			if (entry->address == address)
-				return entry;
+		low = 0;
+		high = end - entry;
+		/*
+		 * scripts/sorttable orders both built-in tables by address while
+		 * preserving the link order of aliases.  Use a lower-bound search
+		 * so duplicate target addresses retain the former first-match
+		 * semantics.
+		 */
+		while (low < high) {
+			size_t middle = low + (high - low) / 2;
+
+			if (entry[middle].address < address)
+				low = middle + 1;
+			else
+				high = middle;
+		}
+		if (low < end - entry && entry[low].address == address)
+			return &entry[low];
 		return NULL;
 	}
 	for (view = READ_ONCE(hdn_rap_modules); view; view = READ_ONCE(view->next)) {
@@ -310,10 +338,14 @@ static noinstr unsigned long static_site_trampoline(unsigned long return_site)
 	return 0;
 }
 
+static const struct hdn_rap_function *noinstr function_record(unsigned long address,
+		unsigned int which);
+
 static noinstr bool static_target(const struct hdn_rap_static_call *contract,
 		unsigned long address)
 {
 	const struct hdn_rap_target *actual;
+	const struct hdn_rap_function *function;
 	const struct hdn_rap_type *expected, *type;
 
 	if (!contract || contract->flags > 1 || !(expected = type_view(contract->type)))
@@ -321,7 +353,16 @@ static noinstr bool static_target(const struct hdn_rap_static_call *contract,
 	if (!address)
 		return true;
 	actual = record(address, false);
-	if (!actual || !(type = type_view(actual->type)))
+	if (actual)
+		type = type_view(actual->type);
+	else {
+		/* A static call remains a direct branch after patching. Admit an
+		 * exact protected function entry even when __noendbr deliberately
+		 * excludes it from the general indirect-call target set. */
+		function = function_record(address, 0);
+		type = function ? type_view(function->type) : NULL;
+	}
+	if (!type)
 		return false;
 	if (address == (unsigned long)__static_call_return0)
 		return contract->flags == 1;
@@ -395,6 +436,15 @@ static const struct hdn_rap_function *noinstr function_record(unsigned long addr
 	    (which == 2 ? bpf->function.body : which == 1 ? bpf->function.trace_return : bpf->function.address) == address)
 		return &bpf->function;
 	return NULL;
+}
+
+bool noinstr hdn_rap_function_entry(unsigned long address)
+{
+	unsigned long flags = native_local_irq_save();
+	bool valid = function_record(address, 0) != NULL;
+
+	native_local_irq_restore(flags);
+	return valid;
 }
 
 /* Only the first body instruction, after the complete protected prologue,
@@ -638,7 +688,9 @@ unsigned long noinstr hdn_rap_validate_call(unsigned long address, unsigned long
 	site = record(expected_return, true);
 	if (site && site->type && (expected = type_view(site->type))) {
 		actual = record(address, false);
-		if (actual && (type = type_view(actual->type)) && same_type(type, expected))
+		if (actual && (!noinstr_address(expected_return) ||
+			       noinstr_address(actual->address)) &&
+		    (type = type_view(actual->type)) && same_type(type, expected))
 			result = actual->address;
 	}
 	native_local_irq_restore(flags);

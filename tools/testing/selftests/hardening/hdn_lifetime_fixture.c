@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Compile-only lifetime seeds. HDN_LIFETIME_BAD introduces gate failures. */
-#define INIT __attribute__((section(".init.text"), noinline, used))
+#define INIT __attribute__((section(".init.text"), __noinline__, used))
 #define INITDATA __attribute__((section(".init.data"), used))
 #define SEALED __attribute__((section(".data..ro_after_init"), used))
 
@@ -17,6 +17,9 @@ static const struct dispatch immutable_dispatch __attribute__((used)) = {
 	.call = runtime_operation,
 };
 
+int lifetime_fixture_init(int value);
+int lifetime_fixture_runtime(int value);
+
 int INIT lifetime_fixture_init(int value)
 {
 	boot_input = value;
@@ -30,6 +33,8 @@ int lifetime_fixture_runtime(int value)
 }
 
 #ifdef HDN_LIFETIME_BAD
+int lifetime_fixture_bad(int value);
+
 static struct dispatch mutable_dispatch __attribute__((used)) = {
 	.call = runtime_operation,
 };

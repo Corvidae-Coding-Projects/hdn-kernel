@@ -3,6 +3,8 @@
 #define _ASM_X86_HDN_RAP_H
 
 #include <linux/linkage.h>
+#include <linux/annotate.h>
+#include <linux/objtool.h>
 
 #define HDN_RAP_FRAME_IDT 0
 #define HDN_RAP_FRAME_PARANOID 1
@@ -60,6 +62,18 @@
 #endif
 .endm
 
+/* The one-way boot-stack transition changes CR3 and RSP before entering its
+ * two fixed continuations. Objtool verifies the complete instruction stream,
+ * both bound calls, and its sole admitted caller. */
+.macro HDN_STACK_BOOTSTRAP_FUNC name:req
+#ifdef HDN_RAP_ASM_ACTIVE
+	.pushsection .discard.hdn_rap.functions, "", @progbits
+	.balign 8
+	.quad \name, 55, 0
+	.popsection
+#endif
+.endm
+
 /* C ABI calls only. Assembly-private conventions must not silently acquire a
  * clobbered R10. Each expansion carries its own exact post-call relocation. */
 .macro HDN_C_CALL target:req
@@ -72,6 +86,24 @@
 	.pushsection .hdn.rap.sites, "a", @progbits
 	.balign 8
 	.quad .Lhdn_c_return_\@, 0
+	.popsection
+#endif
+.endm
+
+/* A C handoff which is required not to return. Keep the ordinary RAP return
+ * site binding (so a violation is still detected), while identifying the
+ * exact CALL instruction as intentionally terminal to objtool. */
+.macro HDN_C_TERMINAL_CALL target:req
+#ifdef HDN_RAP_ASM_ACTIVE
+	leaq .Lhdn_c_terminal_return_\@(%rip), %r10
+#endif
+	ANNOTATE_REACHABLE
+	call \target
+#ifdef HDN_RAP_ASM_ACTIVE
+.Lhdn_c_terminal_return_\@:
+	.pushsection .hdn.rap.sites, "a", @progbits
+	.balign 8
+	.quad .Lhdn_c_terminal_return_\@, 0
 	.popsection
 #endif
 .endm
@@ -202,6 +234,11 @@
 .macro HDN_ENTRY_ROOT_RETURN
 #ifdef HDN_RAP_ASM_ACTIVE
 	jmp __hdn_rap_return
+#elif defined(HDN_RAP_BOOTSTRAP)
+	/* Physical startup has no normal mitigation runtime. Its direct-call
+	 * domain is separately closed and verified before this native return. */
+	ANNOTATE_RETPOLINE_SAFE
+	RET
 #else
 	RET
 #endif
@@ -283,6 +320,8 @@ void hdn_rap_frame_enter(struct pt_regs *regs, unsigned long kind,
 		unsigned long vector);
 const struct hdn_rap_entry_state *hdn_rap_frame_exit(struct pt_regs *regs,
 		unsigned long kind);
+void __init hdn_rap_int3_selftest_call(struct pt_regs *regs,
+		unsigned long return_site, unsigned long target);
 bool hdn_rap_espfix(struct pt_regs *regs);
 #endif
 #endif

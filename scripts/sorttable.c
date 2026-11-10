@@ -587,6 +587,185 @@ static void get_mcount_loc(struct elf_mcount_loc *emloc, Elf_Shdr *symtab_sec,
 static inline int parse_symbols(const char *fname) { return 0; }
 #endif
 
+#define HDN_RAP_RECORD_SIZE	(2 * sizeof(uint64_t))
+
+struct hdn_rap_sort_record {
+	uint64_t address;
+	uint64_t type;
+	size_t ordinal;
+};
+
+static int compare_hdn_rap_record(const void *a, const void *b)
+{
+	const struct hdn_rap_sort_record *ra = a;
+	const struct hdn_rap_sort_record *rb = b;
+
+	if (ra->address < rb->address)
+		return -1;
+	if (ra->address > rb->address)
+		return 1;
+	/* Preserve the link-order first match for target aliases. */
+	if (ra->ordinal < rb->ordinal)
+		return -1;
+	return ra->ordinal > rb->ordinal;
+}
+
+static void hdn_rap_write_rela_offset(Elf_Rela *rela, uint64_t offset)
+{
+	if (long_size == 8)
+		elf_parser.w8(offset, (uint64_t *)&rela->e64.r_offset);
+	else
+		elf_parser.w(offset, (uint32_t *)&rela->e32.r_offset);
+}
+
+static int sort_hdn_rap_table(Elf_Ehdr *ehdr, Elf_Shdr *shdr_start,
+			      int shentsize, unsigned int shnum,
+			      uint64_t start, uint64_t end,
+			      const char *name)
+{
+	struct hdn_rap_sort_record *records = NULL;
+	size_t *old_to_new = NULL;
+	Elf_Shdr *table_sec = NULL;
+	uint64_t table_size, sec_addr, sec_size, offset;
+	unsigned char *image;
+	size_t count, i;
+	int rc = -1;
+
+	if (long_size != 8 || end < start ||
+	    (end - start) % HDN_RAP_RECORD_SIZE) {
+		fprintf(stderr, "invalid %s RAP table range\n", name);
+		return -1;
+	}
+	table_size = end - start;
+	count = table_size / HDN_RAP_RECORD_SIZE;
+	if (!count)
+		return 0;
+
+	for (i = 0; i < shnum; i++) {
+		Elf_Shdr *shdr = get_index(shdr_start, shentsize, i);
+
+		if (shdr_type(shdr) == SHT_NOBITS)
+			continue;
+		sec_addr = shdr_addr(shdr);
+		sec_size = shdr_size(shdr);
+		if (start >= sec_addr && end <= sec_addr + sec_size &&
+		    sec_addr + sec_size >= sec_addr) {
+			table_sec = shdr;
+			break;
+		}
+	}
+	if (!table_sec) {
+		fprintf(stderr, "cannot locate %s RAP table contents\n", name);
+		return -1;
+	}
+
+	offset = shdr_offset(table_sec) + start - shdr_addr(table_sec);
+	image = (unsigned char *)ehdr + offset;
+	records = malloc(count * sizeof(*records));
+	old_to_new = malloc(count * sizeof(*old_to_new));
+	if (!records || !old_to_new) {
+		fprintf(stderr, "cannot allocate %s RAP sort data: %s\n",
+			name, strerror(errno));
+		goto out;
+	}
+
+	for (i = 0; i < count; i++) {
+		unsigned char *record = image + i * HDN_RAP_RECORD_SIZE;
+
+		records[i].address = elf_parser.r8((uint64_t *)record);
+		records[i].type = elf_parser.r8((uint64_t *)(record + sizeof(uint64_t)));
+		records[i].ordinal = i;
+	}
+	qsort(records, count, sizeof(*records), compare_hdn_rap_record);
+	for (i = 0; i < count; i++) {
+		unsigned char *record = image + i * HDN_RAP_RECORD_SIZE;
+
+		old_to_new[records[i].ordinal] = i;
+		elf_parser.w8(records[i].address, (uint64_t *)record);
+		elf_parser.w8(records[i].type,
+			      (uint64_t *)(record + sizeof(uint64_t)));
+	}
+
+	/*
+	 * x86 KASLR consumes the final ELF relocation offsets after this tool
+	 * runs.  Move each relocation with its record so the reordered pointers
+	 * are still adjusted at boot.
+	 */
+	for (i = 0; i < shnum; i++) {
+		Elf_Shdr *shdr = get_index(shdr_start, shentsize, i);
+		Elf_Rela *rela, *end_rela;
+
+		if (shdr_type(shdr) != SHT_RELA)
+			continue;
+		rela = (void *)ehdr + shdr_offset(shdr);
+		end_rela = (void *)rela + shdr_size(shdr);
+		for (; rela < end_rela;
+		     rela = (void *)rela + shdr_entsize(shdr)) {
+			uint64_t rela_offset = elf_parser.rela_offset(rela);
+			uint64_t delta, field;
+			size_t old;
+
+			if (rela_offset < start || rela_offset >= end)
+				continue;
+			delta = rela_offset - start;
+			old = delta / HDN_RAP_RECORD_SIZE;
+			field = delta % HDN_RAP_RECORD_SIZE;
+			if (field != 0 && field != sizeof(uint64_t)) {
+				fprintf(stderr,
+					"misaligned relocation in %s RAP table\n", name);
+				goto out;
+			}
+			hdn_rap_write_rela_offset(rela,
+				start + old_to_new[old] * HDN_RAP_RECORD_SIZE + field);
+		}
+	}
+	rc = 0;
+out:
+	free(old_to_new);
+	free(records);
+	return rc;
+}
+
+static int sort_hdn_rap_tables(Elf_Ehdr *ehdr, Elf_Shdr *shdr_start,
+			       int shentsize, unsigned int shnum,
+			       Elf_Shdr *symtab_sec, const char *strtab)
+{
+	static const char * const names[] = {
+		"__hdn_rap_targets_start", "__hdn_rap_targets_end",
+		"__hdn_rap_sites_start", "__hdn_rap_sites_end",
+	};
+	uint64_t values[4] = {};
+	bool found[4] = {};
+	Elf_Sym *sym, *end_sym;
+	int symentsize;
+	size_t i;
+
+	symentsize = shdr_entsize(symtab_sec);
+	sym = (void *)ehdr + shdr_offset(symtab_sec);
+	end_sym = (void *)sym + shdr_size(symtab_sec);
+	for (; sym < end_sym; sym = (void *)sym + symentsize) {
+		const char *symbol = strtab + sym_name(sym);
+
+		for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+			if (!strcmp(symbol, names[i])) {
+				values[i] = sym_value(sym);
+				found[i] = true;
+			}
+		}
+	}
+	if (!found[0] && !found[1] && !found[2] && !found[3])
+		return 0;
+	if (!found[0] || !found[1] || !found[2] || !found[3]) {
+		fprintf(stderr, "incomplete built-in RAP table symbols\n");
+		return -1;
+	}
+	if (sort_hdn_rap_table(ehdr, shdr_start, shentsize, shnum,
+			       values[0], values[1], "target"))
+		return -1;
+	return sort_hdn_rap_table(ehdr, shdr_start, shentsize, shnum,
+				  values[2], values[3], "site");
+}
+
 static int do_sort(Elf_Ehdr *ehdr,
 		   char const *const fname,
 		   table_sort_t custom_sort)
@@ -744,6 +923,12 @@ static int do_sort(Elf_Ehdr *ehdr,
 		int num_entries = shdr_size(extab_sec) / extable_ent_size;
 		qsort(extab_image, num_entries,
 		      extable_ent_size, compare_extable);
+	}
+
+	if (sort_hdn_rap_tables(ehdr, shdr_start, shentsize, shnum,
+				symtab_sec, strtab)) {
+		fprintf(stderr, "failed to sort RAP tables in file: %s\n", fname);
+		goto out;
 	}
 
 	/* find the flag main_extable_sort_needed */

@@ -6,6 +6,7 @@
 #include <linux/timerqueue_types.h>
 
 struct hrtimer_clock_base;
+struct task_struct;
 
 /*
  * Return values for the callback function
@@ -45,6 +46,18 @@ struct hrtimer {
 	u8				is_rel;
 	u8				is_soft;
 	u8				is_hard;
+};
+
+/**
+ * struct hrtimer_sleeper - simple sleeper structure
+ * @timer: embedded timer structure
+ * @task: task to wake up
+ *
+ * @task is set to NULL when the timer expires.
+ */
+struct hrtimer_sleeper {
+	struct hrtimer timer;
+	struct task_struct *task;
 };
 
 #endif /* _LINUX_HRTIMER_TYPES_H */

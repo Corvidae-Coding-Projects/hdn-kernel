@@ -84,6 +84,7 @@ struct symbol {
 	bool rap_startup_protocol;
 	bool rap_error_return_protocol;
 	bool rap_pvh_protocol;
+	bool rap_stack_bootstrap_protocol;
 	bool rap_adapter;
 	bool rap_typed_entry;
 	bool rap_static_contract;

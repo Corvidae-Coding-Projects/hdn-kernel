@@ -1508,14 +1508,26 @@ static void blk_rq_poll_completion(struct request *rq, struct completion *wait)
 blk_status_t blk_execute_rq(struct request *rq, bool at_head)
 {
 	struct blk_mq_hw_ctx *hctx = rq->mq_hctx;
-	struct blk_rq_wait wait = {
-		.done = COMPLETION_INITIALIZER_ONSTACK(wait.done),
+	blk_status_t ret;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct blk_rq_wait *wait;
+
+	/* The completion callback can run in another task's IRQ context. */
+	wait = kzalloc(sizeof(*wait), GFP_NOIO);
+	if (!wait)
+		return BLK_STS_RESOURCE;
+	init_completion(&wait->done);
+#else
+	struct blk_rq_wait wait_onstack = {
+		.done = COMPLETION_INITIALIZER_ONSTACK(wait_onstack.done),
 	};
+	struct blk_rq_wait *wait = &wait_onstack;
+#endif
 
 	WARN_ON(irqs_disabled());
 	WARN_ON(!blk_rq_is_passthrough(rq));
 
-	rq->end_io_data = &wait;
+	rq->end_io_data = wait;
 	rq->end_io = blk_end_sync_rq;
 
 	blk_account_io_start(rq);
@@ -1523,11 +1535,15 @@ blk_status_t blk_execute_rq(struct request *rq, bool at_head)
 	blk_mq_run_hw_queue(hctx, false);
 
 	if (blk_rq_is_poll(rq))
-		blk_rq_poll_completion(rq, &wait.done);
+		blk_rq_poll_completion(rq, &wait->done);
 	else
-		blk_wait_io(&wait.done);
+		blk_wait_io(&wait->done);
 
-	return wait.ret;
+	ret = wait->ret;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	kfree(wait);
+#endif
+	return ret;
 }
 EXPORT_SYMBOL(blk_execute_rq);
 

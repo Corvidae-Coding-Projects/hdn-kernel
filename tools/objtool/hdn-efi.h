@@ -126,6 +126,19 @@ static int verify_rap_efi(struct objtool_file *file, struct symbol *func)
 		    insn->jump_dest->offset > func->offset && insn->jump_dest->offset < func->offset + func->len)
 			goto bad;
 	func->rap_efi_protocol = true;
+	if (func->rap_kind == 17) {
+		/* The mixed-mode gateway returns through the separately verified
+		 * 32/64-bit trampoline and __hdn_efi_return, so its local body has
+		 * no architectural RET. Do not let ordinary no-RET inference mark
+		 * calls dead after the complete protocol has been authenticated. */
+		for_each_insn(file, insn) {
+			struct symbol *callee = insn_call_dest(insn);
+
+			if (insn->type == INSN_CALL && callee &&
+			    callee->sec == func->sec && callee->offset == func->offset)
+				insn->dead_end = false;
+		}
+	}
 	return 0;
 bad:
 	ERROR_FUNC(func->sec, func->offset + s.pos, "RAP EFI call does not match its protected foreign-ABI protocol");

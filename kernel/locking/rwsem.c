@@ -329,20 +329,24 @@ void __init_rwsem(struct rw_semaphore *sem, const char *name,
 }
 EXPORT_SYMBOL(__init_rwsem);
 
-enum rwsem_waiter_type {
-	RWSEM_WAITING_FOR_WRITE,
-	RWSEM_WAITING_FOR_READ
-};
-
-struct rwsem_waiter {
-	struct list_head list;
-	struct task_struct *task;
-	enum rwsem_waiter_type type;
-	unsigned long timeout;
-	bool handoff_set;
-};
 #define rwsem_first_waiter(sem) \
 	list_first_entry(&sem->wait_list, struct rwsem_waiter, list)
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+static struct rwsem_waiter *hdn_rwsem_waiter_acquire(void)
+{
+	BUG_ON(current->hdn_lock_waiter_active != HDN_LOCK_WAITER_NONE);
+	current->hdn_lock_waiter_active = HDN_LOCK_WAITER_RWSEM;
+	return &current->hdn_lock_waiter.rwsem;
+}
+
+static void hdn_rwsem_waiter_release(struct rwsem_waiter *waiter)
+{
+	BUG_ON(current->hdn_lock_waiter_active != HDN_LOCK_WAITER_RWSEM);
+	BUG_ON(waiter != &current->hdn_lock_waiter.rwsem);
+	current->hdn_lock_waiter_active = HDN_LOCK_WAITER_NONE;
+}
+#endif
 
 enum rwsem_wake_type {
 	RWSEM_WAKE_ANY,		/* Wake whatever's at head of wait list */
@@ -994,7 +998,12 @@ rwsem_down_read_slowpath(struct rw_semaphore *sem, long count, unsigned int stat
 {
 	long adjustment = -RWSEM_READER_BIAS;
 	long rcnt = (count >> RWSEM_READER_SHIFT);
-	struct rwsem_waiter waiter;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct rwsem_waiter *waiter;
+#else
+	struct rwsem_waiter stack_waiter;
+	struct rwsem_waiter *waiter = &stack_waiter;
+#endif
 	DEFINE_WAKE_Q(wake_q);
 
 	/*
@@ -1029,10 +1038,13 @@ rwsem_down_read_slowpath(struct rw_semaphore *sem, long count, unsigned int stat
 	}
 
 queue:
-	waiter.task = current;
-	waiter.type = RWSEM_WAITING_FOR_READ;
-	waiter.timeout = jiffies + RWSEM_WAIT_TIMEOUT;
-	waiter.handoff_set = false;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	waiter = hdn_rwsem_waiter_acquire();
+#endif
+	waiter->task = current;
+	waiter->type = RWSEM_WAITING_FOR_READ;
+	waiter->timeout = jiffies + RWSEM_WAIT_TIMEOUT;
+	waiter->handoff_set = false;
 
 	raw_spin_lock_irq(&sem->wait_lock);
 	if (list_empty(&sem->wait_list)) {
@@ -1048,11 +1060,14 @@ queue:
 			raw_spin_unlock_irq(&sem->wait_lock);
 			rwsem_set_reader_owned(sem);
 			lockevent_inc(rwsem_rlock_fast);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+			hdn_rwsem_waiter_release(waiter);
+#endif
 			return sem;
 		}
 		adjustment += RWSEM_FLAG_WAITERS;
 	}
-	rwsem_add_waiter(sem, &waiter);
+	rwsem_add_waiter(sem, waiter);
 
 	/* we're now waiting on the lock, but no longer actively locking */
 	count = atomic_long_add_return(adjustment, &sem->count);
@@ -1071,13 +1086,13 @@ queue:
 
 	/* wait to be given the lock */
 	for (;;) {
-		if (!smp_load_acquire(&waiter.task)) {
+		if (!smp_load_acquire(&waiter->task)) {
 			/* Matches rwsem_mark_wake()'s smp_store_release(). */
 			break;
 		}
 		if (signal_pending_state(state, current)) {
 			raw_spin_lock_irq(&sem->wait_lock);
-			if (waiter.task)
+			if (waiter->task)
 				goto out_nolock;
 			raw_spin_unlock_irq(&sem->wait_lock);
 			/* Ordered by sem->wait_lock against rwsem_mark_wake(). */
@@ -1094,13 +1109,19 @@ queue:
 	__set_current_state(TASK_RUNNING);
 	lockevent_inc(rwsem_rlock);
 	trace_contention_end(sem, 0);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_rwsem_waiter_release(waiter);
+#endif
 	return sem;
 
 out_nolock:
-	rwsem_del_wake_waiter(sem, &waiter, &wake_q);
+	rwsem_del_wake_waiter(sem, waiter, &wake_q);
 	__set_current_state(TASK_RUNNING);
 	lockevent_inc(rwsem_rlock_fail);
 	trace_contention_end(sem, -EINTR);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_rwsem_waiter_release(waiter);
+#endif
 	return ERR_PTR(-EINTR);
 }
 
@@ -1110,7 +1131,12 @@ out_nolock:
 static struct rw_semaphore __sched *
 rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 {
-	struct rwsem_waiter waiter;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct rwsem_waiter *waiter;
+#else
+	struct rwsem_waiter stack_waiter;
+	struct rwsem_waiter *waiter = &stack_waiter;
+#endif
 	DEFINE_WAKE_Q(wake_q);
 
 	/* do optimistic spinning and steal lock if possible */
@@ -1123,16 +1149,19 @@ rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 	 * Optimistic spinning failed, proceed to the slowpath
 	 * and block until we can acquire the sem.
 	 */
-	waiter.task = current;
-	waiter.type = RWSEM_WAITING_FOR_WRITE;
-	waiter.timeout = jiffies + RWSEM_WAIT_TIMEOUT;
-	waiter.handoff_set = false;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	waiter = hdn_rwsem_waiter_acquire();
+#endif
+	waiter->task = current;
+	waiter->type = RWSEM_WAITING_FOR_WRITE;
+	waiter->timeout = jiffies + RWSEM_WAIT_TIMEOUT;
+	waiter->handoff_set = false;
 
 	raw_spin_lock_irq(&sem->wait_lock);
-	rwsem_add_waiter(sem, &waiter);
+	rwsem_add_waiter(sem, waiter);
 
 	/* we're now waiting on the lock */
-	if (rwsem_first_waiter(sem) != &waiter) {
+	if (rwsem_first_waiter(sem) != waiter) {
 		rwsem_cond_wake_waiter(sem, atomic_long_read(&sem->count),
 				       &wake_q);
 		if (!wake_q_empty(&wake_q)) {
@@ -1156,7 +1185,7 @@ rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 		hung_task_set_blocker(sem, BLOCKER_TYPE_RWSEM_WRITER);
 
 	for (;;) {
-		if (rwsem_try_write_lock(sem, &waiter)) {
+		if (rwsem_try_write_lock(sem, waiter)) {
 			/* rwsem_try_write_lock() implies ACQUIRE on success */
 			break;
 		}
@@ -1174,7 +1203,7 @@ rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 		 * In this case, we attempt to acquire the lock again
 		 * without sleeping.
 		 */
-		if (waiter.handoff_set) {
+		if (waiter->handoff_set) {
 			enum owner_state owner_state;
 
 			owner_state = rwsem_spin_on_owner(sem);
@@ -1196,14 +1225,20 @@ trylock_again:
 	raw_spin_unlock_irq(&sem->wait_lock);
 	lockevent_inc(rwsem_wlock);
 	trace_contention_end(sem, 0);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_rwsem_waiter_release(waiter);
+#endif
 	return sem;
 
 out_nolock:
 	__set_current_state(TASK_RUNNING);
 	raw_spin_lock_irq(&sem->wait_lock);
-	rwsem_del_wake_waiter(sem, &waiter, &wake_q);
+	rwsem_del_wake_waiter(sem, waiter, &wake_q);
 	lockevent_inc(rwsem_wlock_fail);
 	trace_contention_end(sem, -EINTR);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_rwsem_waiter_release(waiter);
+#endif
 	return ERR_PTR(-EINTR);
 }
 

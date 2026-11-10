@@ -14,6 +14,7 @@ obj-y += seal_test.o
 obj-m += seal_test_module.o
 endif
 ifeq ($(CONFIG_SECURITY_HARDENING_CONSTIFY_TEST),y)
+obj-y += constify_test.o
 obj-m += constify_target_module.o
 obj-m += constify_test_module.o
 endif

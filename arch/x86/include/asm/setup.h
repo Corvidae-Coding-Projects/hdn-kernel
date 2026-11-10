@@ -135,6 +135,9 @@ void __init mk_early_pgtbl_32(void);
 
 #else
 asmlinkage void __init __noreturn x86_64_start_kernel(char *real_mode);
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+asmlinkage void __ref __noreturn hdn_x86_64_start_kernel(char *real_mode);
+#endif
 asmlinkage void __init __noreturn x86_64_start_reservations(char *real_mode_data);
 
 #endif /* __i386__ */

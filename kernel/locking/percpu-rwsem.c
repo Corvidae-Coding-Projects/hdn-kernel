@@ -141,8 +141,17 @@ static int percpu_rwsem_wake_function(struct wait_queue_entry *wq_entry,
 static void percpu_rwsem_wait(struct percpu_rw_semaphore *sem, bool reader,
 			      bool freeze)
 {
-	DEFINE_WAIT_FUNC(wq_entry, percpu_rwsem_wake_function);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct wait_queue_entry *wq_entry = hdn_wait_acquire();
+#else
+	DEFINE_WAIT_FUNC(wq_entry_storage, percpu_rwsem_wake_function);
+	struct wait_queue_entry *wq_entry = &wq_entry_storage;
+#endif
 	bool wait;
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	init_wait_func(wq_entry, percpu_rwsem_wake_function);
+#endif
 
 	spin_lock_irq(&sem->waiters.lock);
 	/*
@@ -151,19 +160,22 @@ static void percpu_rwsem_wait(struct percpu_rw_semaphore *sem, bool reader,
 	 */
 	wait = !__percpu_rwsem_trylock(sem, reader);
 	if (wait) {
-		wq_entry.flags |= WQ_FLAG_EXCLUSIVE | reader * WQ_FLAG_CUSTOM;
-		__add_wait_queue_entry_tail(&sem->waiters, &wq_entry);
+		wq_entry->flags |= WQ_FLAG_EXCLUSIVE | reader * WQ_FLAG_CUSTOM;
+		__add_wait_queue_entry_tail(&sem->waiters, wq_entry);
 	}
 	spin_unlock_irq(&sem->waiters.lock);
 
 	while (wait) {
 		set_current_state(TASK_UNINTERRUPTIBLE |
 				  (freeze ? TASK_FREEZABLE : 0));
-		if (!smp_load_acquire(&wq_entry.private))
+		if (!smp_load_acquire(&wq_entry->private))
 			break;
 		schedule();
 	}
 	__set_current_state(TASK_RUNNING);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_wait_release(wq_entry);
+#endif
 }
 
 bool __sched __percpu_down_read(struct percpu_rw_semaphore *sem, bool try,

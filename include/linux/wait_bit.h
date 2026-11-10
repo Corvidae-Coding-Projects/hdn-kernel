@@ -7,17 +7,6 @@
  */
 #include <linux/wait.h>
 
-struct wait_bit_key {
-	unsigned long		*flags;
-	int			bit_nr;
-	unsigned long		timeout;
-};
-
-struct wait_bit_queue_entry {
-	struct wait_bit_key	key;
-	struct wait_queue_entry	wq_entry;
-};
-
 #define __WAIT_BIT_KEY_INITIALIZER(word, bit)					\
 	{ .flags = word, .bit_nr = bit, }
 
@@ -250,6 +239,40 @@ extern void init_wait_var_entry(struct wait_bit_queue_entry *wbq_entry, void *va
 extern void wake_up_var(void *var);
 extern wait_queue_head_t *__var_waitqueue(void *p);
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+struct wait_bit_queue_entry *hdn_wait_bit_acquire(void);
+void hdn_wait_bit_release(struct wait_bit_queue_entry *wait);
+#endif
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+#define ___wait_var_event(var, condition, state, exclusive, ret, cmd)	\
+({									\
+	__label__ __out;						\
+	struct wait_queue_head *__wq_head = __var_waitqueue(var);	\
+	struct wait_bit_queue_entry *__wbq_entry = hdn_wait_bit_acquire();\
+	long __ret = ret; /* explicit shadow */				\
+									\
+	init_wait_var_entry(__wbq_entry, var,				\
+			    exclusive ? WQ_FLAG_EXCLUSIVE : 0);		\
+	for (;;) {							\
+		long __int = prepare_to_wait_event(__wq_head,		\
+						   &__wbq_entry->wq_entry, \
+						   state);		\
+		if (condition)						\
+			break;						\
+									\
+		if (___wait_is_interruptible(state) && __int) {		\
+			__ret = __int;					\
+			goto __out;					\
+		}							\
+									\
+		cmd;							\
+	}								\
+	finish_wait(__wq_head, &__wbq_entry->wq_entry);			\
+__out:	hdn_wait_bit_release(__wbq_entry);				\
+	__ret;								\
+})
+#else
 #define ___wait_var_event(var, condition, state, exclusive, ret, cmd)	\
 ({									\
 	__label__ __out;						\
@@ -276,6 +299,7 @@ extern wait_queue_head_t *__var_waitqueue(void *p);
 	finish_wait(__wq_head, &__wbq_entry.wq_entry);			\
 __out:	__ret;								\
 })
+#endif
 
 #define __wait_var_event(var, condition)				\
 	___wait_var_event(var, condition, TASK_UNINTERRUPTIBLE, 0, 0,	\

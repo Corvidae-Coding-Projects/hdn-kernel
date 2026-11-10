@@ -75,12 +75,12 @@ static ssize_t show_ctrl(struct device *dev, struct device_attribute *attr, char
 }
 static DEVICE_ATTR(ctrl, S_IRUGO, show_ctrl, NULL);
 
-int shpchp_create_ctrl_files(struct controller *ctrl)
+int shpchp_create_ctrl_files(struct shpchp_controller *ctrl)
 {
 	return device_create_file(&ctrl->pci_dev->dev, &dev_attr_ctrl);
 }
 
-void shpchp_remove_ctrl_files(struct controller *ctrl)
+void shpchp_remove_ctrl_files(struct shpchp_controller *ctrl)
 {
 	device_remove_file(&ctrl->pci_dev->dev, &dev_attr_ctrl);
 }

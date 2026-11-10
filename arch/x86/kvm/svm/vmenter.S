@@ -361,7 +361,9 @@ SYM_FUNC_START(__svm_sev_es_vcpu_run)
 	pop %rdi
 	pop %rsi
 	pop %rbx
-	pop %rbp
+	/* The C helper preserves the live frame pointer.  This slot is the
+	 * host-save input copy, not a second frame restoration. */
+	add $8, %rsp
 	pop %r12
 	pop %r13
 	pop %r14

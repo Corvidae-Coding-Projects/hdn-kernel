@@ -5,6 +5,7 @@
 #include <linux/interrupt.h>
 #include <linux/hdn_rap.h>
 #include <linux/export.h>
+#include <linux/kvm_types.h>
 
 #include <asm/cpu_entry_area.h>
 #include <asm/set_memory.h>

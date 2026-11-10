@@ -53,6 +53,7 @@ int hdn_rap_error_test_run(unsigned int requested)
 	struct kretprobe retprobe = { .handler = returned, .maxactive = 4 };
 	long (*target)(void) = requested == 2 ? hdn_rap_unmarked_target : hdn_rap_error_target;
 	unsigned long before;
+	long result;
 	bool have_return = false, have_probe = false;
 	int error;
 
@@ -63,33 +64,52 @@ int hdn_rap_error_test_run(unsigned int requested)
 	body_calls = return_calls = 0;
 	wrong_return = false;
 	error = -EUCLEAN;
-	if (target() != 37 || body_calls != 1)
+	result = target();
+	if (result != 37 || body_calls != 1) {
+		pr_err("HDN_RAP_ERROR_BASELINE_FAIL result=%ld body=%lu\n",
+		       result, body_calls);
 		goto out;
+	}
 	probe.addr = (kprobe_opcode_t *)target;
+	error = register_kprobe(&probe);
+	if (error) {
+		pr_err("HDN_RAP_ERROR_KPROBE_REGISTER_FAIL error=%d\n", error);
+		goto out;
+	}
+	have_probe = true;
 	if (!requested) {
+		/* Aggregated kprobes run newest first.  Register the kretprobe
+		 * second so it arms its return hook before inject() skips the body. */
 		retprobe.kp.addr = (kprobe_opcode_t *)target;
 		error = register_kretprobe(&retprobe);
-		if (error)
+		if (error) {
+			pr_err("HDN_RAP_ERROR_KRETPROBE_REGISTER_FAIL error=%d\n", error);
 			goto out;
+		}
 		have_return = true;
 	}
-	error = register_kprobe(&probe);
-	if (error)
-		goto out;
-	have_probe = true;
 	before = body_calls;
 	if (requested)
 		pr_info("HDN_RAP_ERROR_PROBE_READY mode=%u\n", requested);
 	error = -EUCLEAN;
-	if (target() != -EAGAIN || body_calls != before || requested ||
-	    return_calls != 1 || wrong_return || retprobe.nmissed)
+	result = target();
+	if (result != -EAGAIN || body_calls != before || requested ||
+	    return_calls != 1 || wrong_return || retprobe.nmissed) {
+		pr_err("HDN_RAP_ERROR_INJECT_FAIL result=%ld body=%lu before=%lu requested=%u returns=%lu wrong=%u missed=%d\n",
+		       result, body_calls, before, requested, return_calls,
+		       wrong_return, retprobe.nmissed);
 		goto out;
+	}
 	unregister_kprobe(&probe);
 	have_probe = false;
 	unregister_kretprobe(&retprobe);
 	have_return = false;
-	if (target() != 37 || body_calls != before + 1)
+	result = target();
+	if (result != 37 || body_calls != before + 1) {
+		pr_err("HDN_RAP_ERROR_RESTORE_FAIL result=%ld body=%lu expected=%lu\n",
+		       result, body_calls, before + 1);
 		goto out;
+	}
 	pr_info("HDN_RAP_ERROR_PROBE_PASS entry override repeated return-hook unregister\n");
 	error = 0;
 out:

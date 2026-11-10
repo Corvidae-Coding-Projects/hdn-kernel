@@ -19,10 +19,12 @@
 #include <linux/pci.h>
 #include <linux/delay.h>
 #include <linux/hardirq.h>
+#include <linux/hdn_stack.h>
 #include <linux/scatterlist.h>
 #include <linux/blk-mq.h>
 #include <linux/blk-integrity.h>
 #include <linux/ratelimit.h>
+#include <linux/slab.h>
 #include <linux/unaligned.h>
 
 #include <scsi/scsi.h>
@@ -298,8 +300,10 @@ int scsi_execute_cmd(struct scsi_device *sdev, const unsigned char *cmd,
 		     const struct scsi_exec_args *args)
 {
 	static const struct scsi_exec_args default_args;
+	void *mapped_buffer = buffer;
 	struct request *req;
 	struct scsi_cmnd *scmd;
+	bool private_stack_buffer = false;
 	int ret;
 
 	if (!args)
@@ -308,13 +312,33 @@ int scsi_execute_cmd(struct scsi_device *sdev, const unsigned char *cmd,
 			      args->sense_len != SCSI_SENSE_BUFFERSIZE))
 		return -EINVAL;
 
+	/*
+	 * blk_rq_map_kern() may finish a read from interrupt context and copy
+	 * its bounce pages back there.  A private task stack is deliberately
+	 * absent from every other task's kernel page-table view, so retain the
+	 * synchronous API contract through a globally mapped bounce buffer and
+	 * copy back only after blk_execute_rq() has joined the request.
+	 */
+	if (bufflen && hdn_stack_overlaps((unsigned long)buffer, bufflen)) {
+		mapped_buffer = kvzalloc(bufflen, GFP_NOIO);
+		if (!mapped_buffer)
+			return -ENOMEM;
+		if (op_is_write(opf))
+			memcpy(mapped_buffer, buffer, bufflen);
+		private_stack_buffer = true;
+	}
+
 retry:
+	if (private_stack_buffer && !op_is_write(opf))
+		memset(mapped_buffer, 0, bufflen);
 	req = scsi_alloc_request(sdev->request_queue, opf, args->req_flags);
-	if (IS_ERR(req))
-		return PTR_ERR(req);
+	if (IS_ERR(req)) {
+		ret = PTR_ERR(req);
+		goto out_free_buffer;
+	}
 
 	if (bufflen) {
-		ret = blk_rq_map_kern(req, buffer, bufflen, GFP_NOIO);
+		ret = blk_rq_map_kern(req, mapped_buffer, bufflen, GFP_NOIO);
 		if (ret)
 			goto out;
 	}
@@ -343,7 +367,11 @@ retry:
 	 * and prevent security leaks by zeroing out the excess data.
 	 */
 	if (unlikely(scmd->resid_len > 0 && scmd->resid_len <= bufflen))
-		memset(buffer + bufflen - scmd->resid_len, 0, scmd->resid_len);
+		memset(mapped_buffer + bufflen - scmd->resid_len, 0,
+		       scmd->resid_len);
+
+	if (private_stack_buffer && !op_is_write(opf))
+		memcpy(buffer, mapped_buffer, bufflen);
 
 	if (args->resid)
 		*args->resid = scmd->resid_len;
@@ -356,6 +384,9 @@ retry:
 	ret = scmd->result;
  out:
 	blk_mq_free_request(req);
+ out_free_buffer:
+	if (private_stack_buffer)
+		kvfree(mapped_buffer);
 
 	return ret;
 }

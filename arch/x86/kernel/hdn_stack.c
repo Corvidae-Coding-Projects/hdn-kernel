@@ -37,13 +37,13 @@ static atomic64_t stack_allocation_attempts;
 static atomic64_t stack_allocations;
 static atomic64_t stack_allocation_failures;
 static atomic64_t stack_live;
-static atomic64_t stack_publications;
+atomic64_t stack_publications;
 static atomic64_t stack_retirements;
-static atomic64_t stack_diagnostic_reads;
-static atomic64_t stack_diagnostic_read_failures;
-static atomic64_t stack_construction_bytes;
-static atomic64_t stack_switches;
-static atomic64_t stack_async_root_entries;
+atomic64_t stack_diagnostic_reads;
+atomic64_t stack_diagnostic_read_failures;
+atomic64_t stack_construction_bytes;
+atomic64_t stack_switches;
+atomic64_t stack_async_root_entries;
 
 const char *hdn_stack_state(void)
 {
@@ -67,33 +67,6 @@ void hdn_stack_get_stats(struct hdn_stack_stats *stats)
 		.task_switches = atomic64_read(&stack_switches),
 		.async_root_entries = atomic64_read(&stack_async_root_entries),
 	};
-}
-
-void noinstr hdn_stack_account_switch(void)
-{
-	atomic64_inc(&stack_switches);
-}
-
-void noinstr hdn_stack_account_async_root(void)
-{
-	atomic64_inc(&stack_async_root_entries);
-}
-
-void noinstr hdn_stack_account_read(bool failed)
-{
-	atomic64_inc(&stack_diagnostic_reads);
-	if (failed)
-		atomic64_inc(&stack_diagnostic_read_failures);
-}
-
-void noinstr hdn_stack_account_construct(size_t bytes)
-{
-	atomic64_add(bytes, &stack_construction_bytes);
-}
-
-void noinstr hdn_stack_account_publication(void)
-{
-	atomic64_inc(&stack_publications);
 }
 
 /* Offline crash tooling reads physical backing from an owned descriptor;

@@ -836,18 +836,25 @@ EXPORT_SYMBOL_GPL(ata_scsi_port_error_handler);
 void ata_port_wait_eh(struct ata_port *ap)
 {
 	unsigned long flags;
-	DEFINE_WAIT(wait);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct wait_queue_entry *wait = hdn_wait_acquire();
+
+	init_wait_entry(wait, 0);
+#else
+	DEFINE_WAIT(wait_entry);
+	struct wait_queue_entry *wait = &wait_entry;
+#endif
 
  retry:
 	spin_lock_irqsave(ap->lock, flags);
 
 	while (ata_port_eh_scheduled(ap)) {
-		prepare_to_wait(&ap->eh_wait_q, &wait, TASK_UNINTERRUPTIBLE);
+		prepare_to_wait(&ap->eh_wait_q, wait, TASK_UNINTERRUPTIBLE);
 		spin_unlock_irqrestore(ap->lock, flags);
 		schedule();
 		spin_lock_irqsave(ap->lock, flags);
 	}
-	finish_wait(&ap->eh_wait_q, &wait);
+	finish_wait(&ap->eh_wait_q, wait);
 
 	spin_unlock_irqrestore(ap->lock, flags);
 
@@ -856,6 +863,9 @@ void ata_port_wait_eh(struct ata_port *ap)
 		ata_msleep(ap, 10);
 		goto retry;
 	}
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_wait_release(wait);
+#endif
 }
 EXPORT_SYMBOL_GPL(ata_port_wait_eh);
 

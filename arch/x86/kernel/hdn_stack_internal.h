@@ -3,6 +3,7 @@
 #define _X86_HDN_STACK_INTERNAL_H
 
 #include <linux/hdn_stack.h>
+#include <linux/atomic.h>
 #include <linux/workqueue.h>
 #include <asm/page.h>
 
@@ -31,6 +32,12 @@ struct hdn_stack_storage {
 extern unsigned long hdn_stack_region;
 extern unsigned long hdn_stack_boot_retired;
 extern struct hdn_stack_storage *hdn_stack_buckets[HDN_STACK_BUCKETS];
+extern atomic64_t stack_publications;
+extern atomic64_t stack_diagnostic_reads;
+extern atomic64_t stack_diagnostic_read_failures;
+extern atomic64_t stack_construction_bytes;
+extern atomic64_t stack_switches;
+extern atomic64_t stack_async_root_entries;
 
 static __always_inline unsigned int hdn_stack_bucket(unsigned long address)
 {
@@ -44,10 +51,31 @@ void hdn_stack_store(struct hdn_stack_storage *storage,
 		     unsigned long *word, unsigned long value);
 void hdn_stack_publish_storage(struct hdn_stack_storage *storage);
 int hdn_stack_failure_create(unsigned int cpu, unsigned long *begin, unsigned long *cr3);
-void hdn_stack_account_switch(void);
-void hdn_stack_account_async_root(void);
-void hdn_stack_account_read(bool failed);
-void hdn_stack_account_construct(size_t bytes);
-void hdn_stack_account_publication(void);
+static __always_inline void hdn_stack_account_switch(void)
+{
+	atomic64_inc(&stack_switches);
+}
+
+static __always_inline void hdn_stack_account_async_root(void)
+{
+	atomic64_inc(&stack_async_root_entries);
+}
+
+static __always_inline void hdn_stack_account_read(bool failed)
+{
+	atomic64_inc(&stack_diagnostic_reads);
+	if (failed)
+		atomic64_inc(&stack_diagnostic_read_failures);
+}
+
+static __always_inline void hdn_stack_account_construct(size_t bytes)
+{
+	atomic64_add(bytes, &stack_construction_bytes);
+}
+
+static __always_inline void hdn_stack_account_publication(void)
+{
+	atomic64_inc(&stack_publications);
+}
 
 #endif

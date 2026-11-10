@@ -8,6 +8,7 @@
 
 #include <linux/linkage.h>
 #include <linux/objtool.h>
+#include <asm/hdn_rap.h>
 
 // Offsets within the generated constants table
 .set OFFSETOF_BSWAP_MASK,			-5*16	// msb-first CRCs only
@@ -558,18 +559,24 @@
 #ifdef __i386__
 	pop		CONSTS_PTR
 #endif
-	RET
+	HDN_ASM_RETURN
 .endm
 
 #define DEFINE_CRC_PCLMUL_FUNCS(prefix, bits, lsb)			\
 SYM_FUNC_START(prefix##_pclmul_sse);					\
+	HDN_ASM_FUNCTION prefix##_pclmul_sse, 1;			\
 	_crc_pclmul	n=bits, lsb_crc=lsb, vl=16, avx_level=0;	\
+	HDN_ASM_FUNCTION_END prefix##_pclmul_sse;			\
 SYM_FUNC_END(prefix##_pclmul_sse);					\
 									\
 SYM_FUNC_START(prefix##_vpclmul_avx2);					\
+	HDN_ASM_FUNCTION prefix##_vpclmul_avx2, 1;			\
 	_crc_pclmul	n=bits, lsb_crc=lsb, vl=32, avx_level=2;	\
+	HDN_ASM_FUNCTION_END prefix##_vpclmul_avx2;			\
 SYM_FUNC_END(prefix##_vpclmul_avx2);					\
 									\
 SYM_FUNC_START(prefix##_vpclmul_avx512);				\
+	HDN_ASM_FUNCTION prefix##_vpclmul_avx512, 1;			\
 	_crc_pclmul	n=bits, lsb_crc=lsb, vl=64, avx_level=512;	\
+	HDN_ASM_FUNCTION_END prefix##_vpclmul_avx512;			\
 SYM_FUNC_END(prefix##_vpclmul_avx512);

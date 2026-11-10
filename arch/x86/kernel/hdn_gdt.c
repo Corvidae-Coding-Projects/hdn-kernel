@@ -176,6 +176,8 @@ static notrace void hdn_gdt_update(unsigned int target, unsigned int entry,
 	tss_desc tss;
 
 	local_irq_save(irq_flags);
+	if (irq_flags & X86_EFLAGS_AC)
+		panic("HDN GDT update entered with UACCESS enabled");
 	this_cpu = raw_smp_processor_id();
 	if (target != this_cpu)
 		panic("HDN rejected a remote live GDT update");
@@ -224,8 +226,10 @@ static notrace void hdn_gdt_update(unsigned int target, unsigned int entry,
 	} else {
 		__inline_memcpy((void *)(alias + entry * sizeof(struct desc_struct)), data, size);
 	}
-	if (!(irq_flags & X86_EFLAGS_AC))
-		lass_clac();
+	/* Close the writable alias before any helper can enter the protected
+	 * page-table update path. In particular, native_pte_clear() may call
+	 * hdn_pt_update(), which must never execute with UACCESS enabled. */
+	lass_clac();
 	native_pte_clear(window->mm, alias, window->pte);
 	asm volatile("invlpg (%0)" : : "r" (alias) : "memory");
 	native_write_cr3(saved_cr3);

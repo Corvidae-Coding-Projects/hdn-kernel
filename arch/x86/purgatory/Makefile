@@ -32,7 +32,10 @@ targets += purgatory.ro purgatory.chk
 # These are adjustments to the compiler flags used for objects that
 # make up the standalone purgatory.ro
 
-PURGATORY_CFLAGS_REMOVE := -mcmodel=kernel
+# Purgatory is a standalone image entered after the old kernel has handed
+# off its execution domain. It cannot call resident-kernel plugin runtimes.
+# Keep it separately linked with -z nodefaultlib and reject unresolved symbols.
+PURGATORY_CFLAGS_REMOVE := -mcmodel=kernel $(GCC_PLUGINS_CFLAGS)
 PURGATORY_CFLAGS := -mcmodel=small -ffreestanding -fno-zero-initialized-in-bss -g0
 PURGATORY_CFLAGS += -fpic -fvisibility=hidden
 PURGATORY_CFLAGS += $(DISABLE_KSTACK_ERASE) -DDISABLE_BRANCH_PROFILING

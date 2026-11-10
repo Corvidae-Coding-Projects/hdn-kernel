@@ -13,6 +13,7 @@
 #include <linux/vmalloc.h>
 #include <asm/hdn_svm.h>
 #include <asm/msr.h>
+#include <asm/mem_encrypt.h>
 #include <asm/svm.h>
 #include "../mm/hdn_pgtable_internal.h"
 
@@ -63,7 +64,7 @@ int hdn_svm_cpu_prepare(unsigned int cpu, struct page *page)
 	if (svm_host[cpu].mapping) {
 		error = -EBUSY;
 	} else {
-		svm_store(&svm_host[cpu].pa, __sme_page_pa(page));
+		svm_store(&svm_host[cpu].pa, __sme_pa(page_address(page)));
 		svm_store((unsigned long *)&svm_host[cpu].mapping, (unsigned long)mapping);
 	}
 	mutex_unlock(&svm_host_lock);

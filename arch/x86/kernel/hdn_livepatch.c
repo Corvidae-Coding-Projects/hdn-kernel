@@ -5,6 +5,7 @@
 #include <linux/hdn_execmem.h>
 #include <linux/hdn_pgtable.h>
 #include <linux/module.h>
+#include <linux/memory.h>
 #include <linux/mutex.h>
 #include <linux/overflow.h>
 #include <linux/slab.h>

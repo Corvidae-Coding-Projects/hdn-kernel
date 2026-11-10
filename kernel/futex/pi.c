@@ -919,7 +919,12 @@ int futex_lock_pi(u32 __user *uaddr, unsigned int flags, ktime_t *time, int tryl
 {
 	struct hrtimer_sleeper timeout, *to;
 	struct task_struct *exiting;
-	struct rt_mutex_waiter rt_waiter;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct rt_mutex_waiter *rt_waiter = NULL;
+#else
+	struct rt_mutex_waiter stack_rt_waiter;
+	struct rt_mutex_waiter *rt_waiter = &stack_rt_waiter;
+#endif
 	struct futex_q q = futex_q_init;
 	DEFINE_WAKE_Q(wake_q);
 	int res, ret;
@@ -1010,7 +1015,10 @@ retry_private:
 		 */
 		rt_mutex_pre_schedule();
 
-		rt_mutex_init_waiter(&rt_waiter);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+		rt_waiter = hdn_rt_mutex_waiter_acquire();
+#endif
+		rt_mutex_init_waiter(rt_waiter);
 
 		/*
 		 * On PREEMPT_RT, when hb->lock becomes an rt_mutex, we must not
@@ -1032,7 +1040,7 @@ retry_private:
 		 * such that futex_unlock_pi() is guaranteed to observe the waiter when
 		 * it sees the futex_q::pi_state.
 		 */
-		ret = __rt_mutex_start_proxy_lock(&q.pi_state->pi_mutex, &rt_waiter, current, &wake_q);
+		ret = __rt_mutex_start_proxy_lock(&q.pi_state->pi_mutex, rt_waiter, current, &wake_q);
 		raw_spin_unlock_irq_wake(&q.pi_state->pi_mutex.wait_lock, &wake_q);
 
 		if (ret) {
@@ -1044,7 +1052,7 @@ retry_private:
 		if (unlikely(to))
 			hrtimer_sleeper_start_expires(to, HRTIMER_MODE_ABS);
 
-		ret = rt_mutex_wait_proxy_lock(&q.pi_state->pi_mutex, to, &rt_waiter);
+		ret = rt_mutex_wait_proxy_lock(&q.pi_state->pi_mutex, to, rt_waiter);
 
 cleanup:
 		/*
@@ -1065,8 +1073,13 @@ cleanup:
 		 *
 		 * What could possibly go wrong...
 		 */
-		if (ret && !rt_mutex_cleanup_proxy_lock(&q.pi_state->pi_mutex, &rt_waiter))
+		if (ret && !rt_mutex_cleanup_proxy_lock(&q.pi_state->pi_mutex, rt_waiter))
 			ret = 0;
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+		hdn_rt_mutex_waiter_release(rt_waiter);
+		rt_waiter = NULL;
+#endif
 
 		/*
 		 * Now that the rt_waiter has been dequeued, it is safe to use
@@ -1118,6 +1131,10 @@ uaddr_faulted:
 	}
 
 out:
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (rt_waiter)
+		hdn_rt_mutex_waiter_release(rt_waiter);
+#endif
 	if (to) {
 		hrtimer_cancel(&to->timer);
 		destroy_hrtimer_on_stack(&to->timer);

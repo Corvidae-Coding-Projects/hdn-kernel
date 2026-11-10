@@ -59,6 +59,7 @@ SYM_FUNC_START(__hdn_rap_fail)
 	jmp __hdn_rap_halt
 SYM_FUNC_END(__hdn_rap_fail)
 _ASM_NOKPROBE(__hdn_rap_fail)
+STACK_FRAME_NON_STANDARD __hdn_rap_fail
 
 /* Recursion or failure before domain initialization has no safe reporter. */
 SYM_FUNC_START(__hdn_rap_halt)

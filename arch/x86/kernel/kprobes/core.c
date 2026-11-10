@@ -27,6 +27,7 @@
  *		unified x86 kprobes code.
  */
 #include <linux/kprobes.h>
+#include <asm/trapnr.h>
 #include <linux/ptrace.h>
 #include <linux/string.h>
 #include <linux/slab.h>

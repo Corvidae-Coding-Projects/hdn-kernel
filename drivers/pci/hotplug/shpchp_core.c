@@ -57,9 +57,9 @@ static const struct hotplug_slot_ops shpchp_hotplug_slot_ops = {
 	.get_adapter_status =	get_adapter_status,
 };
 
-static int init_slots(struct controller *ctrl)
+static int init_slots(struct shpchp_controller *ctrl)
 {
-	struct slot *slot;
+	struct shpchp_slot *slot;
 	struct hotplug_slot *hotplug_slot;
 	char name[SLOT_NAME_SIZE];
 	int retval;
@@ -123,9 +123,9 @@ error:
 	return retval;
 }
 
-void cleanup_slots(struct controller *ctrl)
+void cleanup_slots(struct shpchp_controller *ctrl)
 {
-	struct slot *slot, *next;
+	struct shpchp_slot *slot, *next;
 
 	list_for_each_entry_safe(slot, next, &ctrl->slot_list, slot_list) {
 		list_del(&slot->slot_list);
@@ -141,7 +141,7 @@ void cleanup_slots(struct controller *ctrl)
  */
 static int set_attention_status(struct hotplug_slot *hotplug_slot, u8 status)
 {
-	struct slot *slot = get_slot(hotplug_slot);
+	struct shpchp_slot *slot = get_slot(hotplug_slot);
 
 	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
 		 __func__, slot_name(slot));
@@ -154,7 +154,7 @@ static int set_attention_status(struct hotplug_slot *hotplug_slot, u8 status)
 
 static int enable_slot(struct hotplug_slot *hotplug_slot)
 {
-	struct slot *slot = get_slot(hotplug_slot);
+	struct shpchp_slot *slot = get_slot(hotplug_slot);
 
 	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
 		 __func__, slot_name(slot));
@@ -164,7 +164,7 @@ static int enable_slot(struct hotplug_slot *hotplug_slot)
 
 static int disable_slot(struct hotplug_slot *hotplug_slot)
 {
-	struct slot *slot = get_slot(hotplug_slot);
+	struct shpchp_slot *slot = get_slot(hotplug_slot);
 
 	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
 		 __func__, slot_name(slot));
@@ -174,7 +174,7 @@ static int disable_slot(struct hotplug_slot *hotplug_slot)
 
 static int get_power_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct slot *slot = get_slot(hotplug_slot);
+	struct shpchp_slot *slot = get_slot(hotplug_slot);
 	int retval;
 
 	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
@@ -189,7 +189,7 @@ static int get_power_status(struct hotplug_slot *hotplug_slot, u8 *value)
 
 static int get_attention_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct slot *slot = get_slot(hotplug_slot);
+	struct shpchp_slot *slot = get_slot(hotplug_slot);
 	int retval;
 
 	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
@@ -204,7 +204,7 @@ static int get_attention_status(struct hotplug_slot *hotplug_slot, u8 *value)
 
 static int get_latch_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct slot *slot = get_slot(hotplug_slot);
+	struct shpchp_slot *slot = get_slot(hotplug_slot);
 	int retval;
 
 	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
@@ -219,7 +219,7 @@ static int get_latch_status(struct hotplug_slot *hotplug_slot, u8 *value)
 
 static int get_adapter_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct slot *slot = get_slot(hotplug_slot);
+	struct shpchp_slot *slot = get_slot(hotplug_slot);
 	int retval;
 
 	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
@@ -251,7 +251,7 @@ static bool shpc_capable(struct pci_dev *bridge)
 static int shpc_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	int rc;
-	struct controller *ctrl;
+	struct shpchp_controller *ctrl;
 
 	if (!shpc_capable(pdev))
 		return -ENODEV;
@@ -299,7 +299,7 @@ err_out_none:
 
 static void shpc_remove(struct pci_dev *dev)
 {
-	struct controller *ctrl = pci_get_drvdata(dev);
+	struct shpchp_controller *ctrl = pci_get_drvdata(dev);
 
 	dev->shpc_managed = 0;
 	shpchp_remove_ctrl_files(ctrl);

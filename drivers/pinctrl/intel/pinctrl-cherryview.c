@@ -26,6 +26,8 @@
 #include <linux/pinctrl/pinctrl.h>
 #include <linux/pinctrl/pinmux.h>
 
+#define intel_pad_context chv_intel_pad_context
+#define intel_community_context chv_intel_community_context
 #include "pinctrl-intel.h"
 
 #define CHV_INTSTAT			0x300
@@ -87,6 +89,17 @@ struct intel_community_context {
 	unsigned int intr_lines[16];
 	u32 saved_intmask;
 };
+
+static struct intel_pad_context *chv_pad_context(struct intel_pinctrl *pctrl)
+{
+	return pctrl->context.pads;
+}
+
+static struct intel_community_context *
+chv_community_context(struct intel_pinctrl *pctrl)
+{
+	return pctrl->context.communities;
+}
 
 #define	PINMODE_INVERT_OE	BIT(15)
 
@@ -747,7 +760,7 @@ static int chv_gpio_request_enable(struct pinctrl_dev *pctldev,
 			return -EBUSY;
 		}
 	} else {
-		struct intel_community_context *cctx = &pctrl->context.communities[0];
+		struct intel_community_context *cctx = chv_community_context(pctrl);
 		int i;
 
 		/* Reset the interrupt mapping */
@@ -1241,7 +1254,7 @@ static unsigned chv_gpio_irq_startup(struct irq_data *d)
 		struct gpio_chip *gc = irq_data_get_irq_chip_data(d);
 		struct intel_pinctrl *pctrl = gpiochip_get_data(gc);
 		struct device *dev = pctrl->dev;
-		struct intel_community_context *cctx = &pctrl->context.communities[0];
+		struct intel_community_context *cctx = chv_community_context(pctrl);
 		irq_hw_number_t hwirq = irqd_to_hwirq(d);
 		irq_flow_handler_t handler;
 		u32 intsel, value;
@@ -1271,7 +1284,7 @@ static unsigned chv_gpio_irq_startup(struct irq_data *d)
 static int chv_gpio_set_intr_line(struct intel_pinctrl *pctrl, unsigned int pin)
 {
 	struct device *dev = pctrl->dev;
-	struct intel_community_context *cctx = &pctrl->context.communities[0];
+	struct intel_community_context *cctx = chv_community_context(pctrl);
 	const struct intel_community *community = &pctrl->communities[0];
 	u32 value, intsel;
 	int i;
@@ -1394,7 +1407,7 @@ static void chv_gpio_irq_handler(struct irq_desc *desc)
 	struct intel_pinctrl *pctrl = gpiochip_get_data(gc);
 	struct device *dev = pctrl->dev;
 	const struct intel_community *community = &pctrl->communities[0];
-	struct intel_community_context *cctx = &pctrl->context.communities[0];
+	struct intel_community_context *cctx = chv_community_context(pctrl);
 	struct irq_chip *chip = irq_desc_get_chip(desc);
 	unsigned long pending;
 	u32 intr_line;
@@ -1617,19 +1630,19 @@ static int chv_pinctrl_probe(struct platform_device *pdev)
 
 #ifdef CONFIG_PM_SLEEP
 	pctrl->context.pads = devm_kcalloc(dev, pctrl->soc->npins,
-					   sizeof(*pctrl->context.pads),
+					   sizeof(struct intel_pad_context),
 					   GFP_KERNEL);
 	if (!pctrl->context.pads)
 		return -ENOMEM;
 #endif
 
 	pctrl->context.communities = devm_kcalloc(dev, pctrl->soc->ncommunities,
-						  sizeof(*pctrl->context.communities),
+						  sizeof(struct intel_community_context),
 						  GFP_KERNEL);
 	if (!pctrl->context.communities)
 		return -ENOMEM;
 
-	cctx = &pctrl->context.communities[0];
+	cctx = chv_community_context(pctrl);
 	for (i = 0; i < ARRAY_SIZE(cctx->intr_lines); i++)
 		cctx->intr_lines[i] = CHV_INVALID_HWIRQ;
 
@@ -1675,7 +1688,7 @@ static void chv_pinctrl_remove(struct platform_device *pdev)
 static int chv_pinctrl_suspend_noirq(struct device *dev)
 {
 	struct intel_pinctrl *pctrl = dev_get_drvdata(dev);
-	struct intel_community_context *cctx = &pctrl->context.communities[0];
+	struct intel_community_context *cctx = chv_community_context(pctrl);
 	int i;
 
 	guard(raw_spinlock_irqsave)(&chv_lock);
@@ -1684,7 +1697,7 @@ static int chv_pinctrl_suspend_noirq(struct device *dev)
 
 	for (i = 0; i < pctrl->soc->npins; i++) {
 		const struct pinctrl_pin_desc *desc;
-		struct intel_pad_context *ctx = &pctrl->context.pads[i];
+		struct intel_pad_context *ctx = &chv_pad_context(pctrl)[i];
 
 		desc = &pctrl->soc->pins[i];
 		if (chv_pad_locked(pctrl, desc->number))
@@ -1702,7 +1715,7 @@ static int chv_pinctrl_suspend_noirq(struct device *dev)
 static int chv_pinctrl_resume_noirq(struct device *dev)
 {
 	struct intel_pinctrl *pctrl = dev_get_drvdata(dev);
-	struct intel_community_context *cctx = &pctrl->context.communities[0];
+	struct intel_community_context *cctx = chv_community_context(pctrl);
 	int i;
 
 	guard(raw_spinlock_irqsave)(&chv_lock);
@@ -1716,7 +1729,7 @@ static int chv_pinctrl_resume_noirq(struct device *dev)
 
 	for (i = 0; i < pctrl->soc->npins; i++) {
 		const struct pinctrl_pin_desc *desc;
-		struct intel_pad_context *ctx = &pctrl->context.pads[i];
+		struct intel_pad_context *ctx = &chv_pad_context(pctrl)[i];
 		u32 val;
 
 		desc = &pctrl->soc->pins[i];

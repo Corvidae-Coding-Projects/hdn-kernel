@@ -13,6 +13,8 @@
  * __leXX (normally) or __beXX (given OHCI_BIG_ENDIAN), depending on the
  * host controller implementation.
  */
+#define urb_priv ohci_urb_priv
+
 typedef __u32 __bitwise __hc32;
 typedef __u16 __bitwise __hc16;
 

@@ -22,7 +22,7 @@ CTRINC:	.octa 0x00000003000000020000000100000000
 .text
 
 /*
- * chacha_permute - permute one block
+ * __hdn_chacha_ssse3_permute - permute one block
  *
  * Permute one 64-byte block where the state matrix is in %xmm0-%xmm3.  This
  * function performs matrix operations on four words in parallel, but requires
@@ -34,8 +34,8 @@ CTRINC:	.octa 0x00000003000000020000000100000000
  *
  * Clobbers: %r8d, %xmm4-%xmm7
  */
-SYM_FUNC_START_LOCAL(chacha_permute)
-	HDN_REGS_FUNC chacha_permute
+SYM_FUNC_START_LOCAL(__hdn_chacha_ssse3_permute)
+	HDN_REGS_FUNC __hdn_chacha_ssse3_permute
 
 	movdqa		ROT8(%rip),%xmm4
 	movdqa		ROT16(%rip),%xmm5
@@ -111,8 +111,8 @@ SYM_FUNC_START_LOCAL(chacha_permute)
 	jnz		.Ldoubleround
 
 	HDN_REGS_RETURN
-	HDN_ASM_FUNCTION_END chacha_permute
-SYM_FUNC_END(chacha_permute)
+	HDN_ASM_FUNCTION_END __hdn_chacha_ssse3_permute
+SYM_FUNC_END(__hdn_chacha_ssse3_permute)
 
 SYM_FUNC_START(chacha_block_xor_ssse3)
 	HDN_ASM_FUNCTION chacha_block_xor_ssse3
@@ -134,7 +134,7 @@ SYM_FUNC_START(chacha_block_xor_ssse3)
 	movdqa		%xmm3,%xmm11
 
 	mov		%rcx,%rax
-	HDN_REGS_CALL chacha_permute
+	HDN_REGS_CALL __hdn_chacha_ssse3_permute
 
 	# o0 = i0 ^ (x0 + s0)
 	paddd		%xmm8,%xmm0
@@ -217,7 +217,7 @@ SYM_FUNC_START(hchacha_block_ssse3)
 	movdqu		0x30(%rdi),%xmm3
 
 	mov		%edx,%r8d
-	HDN_REGS_CALL chacha_permute
+	HDN_REGS_CALL __hdn_chacha_ssse3_permute
 
 	movdqu		%xmm0,0x00(%rsi)
 	movdqu		%xmm3,0x10(%rsi)

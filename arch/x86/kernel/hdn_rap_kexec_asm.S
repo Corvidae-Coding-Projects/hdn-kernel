@@ -44,6 +44,7 @@ _ASM_NOKPROBE(hdn_rap_kexec)
 /* The terminal copy code returns only here. It restored CRs from the physical
  * checkpoint; install the matching virtual stack and per-CPU base first. */
 SYM_FUNC_START(hdn_rap_kexec_return)
+	ENDBR
 	HDN_KEXEC_FUNC hdn_rap_kexec_return, 12
 	UNWIND_HINT_UNDEFINED
 	movq $hdn_rap_kexec_state, %rsi

@@ -41,6 +41,8 @@ void hdn_text_prepare(struct hdn_text_token *token, void *address, size_t size,
 		      struct page **pages, pte_t *ptep, enum hdn_text_kind kind);
 void hdn_text_open(struct hdn_text_token *token, pte_t *ptep, void *address,
 		   size_t size, enum hdn_text_kind kind);
+bool hdn_text_leaf_allowed(const unsigned long *slot, unsigned long pfn,
+			   unsigned long nr, unsigned long flags);
 void hdn_text_close(struct hdn_text_token *token, pte_t *ptep);
 void hdn_text_report(const struct hdn_text_token *token, enum hdn_text_kind kind);
 void hdn_text_get_stats(struct hdn_text_window_stats *stats);
@@ -50,6 +52,8 @@ static inline void hdn_text_prepare(struct hdn_text_token *token, void *address,
 		 size_t size, struct page **pages, pte_t *ptep, enum hdn_text_kind kind) { }
 static inline void hdn_text_open(struct hdn_text_token *token, pte_t *ptep,
 		void *address, size_t size, enum hdn_text_kind kind) { }
+static inline bool hdn_text_leaf_allowed(const unsigned long *slot,
+		unsigned long pfn, unsigned long nr, unsigned long flags) { return false; }
 static inline void hdn_text_close(struct hdn_text_token *token, pte_t *ptep) { }
 static inline void hdn_text_report(const struct hdn_text_token *token,
 				   enum hdn_text_kind kind) { }

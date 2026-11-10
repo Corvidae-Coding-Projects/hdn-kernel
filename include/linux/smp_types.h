@@ -66,4 +66,18 @@ struct __call_single_node {
 #endif
 };
 
+typedef void (*smp_call_func_t)(void *info);
+
+/* Kept in the type-only header so private-stack tasks can own synchronous
+ * descriptors without introducing the full SMP API into sched.h. */
+struct __call_single_data {
+	struct __call_single_node node;
+	smp_call_func_t func;
+	void *info;
+};
+
+/* Use __aligned() to avoid using two cache lines for one CSD. */
+typedef struct __call_single_data call_single_data_t
+	__aligned(sizeof(struct __call_single_data));
+
 #endif /* __LINUX_SMP_TYPES_H */

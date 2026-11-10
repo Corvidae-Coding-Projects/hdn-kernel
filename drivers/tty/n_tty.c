@@ -2186,7 +2186,12 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file, u8 *kbuf,
 {
 	struct n_tty_data *ldata = tty->disc_data;
 	u8 *kb = kbuf;
-	DEFINE_WAIT_FUNC(wait, woken_wake_function);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct wait_queue_entry *wait;
+#else
+	DEFINE_WAIT_FUNC(stack_wait, woken_wake_function);
+	struct wait_queue_entry *wait = &stack_wait;
+#endif
 	int minimum, time;
 	ssize_t retval;
 	long timeout;
@@ -2229,7 +2234,11 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file, u8 *kbuf,
 	packet = tty->ctrl.packet;
 	old_tail = ldata->read_tail;
 
-	add_wait_queue(&tty->read_wait, &wait);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wait = hdn_wait_acquire();
+	init_wait_func(wait, woken_wake_function);
+#endif
+	add_wait_queue(&tty->read_wait, wait);
 	while (nr) {
 		/* First test for status change. */
 		if (packet && tty->link->ctrl.pktstatus) {
@@ -2250,7 +2259,7 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file, u8 *kbuf,
 			tty_buffer_flush_work(tty->port);
 			down_read(&tty->termios_rwsem);
 			if (!input_available_p(tty, 0)) {
-				int ret = n_tty_wait_for_input(tty, file, &wait,
+				int ret = n_tty_wait_for_input(tty, file, wait,
 							       &timeout);
 				if (ret <= 0) {
 					retval = ret;
@@ -2291,7 +2300,17 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file, u8 *kbuf,
 	}
 	up_read(&tty->termios_rwsem);
 
-	remove_wait_queue(&tty->read_wait, &wait);
+	remove_wait_queue(&tty->read_wait, wait);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/*
+	 * remove_wait_queue() deliberately uses list_del(), which is sufficient
+	 * for an upstream stack object whose lifetime ends here.  The hardened
+	 * wait entry is task-owned and reusable, so restore its detached state
+	 * before returning it to the per-task pool.
+	 */
+	INIT_LIST_HEAD(&wait->entry);
+	hdn_wait_release(wait);
+#endif
 	mutex_unlock(&ldata->atomic_read_lock);
 
 	if (kb - kbuf)
@@ -2306,7 +2325,11 @@ more_to_be_read:
 	 * NOTE! We return here with both the termios_sem and atomic_read_lock
 	 * still held, the retries will release them when done.
 	 */
-	remove_wait_queue(&tty->read_wait, &wait);
+	remove_wait_queue(&tty->read_wait, wait);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	INIT_LIST_HEAD(&wait->entry);
+	hdn_wait_release(wait);
+#endif
 	*cookie = cookie;
 
 	return kb - kbuf;
@@ -2336,7 +2359,12 @@ static ssize_t n_tty_write(struct tty_struct *tty, struct file *file,
 			   const u8 *buf, size_t nr)
 {
 	const u8 *b = buf;
-	DEFINE_WAIT_FUNC(wait, woken_wake_function);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct wait_queue_entry *wait;
+#else
+	DEFINE_WAIT_FUNC(stack_wait, woken_wake_function);
+	struct wait_queue_entry *wait = &stack_wait;
+#endif
 	ssize_t num, retval = 0;
 
 	/* Job control check -- must be done at start (POSIX.1 7.1.1.4). */
@@ -2351,7 +2379,11 @@ static ssize_t n_tty_write(struct tty_struct *tty, struct file *file,
 	/* Write out any echoed characters that are still pending */
 	process_echoes(tty);
 
-	add_wait_queue(&tty->write_wait, &wait);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wait = hdn_wait_acquire();
+	init_wait_func(wait, woken_wake_function);
+#endif
+	add_wait_queue(&tty->write_wait, wait);
 	while (1) {
 		if (signal_pending(current)) {
 			retval = -ERESTARTSYS;
@@ -2404,12 +2436,16 @@ static ssize_t n_tty_write(struct tty_struct *tty, struct file *file,
 		}
 		up_read(&tty->termios_rwsem);
 
-		wait_woken(&wait, TASK_INTERRUPTIBLE, MAX_SCHEDULE_TIMEOUT);
+		wait_woken(wait, TASK_INTERRUPTIBLE, MAX_SCHEDULE_TIMEOUT);
 
 		down_read(&tty->termios_rwsem);
 	}
 break_out:
-	remove_wait_queue(&tty->write_wait, &wait);
+	remove_wait_queue(&tty->write_wait, wait);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	INIT_LIST_HEAD(&wait->entry);
+	hdn_wait_release(wait);
+#endif
 	if (nr && tty->fasync)
 		set_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
 

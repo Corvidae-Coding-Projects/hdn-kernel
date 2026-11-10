@@ -5,9 +5,10 @@
 #include <asm/nospec-branch.h>
 #include <asm/unwind_hints.h>
 
-	.pushsection .text, "ax"
+	.pushsection .init.text, "ax"
 SYM_FUNC_START(__hdn_stack_bootstrap)
 	ANNOTATE_NOENDBR
+	HDN_STACK_BOOTSTRAP_FUNC __hdn_stack_bootstrap
 	UNWIND_HINT_UNDEFINED
 	movq HDN_STACK_SWITCH_CR3(%rdi), %r11
 	movq HDN_STACK_SWITCH_SP(%rdi), %rdx
@@ -20,5 +21,6 @@ SYM_FUNC_START(__hdn_stack_bootstrap)
 	HDN_C_CALL hdn_stack_bootstrap_continue
 	ud2
 SYM_FUNC_END(__hdn_stack_bootstrap)
+STACK_FRAME_NON_STANDARD __hdn_stack_bootstrap
 _ASM_NOKPROBE(__hdn_stack_bootstrap)
 	.popsection

@@ -401,8 +401,18 @@ EXPORT_SYMBOL(call_usermodehelper_setup);
 int call_usermodehelper_exec(struct subprocess_info *sub_info, int wait)
 {
 	unsigned int state = TASK_UNINTERRUPTIBLE;
-	DECLARE_COMPLETION_ONSTACK(done);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct completion *done = &sub_info->complete_storage;
+#else
+	DECLARE_COMPLETION_ONSTACK(done_storage);
+	struct completion *done = &done_storage;
+#endif
 	int retval = 0;
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* The workqueue completes this after the caller has scheduled out. */
+	init_completion(done);
+#endif
 
 	if (!sub_info->path) {
 		call_usermodehelper_freeinfo(sub_info);
@@ -427,7 +437,7 @@ int call_usermodehelper_exec(struct subprocess_info *sub_info, int wait)
 	 * This makes it possible to use umh_complete to free
 	 * the data structure in case of UMH_NO_WAIT.
 	 */
-	sub_info->complete = (wait == UMH_NO_WAIT) ? NULL : &done;
+	sub_info->complete = (wait == UMH_NO_WAIT) ? NULL : done;
 	sub_info->wait = wait;
 
 	queue_work(system_unbound_wq, &sub_info->work);
@@ -438,7 +448,7 @@ int call_usermodehelper_exec(struct subprocess_info *sub_info, int wait)
 		state |= TASK_FREEZABLE;
 
 	if (wait & UMH_KILLABLE) {
-		retval = wait_for_completion_state(&done, state | TASK_KILLABLE);
+		retval = wait_for_completion_state(done, state | TASK_KILLABLE);
 		if (!retval)
 			goto wait_done;
 
@@ -454,7 +464,7 @@ int call_usermodehelper_exec(struct subprocess_info *sub_info, int wait)
 		 * SIGKILL'ed processes for long.
 		 */
 	}
-	wait_for_completion_state(&done, state);
+	wait_for_completion_state(done, state);
 
 wait_done:
 	retval = sub_info->retval;

@@ -4,6 +4,7 @@
 #include <linux/kexec.h>
 #include <linux/sched.h>
 #include <asm/cacheflush.h>
+#include <asm/desc.h>
 #include <asm/hdn_rap_kexec.h>
 #include <asm/hdn_stack_mm.h>
 #include <asm/irqflags.h>

@@ -6,6 +6,29 @@
  */
 #include "sched.h"
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+struct wait_queue_entry *hdn_wait_acquire(void)
+{
+	struct wait_queue_entry *wait = &current->hdn_wait;
+
+	if (unlikely(current->hdn_wait_active))
+		BUG();
+	current->hdn_wait_active = true;
+	return wait;
+}
+
+void hdn_wait_release(struct wait_queue_entry *wait)
+{
+	if (unlikely(wait != &current->hdn_wait ||
+		     !current->hdn_wait_active ||
+		     !list_empty(&wait->entry)))
+		BUG();
+	current->hdn_wait_active = false;
+}
+EXPORT_SYMBOL_GPL(hdn_wait_acquire);
+EXPORT_SYMBOL_GPL(hdn_wait_release);
+#endif
+
 void __init_waitqueue_head(struct wait_queue_head *wq_head, const char *name, struct lock_class_key *key)
 {
 	spin_lock_init(&wq_head->lock);

@@ -116,7 +116,7 @@ EXPORT_SYMBOL_GPL(acpiphp_unregister_attention);
  */
 static int enable_slot(struct hotplug_slot *hotplug_slot)
 {
-	struct slot *slot = to_slot(hotplug_slot);
+	struct acpiphp_hotplug_slot *slot = to_slot(hotplug_slot);
 
 	pr_debug("%s - physical_slot = %s\n", __func__, slot_name(slot));
 
@@ -133,7 +133,7 @@ static int enable_slot(struct hotplug_slot *hotplug_slot)
  */
 static int disable_slot(struct hotplug_slot *hotplug_slot)
 {
-	struct slot *slot = to_slot(hotplug_slot);
+	struct acpiphp_hotplug_slot *slot = to_slot(hotplug_slot);
 
 	pr_debug("%s - physical_slot = %s\n", __func__, slot_name(slot));
 
@@ -177,7 +177,7 @@ static int set_attention_status(struct hotplug_slot *hotplug_slot, u8 status)
  */
 static int get_power_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct slot *slot = to_slot(hotplug_slot);
+	struct acpiphp_hotplug_slot *slot = to_slot(hotplug_slot);
 
 	pr_debug("%s - physical_slot = %s\n", __func__, slot_name(slot));
 
@@ -223,7 +223,7 @@ static int get_attention_status(struct hotplug_slot *hotplug_slot, u8 *value)
  */
 static int get_latch_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct slot *slot = to_slot(hotplug_slot);
+	struct acpiphp_hotplug_slot *slot = to_slot(hotplug_slot);
 
 	pr_debug("%s - physical_slot = %s\n", __func__, slot_name(slot));
 
@@ -243,7 +243,7 @@ static int get_latch_status(struct hotplug_slot *hotplug_slot, u8 *value)
  */
 static int get_adapter_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct slot *slot = to_slot(hotplug_slot);
+	struct acpiphp_hotplug_slot *slot = to_slot(hotplug_slot);
 
 	pr_debug("%s - physical_slot = %s\n", __func__, slot_name(slot));
 
@@ -252,11 +252,11 @@ static int get_adapter_status(struct hotplug_slot *hotplug_slot, u8 *value)
 	return 0;
 }
 
-/* callback routine to initialize 'struct slot' for each slot */
+/* callback routine to initialize 'struct acpiphp_hotplug_slot' for each slot */
 int acpiphp_register_hotplug_slot(struct acpiphp_slot *acpiphp_slot,
 				  unsigned int sun)
 {
-	struct slot *slot;
+	struct acpiphp_hotplug_slot *slot;
 	int retval = -ENOMEM;
 	char name[SLOT_NAME_SIZE];
 
@@ -293,7 +293,7 @@ error:
 
 void acpiphp_unregister_hotplug_slot(struct acpiphp_slot *acpiphp_slot)
 {
-	struct slot *slot = acpiphp_slot->slot;
+	struct acpiphp_hotplug_slot *slot = acpiphp_slot->slot;
 
 	pr_info("Slot [%s] unregistered\n", slot_name(slot));
 

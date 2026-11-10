@@ -45,6 +45,7 @@
  */
 
 #include <linux/linkage.h>
+#include <asm/hdn_rap.h>
 
 ## ISCSI CRC 32 Implementation with crc32 and pclmulqdq Instruction
 
@@ -56,6 +57,7 @@
 
 .text
 SYM_FUNC_START(crc32c_x86_3way)
+	HDN_ASM_FUNCTION crc32c_x86_3way, 1
 #define    crc0		  %edi
 #define    crc0_q	  %rdi
 #define    bufp		  %rsi
@@ -220,7 +222,8 @@ SYM_FUNC_START(crc32c_x86_3way)
 	crc32b	(bufp), crc0
 .Ldone:
 	mov	crc0, %eax
-        RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END crc32c_x86_3way
 SYM_FUNC_END(crc32c_x86_3way)
 
 .section	.rodata, "a", @progbits

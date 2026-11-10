@@ -129,6 +129,116 @@ static bool rap_hw_untrain(struct rap_sequence *s, bool from_call)
 	return true;
 }
 
+static bool rap_hw_saferet_reference(struct rap_sequence *s, const char *name,
+		unsigned long member)
+{
+	static const char opcode[] = "\x48\x81\xbc\x24\x88\0\0\0";
+	struct symbol *target = find_symbol_by_name(s->file->elf, name);
+	unsigned long offset = s->func->offset + s->pos;
+	struct instruction *insn = find_insn(s->file, s->func->sec, offset);
+	struct reloc *reloc;
+
+	if (!target || is_weak_sym(target) || !insn || insn->len != 12 ||
+	    s->pos > s->func->len || insn->len > s->func->len - s->pos ||
+	    memcmp(s->func->sec->data->d_buf + offset, opcode, sizeof(opcode) - 1))
+		return false;
+	reloc = find_reloc_by_dest(s->file->elf, s->func->sec, offset + sizeof(opcode) - 1);
+	if (!reloc || arch_reloc_size(reloc) != 4 || reloc_type(reloc) != R_X86_64_32S ||
+	    reloc->sym->sec != target->sec ||
+	    reloc->sym->offset + reloc_addend(reloc) != target->offset + member ||
+	    find_reloc_by_dest_range(s->file->elf, s->func->sec, offset, sizeof(opcode) - 1) ||
+	    find_reloc_by_dest_range(s->file->elf, s->func->sec, offset + sizeof(opcode), 3))
+		return false;
+	s->pos += insn->len;
+	return true;
+}
+
+static bool rap_hw_saferet_branch(struct rap_sequence *s, unsigned char opcode)
+{
+	unsigned long offset = s->func->offset + s->pos;
+	struct instruction *insn = find_insn(s->file, s->func->sec, offset);
+	const char *bytes = s->func->sec->data->d_buf + offset;
+	unsigned long delta;
+
+	if (!insn)
+		return false;
+	if (insn->len != 2 || insn->type != INSN_JUMP_CONDITIONAL ||
+	    (unsigned char)bytes[0] != opcode || s->pos + insn->len > s->func->len)
+		return false;
+	delta = s->func->len - s->pos - insn->len;
+	if (delta > 0x7f || (unsigned char)bytes[1] != delta)
+		return false;
+	return rap_sequence_bytes(s, bytes, insn->len);
+}
+
+/* HANDLE_INTR_SAFERET is an empty original alternative with two complete SRSO
+ * replacements. Match both speculative-safe return ranges, their common exit,
+ * the fence and the sole reviewed handler call before accepting its padding. */
+static bool rap_hw_saferet(struct rap_sequence *s)
+{
+	struct instruction *first = find_insn(s->file, s->func->sec,
+			s->func->offset + s->pos);
+	struct alt_group *orig = first ? first->alt_group : NULL;
+	struct alternative *alt;
+	unsigned long end;
+	unsigned int seen = 0;
+
+	if (!rap_hw_alt_is(s, "X86_FEATURE_SRSO") &&
+	    !rap_hw_alt_is(s, "X86_FEATURE_SRSO_ALIAS"))
+		return true;
+	if (!orig || orig->orig_group || orig->first_insn != first || !orig->last_insn)
+		return false;
+	end = orig->last_insn->offset + orig->last_insn->len - s->func->offset;
+	if (end <= s->pos || end > s->func->len)
+		return false;
+	for (alt = first->alts; alt; alt = alt->next) {
+		struct alt_group *g = alt->insn->alt_group;
+		struct symbol span = *s->func;
+		struct rap_sequence body = { .file = s->file, .func = &span };
+		const char *feature, *target;
+		unsigned int bit;
+
+		if (alt->type != ALT_TYPE_INSTRUCTIONS || !g || g->orig_group != orig ||
+		    g->first_insn != alt->insn || !g->last_insn || g->feature >> 16 ||
+		    !(feature = arch_cpu_feature_name(g->feature)))
+			return false;
+		if (!strcmp(feature, "X86_FEATURE_SRSO")) {
+			bit = 1;
+			target = "srso_safe_ret";
+		} else if (!strcmp(feature, "X86_FEATURE_SRSO_ALIAS")) {
+			bit = 2;
+			target = "srso_alias_safe_ret";
+		} else {
+			return false;
+		}
+		span.sec = alt->insn->sec;
+		span.offset = alt->insn->offset;
+		span.len = g->last_insn->offset + g->last_insn->len - span.offset;
+		if ((seen & bit) || span.len > end - s->pos)
+			return false;
+		if (!rap_hw_saferet_reference(&body, target, 0))
+			return false;
+		if (!rap_hw_saferet_branch(&body, 0x72))
+			return false;
+		if (!rap_hw_saferet_reference(&body, target, 5))
+			return false;
+		if (!rap_hw_saferet_branch(&body, 0x77))
+			return false;
+		if (!rap_sequence_bytes(&body, "\x0f\xae\xe8\x48\x8d\x7c\x24\x08", 8))
+			return false;
+		if (!rap_sequence_edge_match(&body, "handle_interrupted_saferet", true, false))
+			return false;
+		if (body.pos != span.len)
+			return false;
+		seen |= bit;
+		rap_hw_mark(s->file, &span);
+	}
+	if (seen != 3 || !rap_thunk_padding(s, end, false))
+		return false;
+	first->rap_hw_alt = true;
+	return true;
+}
+
 static bool rap_hw_ibrs(struct rap_sequence *s, bool enter, bool save)
 {
 	struct rap_kexec_sequence k = { .seq = *s };

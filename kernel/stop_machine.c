@@ -22,6 +22,7 @@
 #include <linux/atomic.h>
 #include <linux/nmi.h>
 #include <linux/sched/wake_q.h>
+#include <linux/slab.h>
 
 /*
  * Structure to determine completion condition and record errors.  May
@@ -32,6 +33,13 @@ struct cpu_stop_done {
 	int			ret;		/* collected return value */
 	struct completion	completion;	/* fired if nr_todo reaches 0 */
 };
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+struct hdn_stop_one_state {
+	struct cpu_stop_done	done;
+	struct cpu_stop_work	work;
+};
+#endif
 
 /* the actual stopper, one per every possible cpu, enabled on online cpus */
 struct cpu_stopper {
@@ -66,6 +74,7 @@ void print_stop_info(const char *log_lvl, struct task_struct *task)
 /* static data for stop_cpus */
 static DEFINE_MUTEX(stop_cpus_mutex);
 static bool stop_cpus_in_progress;
+static struct cpu_stop_done stop_cpus_done;
 
 static void cpu_stop_init_done(struct cpu_stop_done *done, unsigned int nr_todo)
 {
@@ -136,6 +145,30 @@ static bool cpu_stop_queue_work(unsigned int cpu, struct cpu_stop_work *work)
  */
 int stop_one_cpu(unsigned int cpu, cpu_stop_fn_t fn, void *arg)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct hdn_stop_one_state *state;
+	int ret;
+
+	state = kmalloc(sizeof(*state), GFP_KERNEL | __GFP_NOFAIL);
+	state->work = (struct cpu_stop_work) {
+		.fn = fn,
+		.arg = arg,
+		.done = &state->done,
+		.caller = _RET_IP_,
+	};
+	cpu_stop_init_done(&state->done, 1);
+	if (!cpu_stop_queue_work(cpu, &state->work)) {
+		ret = -ENOENT;
+		goto out;
+	}
+	/* See the ordinary-profile path below. */
+	cond_resched();
+	wait_for_completion(&state->done.completion);
+	ret = state->done.ret;
+out:
+	kfree(state);
+	return ret;
+#else
 	struct cpu_stop_done done;
 	struct cpu_stop_work work = { .fn = fn, .arg = arg, .done = &done, .caller = _RET_IP_ };
 
@@ -149,6 +182,7 @@ int stop_one_cpu(unsigned int cpu, cpu_stop_fn_t fn, void *arg)
 	cond_resched();
 	wait_for_completion(&done.completion);
 	return done.ret;
+#endif
 }
 
 /* This controls the threads on each CPU. */
@@ -175,6 +209,22 @@ struct multi_stop_data {
 	enum multi_stop_state	state;
 	atomic_t		thread_ack;
 };
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+struct hdn_stop_two_state {
+	struct cpu_stop_done	done;
+	struct cpu_stop_work	work1;
+	struct cpu_stop_work	work2;
+	struct multi_stop_data	msdata;
+};
+
+struct hdn_inactive_stop_state {
+	struct cpu_stop_done	done;
+	struct multi_stop_data	msdata;
+};
+
+static DEFINE_PER_CPU(struct hdn_inactive_stop_state, hdn_inactive_stop_state);
+#endif
 
 static void set_state(struct multi_stop_data *msdata,
 		      enum multi_stop_state newstate)
@@ -334,6 +384,40 @@ unlock:
  */
 int stop_two_cpus(unsigned int cpu1, unsigned int cpu2, cpu_stop_fn_t fn, void *arg)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct hdn_stop_two_state *state;
+	int ret;
+
+	state = kmalloc(sizeof(*state), GFP_KERNEL | __GFP_NOFAIL);
+	state->msdata = (struct multi_stop_data) {
+		.fn = fn,
+		.data = arg,
+		.num_threads = 2,
+		.active_cpus = cpumask_of(cpu1),
+	};
+	state->work1 = state->work2 = (struct cpu_stop_work) {
+		.fn = multi_cpu_stop,
+		.arg = &state->msdata,
+		.done = &state->done,
+		.caller = _RET_IP_,
+	};
+	cpu_stop_init_done(&state->done, 2);
+	set_state(&state->msdata, MULTI_STOP_PREPARE);
+
+	if (cpu1 > cpu2)
+		swap(cpu1, cpu2);
+	if (cpu_stop_queue_two_works(cpu1, &state->work1, cpu2,
+				     &state->work2)) {
+		ret = -ENOENT;
+		goto out;
+	}
+
+	wait_for_completion(&state->done.completion);
+	ret = state->done.ret;
+out:
+	kfree(state);
+	return ret;
+#else
 	struct cpu_stop_done done;
 	struct cpu_stop_work work1, work2;
 	struct multi_stop_data msdata;
@@ -362,6 +446,7 @@ int stop_two_cpus(unsigned int cpu1, unsigned int cpu2, cpu_stop_fn_t fn, void *
 
 	wait_for_completion(&done.completion);
 	return done.ret;
+#endif
 }
 
 /**
@@ -424,13 +509,11 @@ static bool queue_stop_cpus_work(const struct cpumask *cpumask,
 static int __stop_cpus(const struct cpumask *cpumask,
 		       cpu_stop_fn_t fn, void *arg)
 {
-	struct cpu_stop_done done;
-
-	cpu_stop_init_done(&done, cpumask_weight(cpumask));
-	if (!queue_stop_cpus_work(cpumask, fn, arg, &done))
+	cpu_stop_init_done(&stop_cpus_done, cpumask_weight(cpumask));
+	if (!queue_stop_cpus_work(cpumask, fn, arg, &stop_cpus_done))
 		return -ENOENT;
-	wait_for_completion(&done.completion);
-	return done.ret;
+	wait_for_completion(&stop_cpus_done.completion);
+	return stop_cpus_done.ret;
 }
 
 /**
@@ -587,12 +670,9 @@ early_initcall(cpu_stop_init);
 int stop_machine_cpuslocked(cpu_stop_fn_t fn, void *data,
 			    const struct cpumask *cpus)
 {
-	struct multi_stop_data msdata = {
-		.fn = fn,
-		.data = data,
-		.num_threads = num_online_cpus(),
-		.active_cpus = cpus,
-	};
+	struct multi_stop_data *msdata;
+	unsigned int num_threads = num_online_cpus();
+	int ret;
 
 	lockdep_assert_cpus_held();
 
@@ -605,7 +685,7 @@ int stop_machine_cpuslocked(cpu_stop_fn_t fn, void *data,
 		unsigned long flags;
 		int ret;
 
-		WARN_ON_ONCE(msdata.num_threads != 1);
+		WARN_ON_ONCE(num_threads != 1);
 
 		local_irq_save(flags);
 		hard_irq_disable();
@@ -615,9 +695,21 @@ int stop_machine_cpuslocked(cpu_stop_fn_t fn, void *data,
 		return ret;
 	}
 
+	msdata = kmalloc(sizeof(*msdata), GFP_KERNEL);
+	if (!msdata)
+		return -ENOMEM;
+	*msdata = (struct multi_stop_data) {
+		.fn = fn,
+		.data = data,
+		.num_threads = num_threads,
+		.active_cpus = cpus,
+	};
+
 	/* Set the initial state and stop all online cpus. */
-	set_state(&msdata, MULTI_STOP_PREPARE);
-	return stop_cpus(cpu_online_mask, multi_cpu_stop, &msdata);
+	set_state(msdata, MULTI_STOP_PREPARE);
+	ret = stop_cpus(cpu_online_mask, multi_cpu_stop, msdata);
+	kfree(msdata);
+	return ret;
 }
 
 int stop_machine(cpu_stop_fn_t fn, void *data, const struct cpumask *cpus)
@@ -636,8 +728,13 @@ EXPORT_SYMBOL_GPL(stop_machine);
 int stop_core_cpuslocked(unsigned int cpu, cpu_stop_fn_t fn, void *data)
 {
 	const struct cpumask *smt_mask = cpu_smt_mask(cpu);
+	struct multi_stop_data *msdata;
+	int ret;
 
-	struct multi_stop_data msdata = {
+	msdata = kmalloc(sizeof(*msdata), GFP_KERNEL);
+	if (!msdata)
+		return -ENOMEM;
+	*msdata = (struct multi_stop_data) {
 		.fn = fn,
 		.data = data,
 		.num_threads = cpumask_weight(smt_mask),
@@ -647,8 +744,10 @@ int stop_core_cpuslocked(unsigned int cpu, cpu_stop_fn_t fn, void *data)
 	lockdep_assert_cpus_held();
 
 	/* Set the initial state and stop all online cpus. */
-	set_state(&msdata, MULTI_STOP_PREPARE);
-	return stop_cpus(smt_mask, multi_cpu_stop, &msdata);
+	set_state(msdata, MULTI_STOP_PREPARE);
+	ret = stop_cpus(smt_mask, multi_cpu_stop, msdata);
+	kfree(msdata);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(stop_core_cpuslocked);
 #endif
@@ -678,30 +777,61 @@ EXPORT_SYMBOL_GPL(stop_core_cpuslocked);
 int stop_machine_from_inactive_cpu(cpu_stop_fn_t fn, void *data,
 				  const struct cpumask *cpus)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct hdn_inactive_stop_state *state =
+		per_cpu_ptr(&hdn_inactive_stop_state, raw_smp_processor_id());
+	struct multi_stop_data *msdata = &state->msdata;
+	struct cpu_stop_done *done = &state->done;
+#else
 	struct multi_stop_data msdata = { .fn = fn, .data = data,
 					    .active_cpus = cpus };
 	struct cpu_stop_done done;
+#endif
 	int ret;
 
 	/* Local CPU must be inactive and CPU hotplug in progress. */
 	BUG_ON(cpu_active(raw_smp_processor_id()));
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	*msdata = (struct multi_stop_data) {
+		.fn = fn,
+		.data = data,
+		.active_cpus = cpus,
+	};
+	msdata->num_threads = num_active_cpus() + 1; /* +1 for local */
+#else
 	msdata.num_threads = num_active_cpus() + 1;	/* +1 for local */
+#endif
 
 	/* No proper task established and can't sleep - busy wait for lock. */
 	while (!mutex_trylock(&stop_cpus_mutex))
 		cpu_relax();
 
 	/* Schedule work on other CPUs and execute directly for local CPU */
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	set_state(msdata, MULTI_STOP_PREPARE);
+	cpu_stop_init_done(done, num_active_cpus());
+	queue_stop_cpus_work(cpu_active_mask, multi_cpu_stop, msdata, done);
+	ret = multi_cpu_stop(msdata);
+#else
 	set_state(&msdata, MULTI_STOP_PREPARE);
 	cpu_stop_init_done(&done, num_active_cpus());
 	queue_stop_cpus_work(cpu_active_mask, multi_cpu_stop, &msdata,
 			     &done);
 	ret = multi_cpu_stop(&msdata);
+#endif
 
 	/* Busy wait for completion. */
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	while (!completion_done(&done->completion))
+#else
 	while (!completion_done(&done.completion))
+#endif
 		cpu_relax();
 
 	mutex_unlock(&stop_cpus_mutex);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	return ret ?: done->ret;
+#else
 	return ret ?: done.ret;
+#endif
 }

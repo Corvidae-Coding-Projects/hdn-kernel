@@ -31,7 +31,7 @@
 #define SAFE_REMOVAL	 true
 #define SURPRISE_REMOVAL false
 
-static void set_slot_off(struct controller *ctrl)
+static void set_slot_off(struct pciehp_controller *ctrl)
 {
 	/*
 	 * Turn off slot, turn on attention indicator, turn off power
@@ -59,7 +59,7 @@ static void set_slot_off(struct controller *ctrl)
  * Turns power on for the board.
  * Configures board.
  */
-static int board_added(struct controller *ctrl)
+static int board_added(struct pciehp_controller *ctrl)
 {
 	int retval = 0;
 	struct pci_bus *parent = ctrl->pcie->port->subordinate;
@@ -109,7 +109,7 @@ err_exit:
  * @ctrl: PCIe hotplug controller where board is being removed
  * @safe_removal: whether the board is safely removed (versus surprise removed)
  */
-static void remove_board(struct controller *ctrl, bool safe_removal)
+static void remove_board(struct pciehp_controller *ctrl, bool safe_removal)
 {
 	pciehp_unconfigure_device(ctrl, safe_removal);
 
@@ -135,10 +135,10 @@ static void remove_board(struct controller *ctrl, bool safe_removal)
 	pcie_reset_lbms(ctrl->pcie->port);
 }
 
-static int pciehp_enable_slot(struct controller *ctrl);
-static int pciehp_disable_slot(struct controller *ctrl, bool safe_removal);
+static int pciehp_enable_slot(struct pciehp_controller *ctrl);
+static int pciehp_disable_slot(struct pciehp_controller *ctrl, bool safe_removal);
 
-void pciehp_request(struct controller *ctrl, int action)
+void pciehp_request(struct pciehp_controller *ctrl, int action)
 {
 	atomic_or(action, &ctrl->pending_events);
 	if (!pciehp_poll_mode)
@@ -147,7 +147,7 @@ void pciehp_request(struct controller *ctrl, int action)
 
 void pciehp_queue_pushbutton_work(struct work_struct *work)
 {
-	struct controller *ctrl = container_of(work, struct controller,
+	struct pciehp_controller *ctrl = container_of(work, struct pciehp_controller,
 					       button_work.work);
 
 	mutex_lock(&ctrl->state_lock);
@@ -164,7 +164,7 @@ void pciehp_queue_pushbutton_work(struct work_struct *work)
 	mutex_unlock(&ctrl->state_lock);
 }
 
-void pciehp_handle_button_press(struct controller *ctrl)
+void pciehp_handle_button_press(struct pciehp_controller *ctrl)
 {
 	mutex_lock(&ctrl->state_lock);
 	switch (ctrl->state) {
@@ -214,7 +214,7 @@ void pciehp_handle_button_press(struct controller *ctrl)
 	mutex_unlock(&ctrl->state_lock);
 }
 
-void pciehp_handle_disable_request(struct controller *ctrl)
+void pciehp_handle_disable_request(struct pciehp_controller *ctrl)
 {
 	mutex_lock(&ctrl->state_lock);
 	switch (ctrl->state) {
@@ -229,7 +229,7 @@ void pciehp_handle_disable_request(struct controller *ctrl)
 	ctrl->request_result = pciehp_disable_slot(ctrl, SAFE_REMOVAL);
 }
 
-void pciehp_handle_presence_or_link_change(struct controller *ctrl, u32 events)
+void pciehp_handle_presence_or_link_change(struct pciehp_controller *ctrl, u32 events)
 {
 	int present, link_active;
 
@@ -314,7 +314,7 @@ void pciehp_handle_presence_or_link_change(struct controller *ctrl, u32 events)
 	}
 }
 
-static int __pciehp_enable_slot(struct controller *ctrl)
+static int __pciehp_enable_slot(struct pciehp_controller *ctrl)
 {
 	u8 getstatus = 0;
 
@@ -339,7 +339,7 @@ static int __pciehp_enable_slot(struct controller *ctrl)
 	return board_added(ctrl);
 }
 
-static int pciehp_enable_slot(struct controller *ctrl)
+static int pciehp_enable_slot(struct pciehp_controller *ctrl)
 {
 	int ret;
 
@@ -358,7 +358,7 @@ static int pciehp_enable_slot(struct controller *ctrl)
 	return ret;
 }
 
-static int __pciehp_disable_slot(struct controller *ctrl, bool safe_removal)
+static int __pciehp_disable_slot(struct pciehp_controller *ctrl, bool safe_removal)
 {
 	u8 getstatus = 0;
 
@@ -375,7 +375,7 @@ static int __pciehp_disable_slot(struct controller *ctrl, bool safe_removal)
 	return 0;
 }
 
-static int pciehp_disable_slot(struct controller *ctrl, bool safe_removal)
+static int pciehp_disable_slot(struct pciehp_controller *ctrl, bool safe_removal)
 {
 	int ret;
 
@@ -392,7 +392,7 @@ static int pciehp_disable_slot(struct controller *ctrl, bool safe_removal)
 
 int pciehp_sysfs_enable_slot(struct hotplug_slot *hotplug_slot)
 {
-	struct controller *ctrl = to_ctrl(hotplug_slot);
+	struct pciehp_controller *ctrl = to_ctrl(hotplug_slot);
 
 	mutex_lock(&ctrl->state_lock);
 	switch (ctrl->state) {
@@ -431,7 +431,7 @@ int pciehp_sysfs_enable_slot(struct hotplug_slot *hotplug_slot)
 
 int pciehp_sysfs_disable_slot(struct hotplug_slot *hotplug_slot)
 {
-	struct controller *ctrl = to_ctrl(hotplug_slot);
+	struct pciehp_controller *ctrl = to_ctrl(hotplug_slot);
 
 	mutex_lock(&ctrl->state_lock);
 	switch (ctrl->state) {

@@ -21,6 +21,7 @@
 #include <linux/workqueue.h>
 #include <linux/xarray.h>
 #include <asm/hdn_pgtable.h>
+#include <asm/hdn_text.h>
 #include <asm/acpi.h>
 #include <asm/hdn_hv_crash.h>
 #include <asm/pgalloc.h>
@@ -264,11 +265,10 @@ void hdn_pt_release_reserved(struct page *page)
 	kfree_rcu(record, rcu);
 }
 
-static struct hdn_pt_record *claim_page(struct page *page, unsigned int order, bool boot, gfp_t gfp)
+static struct hdn_pt_record *new_record(struct page *page, unsigned int order,
+					bool boot, gfp_t gfp)
 {
 	struct hdn_pt_record *record;
-	unsigned long pfn = page_to_pfn(page);
-	unsigned int pages = 1U << order, inserted = 0;
 
 	record = kzalloc(sizeof(*record), gfp & ~(__GFP_HIGHMEM | __GFP_COMP));
 	if (!record)
@@ -280,6 +280,18 @@ static struct hdn_pt_record *claim_page(struct page *page, unsigned int order, b
 	atomic_set(&record->state, HDN_PT_SEALING);
 	INIT_LIST_HEAD(&record->reserve);
 	INIT_WORK(&record->destroy, destroy_record);
+	return record;
+}
+
+static struct hdn_pt_record *claim_page(struct page *page, unsigned int order, bool boot, gfp_t gfp)
+{
+	struct hdn_pt_record *record;
+	unsigned long pfn = page_to_pfn(page);
+	unsigned int pages = 1U << order, inserted = 0;
+
+	record = new_record(page, order, boot, gfp);
+	if (!record)
+		return NULL;
 	for (; inserted < pages; inserted++)
 		if (xa_insert(&pt_pages, pfn + inserted, record, gfp))
 			goto failed;
@@ -389,6 +401,9 @@ static struct page *allocate_owned(gfp_t gfp, unsigned int order, int nid)
 {
 	struct page *page;
 	struct hdn_pt_record *record;
+	unsigned long address, pfn;
+	unsigned int pages = 1U << order, reserved = 0;
+	int error;
 
 	if (nid == NUMA_NO_NODE)
 		page = alloc_pages_noprof(gfp | __GFP_COMP | __GFP_ZERO, order);
@@ -397,19 +412,52 @@ static struct page *allocate_owned(gfp_t gfp, unsigned int order, int nid)
 			gfp | __GFP_COMP | __GFP_ZERO | __GFP_THISNODE, order);
 	if (!page)
 		return NULL;
-	record = claim_page(page, order, false, gfp);
+	record = new_record(page, order, false, gfp);
 	if (!record) {
 		__free_pages(page, order);
 		return NULL;
 	}
-	if (seal_record(record)) {
+	pfn = page_to_pfn(page);
+	address = (unsigned long)page_address(page);
+	/* A freshly allocated reserve page must not become visible in pt_pages
+	 * until its direct-map view is read-only.  Publishing HDN_PT_SEALING
+	 * first races an unrelated CPA split: that split can encounter the new
+	 * ownership while it is still cloning the old writable large mapping.
+	 * Reserve every XArray path up front so the final publication cannot
+	 * allocate or fail after the mapping transition. */
+	for (; reserved < pages; reserved++) {
+		if (xa_load(&pt_pages, pfn + reserved))
+			goto failed_unpublished;
+		error = xa_reserve(&pt_pages, pfn + reserved, gfp);
+		if (error)
+			goto failed_unpublished;
+	}
+	error = set_memory_ro(address, pages);
+	for (unsigned int i = 0; i < pages; i++) {
+		void *old = xa_cmpxchg(&pt_pages, pfn + i, XA_ZERO_ENTRY,
+				       record, GFP_NOWAIT);
+
+		if (xa_err(old) || old)
+			panic("HDN page-table ownership publication failed after sealing");
+	}
+	atomic64_add(pages, &active_pages);
+	atomic64_inc(&allocations);
+	WRITE_ONCE(record->owner, NULL);
+	atomic_set_release(&record->state, HDN_PT_LIVE);
+	if (error) {
 		/* CPA can partially protect a failed range. Retain ownership until
 		 * checked deferred destruction removes every protected alias. */
-		atomic_set(&record->state, HDN_PT_LIVE);
 		hdn_pt_free(page, order);
 		return NULL;
 	}
 	return page;
+
+failed_unpublished:
+	while (reserved)
+		xa_release(&pt_pages, pfn + --reserved);
+	kfree(record);
+	__free_pages(page, order);
+	return NULL;
 }
 
 struct page *hdn_pt_alloc(gfp_t gfp, unsigned int order, bool reserve_only)
@@ -494,7 +542,8 @@ static void check_level(struct hdn_pt_record *record, unsigned long pfn,
  * CPA's construction/retirement owner is the only RW exception and its
  * address-aware admission check restricts it to the canonical aliases.
  */
-static void validate_entry(unsigned long value, unsigned int level)
+static void validate_entry(unsigned long *slot, unsigned long value,
+			   unsigned int level)
 {
 	struct hdn_pt_record *child;
 	unsigned long pfn, nr, index;
@@ -516,7 +565,8 @@ static void validate_entry(unsigned long value, unsigned int level)
 	}
 	nr = 1UL << ((level - 1) * (PAGE_SHIFT - 3));
 	pfn &= ~(nr - 1);
-	if (hdn_execmem_leaf(pfn, nr, value))
+	if (hdn_execmem_leaf(pfn, nr, value) &&
+	    !hdn_text_leaf_allowed(slot, pfn, nr, value))
 		panic("HDN rejected an alias of owned kernel storage");
 	xa_for_each_range(&pt_pages, index, child, pfn, pfn + nr - 1) {
 		state = atomic_read_acquire(&child->state);
@@ -557,7 +607,7 @@ unsigned long notrace hdn_pt_update(unsigned long *slot, unsigned long value,
 		if (value && !level)
 			panic("HDN rejected an untyped page-table publication");
 		if (value && READ_ONCE(admission_ready))
-			validate_entry(value, level);
+			validate_entry(slot, value, level);
 		mirrored = hdn_stack_mm_update_begin(level);
 		old = hdn_pt_window_update(pfn, offset, value, expected, operation);
 		if (mirrored) {

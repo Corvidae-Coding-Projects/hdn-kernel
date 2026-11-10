@@ -38,6 +38,39 @@ static bool rap_entry_call(struct rap_sequence *s, const char *name)
 		rap_sequence_edge(s, name, true);
 }
 
+static bool rap_fred_eretu_fixup(struct objtool_file *file, struct symbol *func,
+		struct instruction *insn)
+{
+	struct section *table = find_section_by_name(file->elf, "__ex_table");
+	struct alternative *alt = insn->alts;
+	unsigned long off;
+	unsigned int matches = 0;
+
+	if (!table || sec_size(table) % 12 || !alt || alt->next ||
+	    alt->type != ALT_TYPE_EX_TABLE || !alt->insn ||
+	    alt->insn->sec != func->sec || alt->insn->offset != func->offset)
+		return false;
+	for (off = 0; off < sec_size(table); off += 12) {
+		struct reloc *from = find_reloc_by_dest(file->elf, table, off);
+		struct reloc *to = find_reloc_by_dest(file->elf, table, off + 4);
+		uint32_t type;
+
+		if (!from || !to || reloc_type(from) != R_X86_64_PC32 ||
+		    reloc_type(to) != R_X86_64_PC32 ||
+		    from->sym->sec != insn->sec ||
+		    from->sym->offset + reloc_addend(from) != insn->offset ||
+		    to->sym->sec != func->sec ||
+		    to->sym->offset + reloc_addend(to) != func->offset)
+			continue;
+		memcpy(&type, table->data->d_buf + off + 8, sizeof(type));
+		if (type != 21 || memcmp(table->data->d_buf + off, (char[8]){}, 8) ||
+		    find_reloc_by_dest_range(file->elf, table, off + 8, 4))
+			return false;
+		matches++;
+	}
+	return matches == 1;
+}
+
 static int verify_rap_fred(struct objtool_file *file, struct symbol *func)
 {
 	struct rap_sequence s = { .file = file, .func = func };
@@ -52,7 +85,11 @@ static int verify_rap_fred(struct objtool_file *file, struct symbol *func)
 	if (!rap_fred_name(func->name) || is_weak_sym(func) || !func->sec->noinstr ||
 	    !user || !kernel || user->sec != kernel->sec || (user->offset & 4095) ||
 	    kernel->offset != user->offset + 256 || user->len > 256 ||
-	    !rap_entry_push_regs(&s) || !rap_sequence_bytes(&s, "\x48\x89\xe7", 3))
+	    !rap_entry_push_regs(&s))
+		goto bad;
+	/* CONFIG_FRAME_POINTER only adds the exact pt_regs pointer encoding. */
+	rap_sequence_bytes(&s, "\x48\x8d\x6c\x24\x01", 5);
+	if (!rap_sequence_bytes(&s, "\x48\x89\xe7", 3))
 		goto bad;
 	if (from_user) {
 		if (!rap_entry_call(&s, "fred_entry_from_user"))
@@ -82,7 +119,8 @@ static int verify_rap_fred(struct objtool_file *file, struct symbol *func)
 	    s.pos != func->len)
 		goto bad;
 	rap_for_each_insn(file, func, insn)
-		if (insn->alts)
+		if (insn->alts && (!from_user || insn->offset + insn->len !=
+		    func->offset + func->len || !rap_fred_eretu_fixup(file, func, insn)))
 			goto bad;
 	/* Only the fork return adapter may join the already-prepared user exit.
 	 * There are no direct callers of either hardware entry point. */

@@ -25,6 +25,7 @@
 #include <linux/nmi.h>
 #include <linux/sched/debug.h>
 #include <linux/jump_label.h>
+#include <linux/slab.h>
 #include <linux/string_choices.h>
 
 #include <trace/events/ipi.h>
@@ -642,6 +643,9 @@ int smp_call_function_single(int cpu, smp_call_func_t func, void *info,
 	};
 	int this_cpu;
 	int err;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	bool task_csd = false;
+#endif
 
 	/*
 	 * Prevent preemption and reschedule on another CPU, as well as CPU
@@ -669,7 +673,23 @@ int smp_call_function_single(int cpu, smp_call_func_t func, void *info,
 	WARN_ON_ONCE(!in_task());
 
 	csd = &csd_stack;
-	if (!wait) {
+	if (wait) {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+		/* The target CPU dequeues this object in interrupt context under
+		 * another task's private page-table root. Keep it in task_struct,
+		 * whose slab backing remains globally reachable, until completion. */
+		if (WARN_ON_ONCE(current->hdn_csd_active)) {
+			err = -EDEADLK;
+			goto out_put_cpu;
+		}
+		current->hdn_csd_active = true;
+		task_csd = true;
+		csd = &current->hdn_csd;
+		*csd = (call_single_data_t) {
+			.node = { .u_flags = CSD_FLAG_LOCK | CSD_TYPE_SYNC, },
+		};
+#endif
+	} else {
 		csd = this_cpu_ptr(&csd_data);
 		csd_lock(csd);
 	}
@@ -686,6 +706,11 @@ int smp_call_function_single(int cpu, smp_call_func_t func, void *info,
 	if (wait)
 		csd_lock_wait(csd);
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (task_csd)
+		current->hdn_csd_active = false;
+out_put_cpu:
+#endif
 	put_cpu();
 
 	return err;
@@ -1147,22 +1172,28 @@ static void smp_call_on_cpu_callback(struct work_struct *work)
 
 int smp_call_on_cpu(unsigned int cpu, int (*func)(void *), void *par, bool phys)
 {
-	struct smp_call_on_cpu_struct sscs = {
-		.done = COMPLETION_INITIALIZER_ONSTACK(sscs.done),
-		.func = func,
-		.data = par,
-		.cpu  = phys ? cpu : -1,
-	};
-
-	INIT_WORK_ONSTACK(&sscs.work, smp_call_on_cpu_callback);
+	struct smp_call_on_cpu_struct *sscs;
+	int ret;
 
 	if (cpu >= nr_cpu_ids || !cpu_online(cpu))
 		return -ENXIO;
 
-	queue_work_on(cpu, system_wq, &sscs.work);
-	wait_for_completion(&sscs.done);
-	destroy_work_on_stack(&sscs.work);
+	sscs = kzalloc(sizeof(*sscs), GFP_KERNEL);
+	if (!sscs)
+		return -ENOMEM;
 
-	return sscs.ret;
+	init_completion(&sscs->done);
+	sscs->func = func;
+	sscs->data = par;
+	sscs->cpu = phys ? cpu : -1;
+	INIT_WORK(&sscs->work, smp_call_on_cpu_callback);
+
+	queue_work_on(cpu, system_wq, &sscs->work);
+	wait_for_completion(&sscs->done);
+	flush_work(&sscs->work);
+	ret = sscs->ret;
+	kfree(sscs);
+
+	return ret;
 }
 EXPORT_SYMBOL_GPL(smp_call_on_cpu);

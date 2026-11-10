@@ -1681,8 +1681,10 @@ static int add_jump_destinations(struct objtool_file *file)
 			insn->rap_return = true;
 			continue;
 		}
-
-		if (!insn->sym || insn->sym->pfunc == dest_sym->pfunc)
+		if (!insn->sym || insn->sym->pfunc == dest_sym->pfunc ||
+		    (insn->sym->pfunc && dest_sym->pfunc &&
+		     insn->sym->pfunc->sec == dest_sym->pfunc->sec &&
+		     insn->sym->pfunc->offset == dest_sym->pfunc->offset))
 			goto set_jump_dest;
 
 		/*
@@ -2791,6 +2793,99 @@ static bool rap_binding_matches(struct objtool_file *file, struct instruction *b
 	return target == call->offset + call->len;
 }
 
+static bool rap_int3_selftest_site(struct objtool_file *file,
+				   struct reloc *site, struct reloc *type,
+				   unsigned long address,
+				   struct instruction **trap)
+{
+	static const unsigned char sequence[] = { 0xcc, 0x90, 0x90, 0x90, 0x90 };
+	struct symbol *func;
+
+	if (type || address < sizeof(sequence))
+		return false;
+	func = find_func_containing(site->sym->sec, address - 1);
+	if (!func || strcmp(func->name, "int3_selftest_asm") ||
+	    address - sizeof(sequence) < func->offset ||
+	    address > func->offset + func->len ||
+	    memcmp(site->sym->sec->data->d_buf + address - sizeof(sequence),
+		   sequence, sizeof(sequence)))
+		return false;
+	*trap = find_insn(file, site->sym->sec, address - sizeof(sequence));
+	return *trap && (*trap)->type == INSN_TRAP;
+}
+
+static bool rap_alt_reloc_selftest_site(struct objtool_file *file,
+					struct reloc *site, struct reloc *type,
+					unsigned long address,
+					struct instruction **call,
+					struct instruction **binding)
+{
+	static const unsigned char nops[19] = { [0 ... 18] = 0x90 };
+	struct symbol *func, *data, *callee;
+	struct instruction *first, *arg, *bind, *invoke;
+	struct alt_group *original, *replacement;
+	struct alternative *alt;
+	struct reloc *reloc;
+	const unsigned char *bytes;
+	const char *feature;
+	unsigned long target;
+
+	if (type || address < sizeof(nops))
+		return false;
+	func = find_func_containing(site->sym->sec, address - 1);
+	first = find_insn(file, site->sym->sec, address - sizeof(nops));
+	if (!func || strcmp(func->name, "alt_reloc_selftest") || !first ||
+	    address - sizeof(nops) < func->offset ||
+	    address > func->offset + func->len ||
+	    memcmp(site->sym->sec->data->d_buf + address - sizeof(nops),
+		   nops, sizeof(nops)))
+		return false;
+	original = first->alt_group;
+	alt = first->alts;
+	if (!original || original->orig_group || original->first_insn != first ||
+	    original->last_insn->offset + original->last_insn->len != address ||
+	    !alt || alt->next || alt->type != ALT_TYPE_INSTRUCTIONS)
+		return false;
+	arg = alt->insn;
+	replacement = arg->alt_group;
+	feature = replacement ? arch_cpu_feature_name(replacement->feature) : NULL;
+	if (!replacement || replacement->orig_group != original ||
+	    replacement->first_insn != arg || replacement->nop || !feature ||
+	    strcmp(feature, "X86_FEATURE_ALWAYS"))
+		return false;
+	bytes = arg->sec->data->d_buf + arg->offset;
+	reloc = insn_reloc(file, arg);
+	data = find_symbol_by_name(file->elf, "__alt_reloc_selftest_addr");
+	if (arg->len != 7 || arg->type != INSN_LEA_RIP ||
+	    memcmp(bytes, "\x48\x8d\x3d", 3) || !reloc || !data ||
+	    reloc->sym->sec != data->sec)
+		return false;
+	target = reloc->sym->offset + arch_insn_adjusted_addend(arg, reloc);
+	if (target != data->offset)
+		return false;
+	bind = next_insn_same_sec(file, arg);
+	if (!bind || bind->alt_group != replacement || bind->len != 7 ||
+	    bind->type != INSN_LEA_RIP ||
+	    memcmp(bind->sec->data->d_buf + bind->offset, "\x4c\x8d\x15", 3))
+		return false;
+	reloc = insn_reloc(file, bind);
+	if (!reloc || reloc->sym->sec != site->sym->sec)
+		return false;
+	target = reloc->sym->offset + arch_insn_adjusted_addend(bind, reloc);
+	if (target != address)
+		return false;
+	invoke = next_insn_same_sec(file, bind);
+	callee = invoke ? insn_call_dest(invoke) : NULL;
+	if (!invoke || invoke->alt_group != replacement ||
+	    replacement->last_insn != invoke || invoke->len != 5 ||
+	    invoke->type != INSN_CALL || !callee ||
+	    strcmp(callee->name, "__alt_reloc_selftest"))
+		return false;
+	*binding = bind;
+	*call = invoke;
+	return true;
+}
+
 static int read_rap_sites(struct objtool_file *file)
 {
 	struct section *sec = find_section_by_name(file->elf, ".hdn.rap.sites");
@@ -2832,6 +2927,36 @@ static int read_rap_sites(struct objtool_file *file)
 		if (call && call->type != INSN_CALL &&
 		    !(opts.mnop && call->type == INSN_NOP && callee && callee->fentry))
 			callee = NULL;
+		/*
+		 * The x86 INT3 CALL-emulation self-test has no CALL instruction.
+		 * Its notifier installs this exact post-padding continuation in
+		 * R10 before entering the protected callee.  Accept only that
+		 * named function and exact INT3-plus-four-NOP contract.
+		 */
+		if (!callee && rap_int3_selftest_site(file, site, type, address,
+						      &call)) {
+			if (call->rap_site) {
+				ERROR("duplicate RAP INT3 self-test return site");
+				return -1;
+			}
+			call->rap_site = true;
+			continue;
+		}
+		/* This init-only test copies one RIP-relative LEA/binding/CALL
+		 * alternative into the named function.  The sealed site is the
+		 * original-text continuation, not an address in the temporary
+		 * replacement section.  Admit only the complete relocation test
+		 * sequence checked above. */
+		if (!callee && rap_alt_reloc_selftest_site(file, site, type,
+							 address, &call, &binding)) {
+			if (call->rap_site || binding->rap_binding) {
+				ERROR("duplicate RAP alternative relocation self-test site");
+				return -1;
+			}
+			call->rap_site = true;
+			binding->rap_binding = true;
+			continue;
+		}
 		if (!callee || call->rap_site ||
 		    (!!type != !strcmp(callee->name, "__hdn_rap_call"))) {
 			ERROR("RAP return site does not follow a unique matching call");
@@ -3099,10 +3224,10 @@ static bool rap_sequence_bytes(struct rap_sequence *s, const char *bytes, size_t
 
 /* Match the actual PC-relative operand, including relocations to section
  * symbols. A matching name with a nonzero addend is not the same target. */
-static bool rap_sequence_edge_match(struct rap_sequence *s, const char *name,
-				    bool call, bool bound)
+static bool rap_sequence_edge_symbol(struct rap_sequence *s, struct symbol *target,
+				     bool call, bool bound)
 {
-	struct symbol *func = s->func, *target = find_symbol_by_name(s->file->elf, name);
+	struct symbol *func = s->func;
 	unsigned long offset = func->offset + s->pos;
 	struct instruction *insn = find_insn(s->file, func->sec, offset);
 	struct reloc *reloc;
@@ -3129,6 +3254,13 @@ static bool rap_sequence_edge_match(struct rap_sequence *s, const char *name,
 	}
 	s->pos += insn->len;
 	return true;
+}
+
+static bool rap_sequence_edge_match(struct rap_sequence *s, const char *name,
+				    bool call, bool bound)
+{
+	return rap_sequence_edge_symbol(s, find_symbol_by_name(s->file->elf, name),
+		call, bound);
 }
 
 static bool rap_sequence_edge(struct rap_sequence *s, const char *name, bool call)
@@ -3678,6 +3810,7 @@ bad:
 #include "hdn-rewind.h"
 #include "hdn-head.h"
 #include "hdn-pvh.h"
+#include "hdn-stack.h"
 
 /* An injectable function has already executed its protected prologue. Only
  * the immutable breakpoint adapter may resume at this return-only gate; it
@@ -3846,6 +3979,7 @@ static int verify_rap_madt(struct objtool_file *file, struct symbol *func)
 		    insn->jump_dest->offset < func->offset + func->len)
 			goto bad;
 	func->rap_madt_protocol = true;
+	func->rap_terminal = true;
 	return 0;
 bad:
 	ERROR_FUNC(func->sec, func->offset + s->pos, "RAP ACPI CPU-reset handoff has an invalid frozen-launch protocol");
@@ -3872,7 +4006,7 @@ static int read_rap_functions(struct objtool_file *file)
 		memcpy(&kind, sec->data->d_buf + off + 8, 8);
 		memcpy(&returns, sec->data->d_buf + off + 16, 8);
 		if (memcmp(sec->data->d_buf + off, (char[8]){}, 8) || !reloc ||
-		    arch_reloc_size(reloc) != 8 || (kind < 1 || kind > 54) ||
+		    arch_reloc_size(reloc) != 8 || (kind < 1 || kind > 55) ||
 		    (kind != 1 && kind != 5 && returns) ||
 		    find_reloc_by_dest_range(file->elf, sec, off + 8, 16)) {
 			ERROR("invalid RAP function coverage record");
@@ -3887,6 +4021,8 @@ static int read_rap_functions(struct objtool_file *file)
 			return -1;
 		}
 		if ((rap_adapter_name(func->name) && kind != 4) ||
+		    ((kind == 55 || !strcmp(func->name, "__hdn_stack_bootstrap")) &&
+		     (kind != 55 || strcmp(func->name, "__hdn_stack_bootstrap"))) ||
 		    (((kind >= 52 && kind <= 54) || rap_pvh_kind(func->name)) &&
 		     kind != rap_pvh_kind(func->name)) ||
 		    ((kind == 51 || !strcmp(func->name, "just_return_func")) &&
@@ -3957,7 +4093,7 @@ static int read_rap_functions(struct objtool_file *file)
 		      !strcmp(func->name, "vmx_do_interrupt_irqoff")) && kind != 13) ||
 		    (!strcmp(func->name, "__hdn_rap_fail") && kind != 3) ||
 		    (!strcmp(func->name, "__hdn_rap_halt") && kind != 2)) {
-			ERROR("RAP runtime protocol has the wrong coverage kind");
+			ERROR("RAP runtime protocol %s has the wrong coverage kind %llu", func->name, (unsigned long long)kind);
 			return -1;
 		}
 		func->rap_kind = kind;
@@ -3988,7 +4124,8 @@ static int read_rap_functions(struct objtool_file *file)
 		if (validate_rap_entry_root_peers(file))
 			return -1;
 		for_each_sym(file->elf, func) {
-			if (((func->rap_kind >= 52 && func->rap_kind <= 54) && verify_rap_pvh(file, func)) ||
+			if ((func->rap_kind == 55 && verify_rap_stack_bootstrap(file, func)) ||
+			    ((func->rap_kind >= 52 && func->rap_kind <= 54) && verify_rap_pvh(file, func)) ||
 			    (func->rap_kind == 51 && verify_rap_error_return(file, func)) ||
 			    (func->rap_kind == 40 && verify_rap_interrupt_return(file, func)) ||
 			    (func->rap_kind == 41 && verify_rap_nmi(file, func)) ||
@@ -4220,7 +4357,7 @@ static int read_rap_static_calls(struct objtool_file *file)
 		    (!strcmp(callee->name, "__static_call_return0") && !flags))
 			goto bad;
 		sequence = (struct rap_sequence) { .file = file, .func = func };
-		if (!rap_sequence_edge(&sequence, callee->name, false) ||
+		if (!rap_sequence_edge_symbol(&sequence, callee, false, true) ||
 		    !rap_sequence_bytes(&sequence, "\x0f\xb9\xcc", 3) || sequence.pos != func->len)
 			goto bad;
 		rap_for_each_insn(file, func, insn)
@@ -4281,7 +4418,7 @@ static int validate_rap(struct objtool_file *file)
 		bool protected = func->rap_kind == 1 || func->rap_kind == 5;
 
 		if ((!is_func_sym(func) && !is_notype_sym(func)) || !func->sec->text ||
-		    !func->len || func->cold || func->embedded_insn)
+		    !func->len || func->prefix || func->cold || func->embedded_insn)
 			continue;
 		first = find_insn(file, func->sec, func->offset);
 		/* Aliases share the exact same body and canonical coverage record. */
@@ -4312,6 +4449,14 @@ static int validate_rap(struct objtool_file *file)
 					warnings++;
 				}
 			}
+		}
+		if (func->rap_kind == 55) {
+			if (!func->rap_stack_bootstrap_protocol) {
+				WARN_FUNC(func->sec, func->offset,
+					  "RAP private-stack bootstrap lacks a checked handoff protocol");
+				warnings++;
+			}
+			continue;
 		}
 		if (func->rap_kind >= 52 && func->rap_kind <= 54) {
 			if (!func->rap_pvh_protocol) {
@@ -4796,7 +4941,9 @@ static bool is_special_call(struct instruction *insn)
 		if (!dest)
 			return false;
 
-		if (dest->fentry || dest->embedded_insn ||
+		/* Only the closed mitigation protocol marks this edge as a leaf.
+		 * It neither unwinds nor calls C, so no frame-pointer save is needed. */
+		if (insn->rap_leaf_call || dest->fentry || dest->embedded_insn ||
 		    !strcmp(dest->name, "__hdn_rap_enter") ||
 		    !strcmp(dest->name, "__hdn_rap_enter_flags"))
 			return true;
@@ -6139,6 +6286,8 @@ static int do_validate_branch(struct objtool_file *file, struct symbol *func,
 		if (func && insn_func(insn) && func != insn_func(insn)->pfunc) {
 			/* Ignore KCFI type preambles, which always fall through */
 			if (is_prefix_func(func))
+				return 0;
+			if (func->rap_s3_protocol && insn_func(insn)->pfunc->rap_s3_protocol)
 				return 0;
 
 			if (file->ignore_unreachables)

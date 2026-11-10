@@ -61,7 +61,7 @@ static DEFINE_SPINLOCK(pdrvdata_lock);
 static DECLARE_COMPLETION(early_console_added);
 
 /* This struct holds information that's relevant only for console ports */
-struct console {
+struct port_console {
 	/* We'll place all consoles in a list in the pdrvdata struct */
 	struct list_head list;
 
@@ -201,7 +201,7 @@ struct port {
 	 * The entries in this struct will be valid if this port is
 	 * hooked up to an hvc console
 	 */
-	struct console cons;
+	struct port_console cons;
 
 	/* Each port associates with a separate char device */
 	struct cdev *cdev;
@@ -234,7 +234,7 @@ struct port {
 static struct port *find_port_by_vtermno(u32 vtermno)
 {
 	struct port *port;
-	struct console *cons;
+	struct port_console *cons;
 	unsigned long flags;
 
 	spin_lock_irqsave(&pdrvdata_lock, flags);

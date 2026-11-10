@@ -87,20 +87,33 @@ do_wait_for_common(struct completion *x,
 		   long (*action)(long), long timeout, int state)
 {
 	if (!x->done) {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+		struct swait_queue *wait = hdn_swait_acquire();
+#else
 		DECLARE_SWAITQUEUE(wait);
+#endif
 
 		do {
 			if (signal_pending_state(state, current)) {
 				timeout = -ERESTARTSYS;
 				break;
 			}
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+			__prepare_to_swait(&x->wait, wait);
+#else
 			__prepare_to_swait(&x->wait, &wait);
+#endif
 			__set_current_state(state);
 			raw_spin_unlock_irq(&x->wait.lock);
 			timeout = action(timeout);
 			raw_spin_lock_irq(&x->wait.lock);
 		} while (!x->done && timeout);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+		__finish_swait(&x->wait, wait);
+		hdn_swait_release(wait);
+#else
 		__finish_swait(&x->wait, &wait);
+#endif
 		if (!x->done)
 			return timeout;
 	}

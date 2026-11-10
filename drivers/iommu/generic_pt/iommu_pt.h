@@ -460,6 +460,9 @@ static inline int pt_iommu_new_table(struct pt_state *pts,
 	return 0;
 }
 
+/* This header is instantiated once per page-table format.  Keep its private
+ * map argument tag in that namespace as well as its generated functions. */
+#define pt_iommu_map_args DOMAIN_NS(map_args)
 struct pt_iommu_map_args {
 	struct iommu_iotlb_gather *iotlb_gather;
 	struct pt_write_attrs attrs;

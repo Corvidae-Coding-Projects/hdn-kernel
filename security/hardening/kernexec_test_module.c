@@ -6,3 +6,4 @@
 extern struct kunit_suite hdn_cpa_suite;
 kunit_test_suite(hdn_cpa_suite);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("HDN KERNEXEC CPA and built-in alias probes");

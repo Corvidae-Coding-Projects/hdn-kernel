@@ -48,6 +48,7 @@ static bool rap_hw_error_entry(struct rap_sequence *s)
 	    !rap_kexec_branch(&k, 0x74, 2) || !rap_sequence_bytes(p, "\x89\xc8", 2) ||
 	    !rap_sequence_bytes(p, "\x48\x39\x84\x24\x88\0\0\0", 8) ||
 	    !rap_kexec_branch(&k, 0x74, 1) ||
+	    !rap_hw_saferet(p) ||
 	    !rap_sequence_reference(p, "\x48\x81\xbc\x24\x88\0\0\0", 8, "__hdn_rap_gs_change", false) ||
 	    !rap_kexec_branch(&k, 0x75, 3) || !rap_sequence_bytes(p, "\x0f\x01\xf8", 3) ||
 	    !rap_kexec_label(&k, 3) ||
@@ -80,7 +81,7 @@ static bool rap_hw_paranoid_entry(struct rap_sequence *s)
 	    !rap_sequence_bytes(p, "\xf3\x48\x0f\xae\xcb", 5))
 		return false;
 	if (rap_sequence_bytes(p, "\x48\xc7\xc0\x7b\0\0\0", 7)) {
-		if (!rap_sequence_bytes(p, "\x48\x0f\x03\xc0\x48\x25\xff\x0f\0\0", 10) ||
+		if (!rap_sequence_bytes(p, "\x0f\x03\xc0\x48\x25\xff\x0f\0\0", 9) ||
 		    !rap_sequence_reference(p, "\x48\x8b\x04\xc5", 4, "__per_cpu_offset", false))
 			return false;
 	} else if (!rap_sequence_reference(p, "\x48\x8b\x05", 3, "pcpu_unit_offsets", true)) {
@@ -93,7 +94,8 @@ static bool rap_hw_paranoid_entry(struct rap_sequence *s)
 	    !rap_kexec_label(&k, 2) ||
 	    !rap_hw_fixed_alt(p, "X86_FEATURE_FENCE_SWAPGS_KERNEL", "\x0f\xae\xe8", 3) ||
 	    !rap_kexec_label(&k, 1) || !rap_hw_ibrs(p, true, true) ||
-	    !rap_hw_untrain(p, true) || !rap_thunk_ret(p) || !rap_hw_local_edges(&k))
+	    !rap_hw_untrain(p, true) || !rap_hw_saferet(p) ||
+	    !rap_thunk_ret(p) || !rap_hw_local_edges(&k))
 		return false;
 	*s = *p;
 	return true;
@@ -179,6 +181,8 @@ static int validate_rap_entry_root_peers(struct objtool_file *file)
 		struct section *sec;
 		unsigned long offset;
 
+		if (insn->rap_hw_safe)
+			continue;
 		if (!rap_thunk_edge_target(file, insn, &sec, &offset))
 			continue;
 		dest = find_insn(file, sec, offset);

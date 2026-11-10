@@ -97,7 +97,8 @@ _ASM_NOKPROBE(__hdn_efi64_thunk)
 	.balign PAGE_SIZE
 SYM_DATA_START(__efi64_thunk_ret_tramp)
 	movabsq $__hdn_efi_return, %r11
-	ANNOTATE_RETPOLINE_SAFE
+	/* The dedicated RAP EFI checker validates this complete mixed-mode
+	 * data blob. Generic text annotations cannot target an NX data section. */
 	jmp *%r11
 	.code32
 SYM_INNER_LABEL(__hdn_efi32_return, SYM_L_GLOBAL)

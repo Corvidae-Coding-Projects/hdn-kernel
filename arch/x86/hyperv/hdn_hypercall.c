@@ -4,6 +4,7 @@
  * The hypervisor is trusted to supply and resume these instruction sequences.
  */
 #include <linux/hdn_execmem.h>
+#include <linux/mm.h>
 #include <linux/spinlock.h>
 #include <asm/hdn_hyperv.h>
 #include <asm/mshyperv.h>

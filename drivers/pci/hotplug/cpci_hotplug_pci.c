@@ -30,7 +30,7 @@
 #define warn(format, arg...) printk(KERN_WARNING "%s: " format "\n", MY_NAME, ## arg)
 
 
-u8 cpci_get_attention_status(struct slot *slot)
+u8 cpci_get_attention_status(struct cpci_slot *slot)
 {
 	int hs_cap;
 	u16 hs_csr;
@@ -50,7 +50,7 @@ u8 cpci_get_attention_status(struct slot *slot)
 	return hs_csr & 0x0008 ? 1 : 0;
 }
 
-int cpci_set_attention_status(struct slot *slot, int status)
+int cpci_set_attention_status(struct cpci_slot *slot, int status)
 {
 	int hs_cap;
 	u16 hs_csr;
@@ -77,7 +77,7 @@ int cpci_set_attention_status(struct slot *slot, int status)
 	return 1;
 }
 
-u16 cpci_get_hs_csr(struct slot *slot)
+u16 cpci_get_hs_csr(struct cpci_slot *slot)
 {
 	int hs_cap;
 	u16 hs_csr;
@@ -95,7 +95,7 @@ u16 cpci_get_hs_csr(struct slot *slot)
 	return hs_csr;
 }
 
-int cpci_check_and_clear_ins(struct slot *slot)
+int cpci_check_and_clear_ins(struct cpci_slot *slot)
 {
 	int hs_cap;
 	u16 hs_csr;
@@ -124,7 +124,7 @@ int cpci_check_and_clear_ins(struct slot *slot)
 	return ins;
 }
 
-int cpci_check_ext(struct slot *slot)
+int cpci_check_ext(struct cpci_slot *slot)
 {
 	int hs_cap;
 	u16 hs_csr;
@@ -145,7 +145,7 @@ int cpci_check_ext(struct slot *slot)
 	return ext;
 }
 
-int cpci_clear_ext(struct slot *slot)
+int cpci_clear_ext(struct cpci_slot *slot)
 {
 	int hs_cap;
 	u16 hs_csr;
@@ -171,7 +171,7 @@ int cpci_clear_ext(struct slot *slot)
 	return 0;
 }
 
-int cpci_led_on(struct slot *slot)
+int cpci_led_on(struct cpci_slot *slot)
 {
 	int hs_cap;
 	u16 hs_csr;
@@ -199,7 +199,7 @@ int cpci_led_on(struct slot *slot)
 	return 0;
 }
 
-int cpci_led_off(struct slot *slot)
+int cpci_led_off(struct cpci_slot *slot)
 {
 	int hs_cap;
 	u16 hs_csr;
@@ -232,7 +232,7 @@ int cpci_led_off(struct slot *slot)
  * Device configuration functions
  */
 
-int cpci_configure_slot(struct slot *slot)
+int cpci_configure_slot(struct cpci_slot *slot)
 {
 	struct pci_dev *dev;
 	struct pci_bus *parent;
@@ -283,7 +283,7 @@ int cpci_configure_slot(struct slot *slot)
 	return ret;
 }
 
-int cpci_unconfigure_slot(struct slot *slot)
+int cpci_unconfigure_slot(struct cpci_slot *slot)
 {
 	struct pci_dev *dev, *temp;
 

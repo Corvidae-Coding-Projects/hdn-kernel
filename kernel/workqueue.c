@@ -56,6 +56,7 @@
 #include <linux/kvm_para.h>
 #include <linux/delay.h>
 #include <linux/irq_work.h>
+#include <linux/mempool.h>
 
 #include "workqueue_internal.h"
 
@@ -3824,6 +3825,11 @@ struct wq_barrier {
 	struct task_struct	*task;	/* purely informational */
 };
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+static mempool_t *wq_barrier_pool;
+static mempool_t *wq_flusher_pool;
+#endif
+
 static void wq_barrier_func(struct work_struct *work)
 {
 	struct wq_barrier *barr = container_of(work, struct wq_barrier, work);
@@ -3873,8 +3879,13 @@ static void insert_wq_barrier(struct pool_workqueue *pwq,
 	 * spuriously triggering "inconsistent {SOFTIRQ-ON-W} -> {IN-SOFTIRQ-W}
 	 * usage".
 	 */
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	INIT_WORK_KEY(&barr->work, wq_barrier_func,
+		      (pwq->wq->flags & WQ_BH) ? &bh_key : &thr_key);
+#else
 	INIT_WORK_ONSTACK_KEY(&barr->work, wq_barrier_func,
 			      (pwq->wq->flags & WQ_BH) ? &bh_key : &thr_key);
+#endif
 	__set_bit(WORK_STRUCT_PENDING_BIT, work_data_bits(&barr->work));
 
 	init_completion_map(&barr->done, &target->lockdep_map);
@@ -4033,15 +4044,23 @@ static void touch_work_lockdep_map(struct work_struct *work,
  */
 void __flush_workqueue(struct workqueue_struct *wq)
 {
-	struct wq_flusher this_flusher = {
-		.list = LIST_HEAD_INIT(this_flusher.list),
+	struct wq_flusher stack_flusher = {
+		.list = LIST_HEAD_INIT(stack_flusher.list),
 		.flush_color = -1,
-		.done = COMPLETION_INITIALIZER_ONSTACK_MAP(this_flusher.done, (*wq->lockdep_map)),
+		.done = COMPLETION_INITIALIZER_ONSTACK_MAP(stack_flusher.done, (*wq->lockdep_map)),
 	};
+	struct wq_flusher *this_flusher = &stack_flusher;
 	int next_color;
 
 	if (WARN_ON(!wq_online))
 		return;
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	this_flusher = mempool_alloc(wq_flusher_pool, GFP_KERNEL);
+	INIT_LIST_HEAD(&this_flusher->list);
+	this_flusher->flush_color = -1;
+	init_completion_map(&this_flusher->done, wq->lockdep_map);
+#endif
 
 	touch_wq_lockdep_map(wq);
 
@@ -4059,14 +4078,14 @@ void __flush_workqueue(struct workqueue_struct *wq)
 		 * by one.
 		 */
 		WARN_ON_ONCE(!list_empty(&wq->flusher_overflow));
-		this_flusher.flush_color = wq->work_color;
+		this_flusher->flush_color = wq->work_color;
 		wq->work_color = next_color;
 
 		if (!wq->first_flusher) {
 			/* no flush in progress, become the first flusher */
-			WARN_ON_ONCE(wq->flush_color != this_flusher.flush_color);
+			WARN_ON_ONCE(wq->flush_color != this_flusher->flush_color);
 
-			wq->first_flusher = &this_flusher;
+			wq->first_flusher = this_flusher;
 
 			if (!flush_workqueue_prep_pwqs(wq, wq->flush_color,
 						       wq->work_color)) {
@@ -4077,8 +4096,8 @@ void __flush_workqueue(struct workqueue_struct *wq)
 			}
 		} else {
 			/* wait in queue */
-			WARN_ON_ONCE(wq->flush_color == this_flusher.flush_color);
-			list_add_tail(&this_flusher.list, &wq->flusher_queue);
+			WARN_ON_ONCE(wq->flush_color == this_flusher->flush_color);
+			list_add_tail(&this_flusher->list, &wq->flusher_queue);
 			flush_workqueue_prep_pwqs(wq, -1, wq->work_color);
 		}
 	} else {
@@ -4087,14 +4106,14 @@ void __flush_workqueue(struct workqueue_struct *wq)
 		 * The next flush completion will assign us
 		 * flush_color and transfer to flusher_queue.
 		 */
-		list_add_tail(&this_flusher.list, &wq->flusher_overflow);
+		list_add_tail(&this_flusher->list, &wq->flusher_overflow);
 	}
 
 	check_flush_dependency(wq, NULL, false);
 
 	mutex_unlock(&wq->mutex);
 
-	wait_for_completion(&this_flusher.done);
+	wait_for_completion(&this_flusher->done);
 
 	/*
 	 * Wake-up-and-cascade phase
@@ -4102,19 +4121,19 @@ void __flush_workqueue(struct workqueue_struct *wq)
 	 * First flushers are responsible for cascading flushes and
 	 * handling overflow.  Non-first flushers can simply return.
 	 */
-	if (READ_ONCE(wq->first_flusher) != &this_flusher)
-		return;
+	if (READ_ONCE(wq->first_flusher) != this_flusher)
+		goto out_free;
 
 	mutex_lock(&wq->mutex);
 
 	/* we might have raced, check again with mutex held */
-	if (wq->first_flusher != &this_flusher)
+	if (wq->first_flusher != this_flusher)
 		goto out_unlock;
 
 	WRITE_ONCE(wq->first_flusher, NULL);
 
-	WARN_ON_ONCE(!list_empty(&this_flusher.list));
-	WARN_ON_ONCE(wq->flush_color != this_flusher.flush_color);
+	WARN_ON_ONCE(!list_empty(&this_flusher->list));
+	WARN_ON_ONCE(wq->flush_color != this_flusher->flush_color);
 
 	while (true) {
 		struct wq_flusher *next, *tmp;
@@ -4178,6 +4197,10 @@ void __flush_workqueue(struct workqueue_struct *wq)
 
 out_unlock:
 	mutex_unlock(&wq->mutex);
+out_free:
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	mempool_free(this_flusher, wq_flusher_pool);
+#endif
 }
 EXPORT_SYMBOL(__flush_workqueue);
 
@@ -4294,7 +4317,13 @@ already_gone:
 
 static bool __flush_work(struct work_struct *work, bool from_cancel)
 {
-	struct wq_barrier barr;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct wq_barrier *barr;
+#else
+	struct wq_barrier stack_barr;
+	struct wq_barrier *barr = &stack_barr;
+#endif
+	bool ret = false;
 
 	if (WARN_ON(!wq_online))
 		return false;
@@ -4302,8 +4331,13 @@ static bool __flush_work(struct work_struct *work, bool from_cancel)
 	if (WARN_ON(!work->func))
 		return false;
 
-	if (!start_flush_work(work, &barr, from_cancel))
-		return false;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	barr = mempool_alloc(wq_barrier_pool, GFP_KERNEL);
+#endif
+
+	if (!start_flush_work(work, barr, from_cancel))
+		goto out_free;
+	ret = true;
 
 	/*
 	 * start_flush_work() returned %true. If @from_cancel is set, we know
@@ -4322,7 +4356,7 @@ static bool __flush_work(struct work_struct *work, bool from_cancel)
 			 * soft interrupt processing by blocking on lock which
 			 * is owned by the thread invoking the callback.
 			 */
-			while (!try_wait_for_completion(&barr.done)) {
+			while (!try_wait_for_completion(&barr->done)) {
 				if (IS_ENABLED(CONFIG_PREEMPT_RT)) {
 					struct worker_pool *pool;
 
@@ -4338,11 +4372,23 @@ static bool __flush_work(struct work_struct *work, bool from_cancel)
 		}
 	}
 
-	wait_for_completion(&barr.done);
+	wait_for_completion(&barr->done);
 
 out_destroy:
-	destroy_work_on_stack(&barr.work);
-	return true;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	mempool_free(barr, wq_barrier_pool);
+	return ret;
+#else
+	destroy_work_on_stack(&barr->work);
+out_free:
+	return ret;
+#endif
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+out_free:
+	mempool_free(barr, wq_barrier_pool);
+	return ret;
+#endif
 }
 
 /**
@@ -7940,6 +7986,13 @@ void __init workqueue_init_early(void)
 	cpumask_andnot(wq_isolated_cpumask, cpu_possible_mask,
 						housekeeping_cpumask(HK_TYPE_DOMAIN));
 	pwq_cache = KMEM_CACHE(pool_workqueue, SLAB_PANIC);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_barrier_pool = mempool_create_kmalloc_pool(16,
+					       sizeof(struct wq_barrier));
+	wq_flusher_pool = mempool_create_kmalloc_pool(16,
+					       sizeof(struct wq_flusher));
+	BUG_ON(!wq_barrier_pool || !wq_flusher_pool);
+#endif
 
 	unbound_wq_update_pwq_attrs_buf = alloc_workqueue_attrs();
 	BUG_ON(!unbound_wq_update_pwq_attrs_buf);

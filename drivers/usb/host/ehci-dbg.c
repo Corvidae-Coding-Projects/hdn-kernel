@@ -330,8 +330,8 @@ static const struct file_operations debug_registers_fops = {
 
 static struct dentry *ehci_debug_root;
 
-struct debug_buffer {
-	ssize_t (*fill_func)(struct debug_buffer *);	/* fill method */
+struct ehci_debug_buffer {
+	ssize_t (*fill_func)(struct ehci_debug_buffer *);	/* fill method */
 	struct usb_bus *bus;
 	struct mutex mutex;	/* protect filling of buffer */
 	size_t count;		/* number of characters filled into buffer */
@@ -467,7 +467,7 @@ done:
 	*nextp = next;
 }
 
-static ssize_t fill_async_buffer(struct debug_buffer *buf)
+static ssize_t fill_async_buffer(struct ehci_debug_buffer *buf)
 {
 	struct usb_hcd		*hcd;
 	struct ehci_hcd		*ehci;
@@ -507,7 +507,7 @@ static ssize_t fill_async_buffer(struct debug_buffer *buf)
 	return strlen(buf->output_buf);
 }
 
-static ssize_t fill_bandwidth_buffer(struct debug_buffer *buf)
+static ssize_t fill_bandwidth_buffer(struct ehci_debug_buffer *buf)
 {
 	struct ehci_hcd		*ehci;
 	struct ehci_tt		*tt;
@@ -618,7 +618,7 @@ static unsigned output_buf_tds_dir(char *buf, struct ehci_hcd *ehci,
 }
 
 #define DBG_SCHED_LIMIT 64
-static ssize_t fill_periodic_buffer(struct debug_buffer *buf)
+static ssize_t fill_periodic_buffer(struct ehci_debug_buffer *buf)
 {
 	struct usb_hcd		*hcd;
 	struct ehci_hcd		*ehci;
@@ -752,7 +752,7 @@ static const char *rh_state_string(struct ehci_hcd *ehci)
 	return "?";
 }
 
-static ssize_t fill_registers_buffer(struct debug_buffer *buf)
+static ssize_t fill_registers_buffer(struct ehci_debug_buffer *buf)
 {
 	struct usb_hcd		*hcd;
 	struct ehci_hcd		*ehci;
@@ -912,10 +912,10 @@ done:
 	return buf->alloc_size - size;
 }
 
-static struct debug_buffer *alloc_buffer(struct usb_bus *bus,
-		ssize_t (*fill_func)(struct debug_buffer *))
+static struct ehci_debug_buffer *alloc_buffer(struct usb_bus *bus,
+		ssize_t (*fill_func)(struct ehci_debug_buffer *))
 {
-	struct debug_buffer *buf;
+	struct ehci_debug_buffer *buf;
 
 	buf = kzalloc_obj(*buf);
 
@@ -929,7 +929,7 @@ static struct debug_buffer *alloc_buffer(struct usb_bus *bus,
 	return buf;
 }
 
-static int fill_buffer(struct debug_buffer *buf)
+static int fill_buffer(struct ehci_debug_buffer *buf)
 {
 	int ret;
 
@@ -955,7 +955,7 @@ out:
 static ssize_t debug_output(struct file *file, char __user *user_buf,
 		size_t len, loff_t *offset)
 {
-	struct debug_buffer *buf = file->private_data;
+	struct ehci_debug_buffer *buf = file->private_data;
 	int ret;
 
 	mutex_lock(&buf->mutex);
@@ -977,7 +977,7 @@ out:
 
 static int debug_close(struct inode *inode, struct file *file)
 {
-	struct debug_buffer *buf = file->private_data;
+	struct ehci_debug_buffer *buf = file->private_data;
 
 	if (buf) {
 		vfree(buf->output_buf);
@@ -1004,7 +1004,7 @@ static int debug_bandwidth_open(struct inode *inode, struct file *file)
 
 static int debug_periodic_open(struct inode *inode, struct file *file)
 {
-	struct debug_buffer *buf;
+	struct ehci_debug_buffer *buf;
 
 	buf = alloc_buffer(inode->i_private, fill_periodic_buffer);
 	if (!buf)

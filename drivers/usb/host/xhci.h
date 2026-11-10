@@ -12,6 +12,8 @@
 #ifndef __LINUX_XHCI_HCD_H
 #define __LINUX_XHCI_HCD_H
 
+#define urb_priv xhci_urb_priv
+
 #include <linux/usb.h>
 #include <linux/timer.h>
 #include <linux/kernel.h>

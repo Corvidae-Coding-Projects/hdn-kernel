@@ -219,6 +219,11 @@ int hdn_rap_module_prepare(struct module *mod, struct hdn_rap_section targets,
 	    !static_sites.size || static_sites.size % sizeof(*patch_sites) ||
 	    static_sites.size > HDN_RAP_METADATA_MAX || !IS_ALIGNED((unsigned long)patch_sites, 8))
 		return -ENOEXEC;
+	if (mod->noinstr_text_size &&
+	    (!within_module_mem_type((unsigned long)mod->noinstr_text_start, mod, MOD_TEXT) ||
+	     !within_module_mem_type((unsigned long)mod->noinstr_text_start +
+				    mod->noinstr_text_size - 1, mod, MOD_TEXT)))
+		return -ENOEXEC;
 	error = validate_types(types);
 	if (error)
 		return error;
@@ -305,6 +310,8 @@ int hdn_rap_module_prepare(struct module *mod, struct hdn_rap_section targets,
 	view->init_text = (unsigned long)mod->mem[MOD_INIT_TEXT].base;
 	view->init_size = mod->mem[MOD_INIT_TEXT].size;
 	view->init_live = 1;
+	view->noinstr_text = (unsigned long)mod->noinstr_text_start;
+	view->noinstr_size = mod->noinstr_text_size;
 	view->original_types = types;
 	view->types = (struct hdn_rap_section) { (void *)view + records_size, types.size };
 	view->functions = (struct hdn_rap_section) { (void *)view + functions_offset, functions.size };

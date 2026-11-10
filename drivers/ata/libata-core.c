@@ -1542,13 +1542,18 @@ unsigned int ata_exec_internal(struct ata_device *dev, struct ata_taskfile *tf,
 	struct ata_port *ap = link->ap;
 	u8 command = tf->command;
 	struct ata_queued_cmd *qc;
+#ifndef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
 	struct scatterlist sgl;
+#endif
+	struct completion *wait;
 	unsigned int preempted_tag;
 	u32 preempted_sactive;
 	u64 preempted_qc_active;
 	int preempted_nr_active_links;
 	bool auto_timeout = false;
-	DECLARE_COMPLETION_ONSTACK(wait);
+#ifndef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	DECLARE_COMPLETION_ONSTACK(stack_wait);
+#endif
 	unsigned long flags;
 	unsigned int err_mask;
 	int rc;
@@ -1573,6 +1578,15 @@ unsigned int ata_exec_internal(struct ata_device *dev, struct ata_taskfile *tf,
 	qc->ap = ap;
 	qc->dev = dev;
 	ata_qc_reinit(qc);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* Both objects remain reachable from interrupt context until the
+	 * internal command completes.  Keep them in the shared queued-command
+	 * storage instead of publishing another task's private stack. */
+	init_completion(&qc->hdn_internal_wait);
+	wait = &qc->hdn_internal_wait;
+#else
+	wait = &stack_wait;
+#endif
 
 	preempted_tag = link->active_tag;
 	preempted_sactive = link->sactive;
@@ -1596,12 +1610,17 @@ unsigned int ata_exec_internal(struct ata_device *dev, struct ata_taskfile *tf,
 	qc->flags |= ATA_QCFLAG_RESULT_TF;
 	qc->dma_dir = dma_dir;
 	if (dma_dir != DMA_NONE) {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+		sg_init_one(&qc->sgent, buf, buflen);
+		ata_sg_init(qc, &qc->sgent, 1);
+#else
 		sg_init_one(&sgl, buf, buflen);
 		ata_sg_init(qc, &sgl, 1);
+#endif
 		qc->nbytes = buflen;
 	}
 
-	qc->private_data = &wait;
+	qc->private_data = wait;
 	qc->complete_fn = ata_qc_complete_internal;
 
 	ata_qc_issue(qc);
@@ -1619,7 +1638,7 @@ unsigned int ata_exec_internal(struct ata_device *dev, struct ata_taskfile *tf,
 
 	ata_eh_release(ap);
 
-	rc = wait_for_completion_timeout(&wait, msecs_to_jiffies(timeout));
+	rc = wait_for_completion_timeout(wait, msecs_to_jiffies(timeout));
 
 	ata_eh_acquire(ap);
 

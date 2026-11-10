@@ -2862,8 +2862,21 @@ static int affine_move_task(struct rq *rq, struct task_struct *p, struct rq_flag
 			    int dest_cpu, unsigned int flags)
 	__releases(__rq_lockp(rq), &p->pi_lock)
 {
-	struct set_affinity_pending my_pending = { }, *pending = NULL;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct set_affinity_pending *my_pending;
+#else
+	struct set_affinity_pending my_pending_storage = { };
+	struct set_affinity_pending *my_pending = &my_pending_storage;
+#endif
+	struct set_affinity_pending *pending = NULL;
 	bool stop_pending, complete = false;
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* This object is published to a remote stopper before this task sleeps. */
+	my_pending = kzalloc(sizeof(*my_pending), GFP_ATOMIC | __GFP_NOWARN);
+	if (unlikely(!my_pending))
+		BUG();
+#endif
 
 	/*
 	 * Can the task run on the task's current CPU? If so, we're done
@@ -2903,6 +2916,9 @@ static int affine_move_task(struct rq *rq, struct task_struct *p, struct rq_flag
 		if (complete)
 			complete_all(&pending->done);
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+		kfree(my_pending);
+#endif
 		return 0;
 	}
 
@@ -2910,15 +2926,15 @@ static int affine_move_task(struct rq *rq, struct task_struct *p, struct rq_flag
 		/* serialized by p->pi_lock */
 		if (!p->migration_pending) {
 			/* Install the request */
-			refcount_set(&my_pending.refs, 1);
-			init_completion(&my_pending.done);
-			my_pending.arg = (struct migration_arg) {
+			refcount_set(&my_pending->refs, 1);
+			init_completion(&my_pending->done);
+			my_pending->arg = (struct migration_arg) {
 				.task = p,
 				.dest_cpu = dest_cpu,
-				.pending = &my_pending,
+				.pending = my_pending,
 			};
 
-			p->migration_pending = &my_pending;
+			p->migration_pending = my_pending;
 		} else {
 			pending = p->migration_pending;
 			refcount_inc(&pending->refs);
@@ -2948,6 +2964,9 @@ static int affine_move_task(struct rq *rq, struct task_struct *p, struct rq_flag
 	 */
 	if (WARN_ON_ONCE(!pending)) {
 		task_rq_unlock(rq, p, rf);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+		kfree(my_pending);
+#endif
 		return -EINVAL;
 	}
 
@@ -2972,8 +2991,12 @@ static int affine_move_task(struct rq *rq, struct task_struct *p, struct rq_flag
 		}
 		preempt_enable();
 
-		if (flags & SCA_MIGRATE_ENABLE)
+		if (flags & SCA_MIGRATE_ENABLE) {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+			kfree(my_pending);
+#endif
 			return 0;
+		}
 	} else {
 
 		if (!is_migration_disabled(p)) {
@@ -3000,11 +3023,14 @@ static int affine_move_task(struct rq *rq, struct task_struct *p, struct rq_flag
 	 * Block the original owner of &pending until all subsequent callers
 	 * have seen the completion and decremented the refcount
 	 */
-	wait_var_event(&my_pending.refs, !refcount_read(&my_pending.refs));
+	wait_var_event(&my_pending->refs, !refcount_read(&my_pending->refs));
 
 	/* ARGH */
-	WARN_ON_ONCE(my_pending.stop_pending);
+	WARN_ON_ONCE(my_pending->stop_pending);
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	kfree(my_pending);
+#endif
 	return 0;
 }
 
@@ -3365,23 +3391,54 @@ static int migrate_swap_stop(void *data)
 int migrate_swap(struct task_struct *cur, struct task_struct *p,
 		int target_cpu, int curr_cpu)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct migration_swap_arg *arg;
+#else
 	struct migration_swap_arg arg;
+#endif
 	int ret = -EINVAL;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	arg = kmalloc(sizeof(*arg), GFP_KERNEL | __GFP_NOFAIL);
+	*arg = (struct migration_swap_arg){
+		.src_task = cur,
+		.src_cpu = curr_cpu,
+		.dst_task = p,
+		.dst_cpu = target_cpu,
+	};
+#else
 	arg = (struct migration_swap_arg){
 		.src_task = cur,
 		.src_cpu = curr_cpu,
 		.dst_task = p,
 		.dst_cpu = target_cpu,
 	};
+#endif
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (arg->src_cpu == arg->dst_cpu)
+#else
 	if (arg.src_cpu == arg.dst_cpu)
+#endif
 		goto out;
 
 	/*
 	 * These three tests are all lockless; this is OK since all of them
 	 * will be re-checked with proper locks held further down the line.
 	 */
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (!cpu_active(arg->src_cpu) || !cpu_active(arg->dst_cpu))
+		goto out;
+
+	if (!cpumask_test_cpu(arg->dst_cpu, arg->src_task->cpus_ptr))
+		goto out;
+
+	if (!cpumask_test_cpu(arg->src_cpu, arg->dst_task->cpus_ptr))
+		goto out;
+
+	trace_sched_swap_numa(cur, arg->src_cpu, p, arg->dst_cpu);
+	ret = stop_two_cpus(arg->dst_cpu, arg->src_cpu, migrate_swap_stop, arg);
+#else
 	if (!cpu_active(arg.src_cpu) || !cpu_active(arg.dst_cpu))
 		goto out;
 
@@ -3393,8 +3450,12 @@ int migrate_swap(struct task_struct *cur, struct task_struct *p,
 
 	trace_sched_swap_numa(cur, arg.src_cpu, p, arg.dst_cpu);
 	ret = stop_two_cpus(arg.dst_cpu, arg.src_cpu, migrate_swap_stop, &arg);
+#endif
 
 out:
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	kfree(arg);
+#endif
 	return ret;
 }
 #endif /* CONFIG_NUMA_BALANCING */
@@ -5412,7 +5473,9 @@ unsigned int nr_iowait(void)
 void sched_exec(void)
 {
 	struct task_struct *p = current;
+#ifndef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
 	struct migration_arg arg;
+#endif
 	int dest_cpu;
 
 	scoped_guard (raw_spinlock_irqsave, &p->pi_lock) {
@@ -5423,9 +5486,22 @@ void sched_exec(void)
 		if (unlikely(!cpu_active(dest_cpu)))
 			return;
 
+#ifndef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
 		arg = (struct migration_arg){ p, dest_cpu };
+#endif
 	}
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	{
+		struct migration_arg *arg;
+
+		arg = kmalloc(sizeof(*arg), GFP_KERNEL | __GFP_NOFAIL);
+		*arg = (struct migration_arg){ p, dest_cpu };
+		stop_one_cpu(task_cpu(p), migration_cpu_stop, arg);
+		kfree(arg);
+	}
+#else
 	stop_one_cpu(task_cpu(p), migration_cpu_stop, &arg);
+#endif
 }
 
 DEFINE_PER_CPU(struct kernel_stat, kstat);
@@ -8004,7 +8080,12 @@ bool sched_smp_initialized __read_mostly;
 /* Migrate current task p to target_cpu */
 int migrate_task_to(struct task_struct *p, int target_cpu)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct migration_arg *arg;
+	int ret;
+#else
 	struct migration_arg arg = { p, target_cpu };
+#endif
 	int curr_cpu = task_cpu(p);
 
 	if (curr_cpu == target_cpu)
@@ -8016,7 +8097,15 @@ int migrate_task_to(struct task_struct *p, int target_cpu)
 	/* TODO: This is not properly updating schedstats */
 
 	trace_sched_move_numa(p, curr_cpu, target_cpu);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	arg = kmalloc(sizeof(*arg), GFP_KERNEL | __GFP_NOFAIL);
+	*arg = (struct migration_arg){ p, target_cpu };
+	ret = stop_one_cpu(curr_cpu, migration_cpu_stop, arg);
+	kfree(arg);
+	return ret;
+#else
 	return stop_one_cpu(curr_cpu, migration_cpu_stop, &arg);
+#endif
 }
 
 /*

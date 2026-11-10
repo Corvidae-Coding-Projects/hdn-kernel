@@ -29,7 +29,7 @@
  * Return 0 on success, %-EEXIST if the devices are already enumerated or
  * %-ENODEV if enumeration failed.
  */
-int pciehp_configure_device(struct controller *ctrl)
+int pciehp_configure_device(struct pciehp_controller *ctrl)
 {
 	struct pci_dev *dev;
 	struct pci_dev *bridge = ctrl->pcie->port;
@@ -92,7 +92,7 @@ int pciehp_configure_device(struct controller *ctrl)
  * them from the system.  Safely removed devices are quiesced.  Surprise
  * removed devices are marked as such to prevent further accesses.
  */
-void pciehp_unconfigure_device(struct controller *ctrl, bool presence)
+void pciehp_unconfigure_device(struct pciehp_controller *ctrl, bool presence)
 {
 	struct pci_dev *dev, *temp;
 	struct pci_bus *parent = ctrl->pcie->port->subordinate;

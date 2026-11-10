@@ -82,18 +82,6 @@ enum hrtimer_mode {
 #define HRTIMER_STATE_INACTIVE	0x00
 #define HRTIMER_STATE_ENQUEUED	0x01
 
-/**
- * struct hrtimer_sleeper - simple sleeper structure
- * @timer:	embedded timer structure
- * @task:	task to wake up
- *
- * task is set to NULL, when the timer expires.
- */
-struct hrtimer_sleeper {
-	struct hrtimer timer;
-	struct task_struct *task;
-};
-
 static inline void hrtimer_set_expires(struct hrtimer *timer, ktime_t time)
 {
 	timer->node.expires = time;
@@ -217,6 +205,8 @@ extern void hrtimer_setup(struct hrtimer *timer, enum hrtimer_restart (*function
 extern void hrtimer_setup_on_stack(struct hrtimer *timer,
 				   enum hrtimer_restart (*function)(struct hrtimer *),
 				   clockid_t clock_id, enum hrtimer_mode mode);
+extern void hrtimer_setup_sleeper(struct hrtimer_sleeper *sl, clockid_t clock_id,
+				  enum hrtimer_mode mode);
 extern void hrtimer_setup_sleeper_on_stack(struct hrtimer_sleeper *sl, clockid_t clock_id,
 					   enum hrtimer_mode mode);
 

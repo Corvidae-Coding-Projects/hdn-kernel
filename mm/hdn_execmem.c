@@ -162,6 +162,33 @@ int hdn_execmem_leaf(unsigned long pfn, unsigned long nr, unsigned long flags)
 	return 0;
 }
 
+/* vfree() normally expects every cleared vmalloc PTE to be present. HDN
+ * deliberately made private backing non-present before teardown so it was
+ * never generally accessible while being scrubbed. Admit only that exact
+ * canonical PTE while its still-published lifetime is owned by this task. */
+bool hdn_execmem_retiring_pte(unsigned long address, unsigned long pfn)
+{
+	struct hdn_execmem_page *entry;
+	struct hdn_execmem_region *region;
+	bool retiring = false;
+
+	rcu_read_lock();
+	entry = xa_load(&hdn_execmem_pfns, pfn);
+	if (!entry)
+		goto out;
+	region = entry->region;
+	if (entry->pfn == pfn && entry->index < READ_ONCE(region->nr) &&
+	    entry == &region->pages[entry->index] &&
+	    address == READ_ONCE(region->address) +
+		       ((unsigned long)entry->index << PAGE_SHIFT) &&
+	    smp_load_acquire(&region->state) == HDN_EXEC_RETIRING &&
+	    READ_ONCE(region->owner) == current)
+		retiring = true;
+out:
+	rcu_read_unlock();
+	return retiring;
+}
+
 bool hdn_execmem_snapshot_page(void *destination, struct page *page, bool *zeros_only)
 {
 #ifdef CONFIG_SECURITY_HARDENING_PGTABLE
@@ -272,7 +299,7 @@ static int hdn_execmem_claim_region(void *ptr, bool executable, bool bpf,
 	struct vm_struct *vm = find_vm_area(ptr);
 	struct hdn_execmem_region *region;
 	unsigned long first = ULONG_MAX, last = 0;
-	unsigned int i, inserted = 0;
+	unsigned int i, inserted = 0, reserved = 0;
 	int error = -EINVAL;
 
 	if (!kernel_wx_enforced() || !vm || vm->addr != ptr || !vm->nr_pages ||
@@ -302,15 +329,28 @@ static int hdn_execmem_claim_region(void *ptr, bool executable, bool bpf,
 	}
 	region->generation = ++hdn_execmem_generation;
 	for (i = 0; i < region->nr; i++) {
+		unsigned long pfn = page_to_pfn(vm->pages[i]);
+
 		region->pages[i].region = region;
 		region->pages[i].index = i;
-		region->pages[i].pfn = page_to_pfn(vm->pages[i]);
-		error = xa_insert(&hdn_execmem_pfns, page_to_pfn(vm->pages[i]),
-				  &region->pages[i], GFP_KERNEL);
+		region->pages[i].pfn = pfn;
+		/* Fresh allocator backing cannot already have an owner. Reserve every
+		 * XArray path before changing mappings so ownership publication cannot
+		 * fail after the direct-map aliases have been withdrawn. */
+		if (xa_load(&hdn_execmem_pfns, pfn)) {
+			error = -EEXIST;
+			goto rollback;
+		}
+		error = xa_reserve(&hdn_execmem_pfns, pfn, GFP_KERNEL);
 		if (error)
 			goto rollback;
-		inserted++;
+		reserved++;
 	}
+	/* Do not publish BUILDING ownership while a huge direct-map leaf can
+	 * still cover the backing. Otherwise an unrelated CPA split can observe
+	 * that transient alias and either reproduce it or fail closed mid-split.
+	 * The allocation is fresh and unpublished, and the lifecycle mutex keeps
+	 * other claims from entering this withdrawal interval. */
 	for (i = 0; i < region->nr; i++) {
 		unsigned long address = (unsigned long)page_address(vm->pages[i]);
 
@@ -321,6 +361,19 @@ static int hdn_execmem_claim_region(void *ptr, bool executable, bool bpf,
 		last = max(last, address + PAGE_SIZE);
 	}
 	flush_tlb_kernel_range(first, last);
+	for (i = 0; i < region->nr; i++) {
+		void *old = xa_cmpxchg(&hdn_execmem_pfns, region->pages[i].pfn,
+				       XA_ZERO_ENTRY, &region->pages[i], GFP_NOWAIT);
+
+		/* xa_reserve() made this publication allocation-free. A non-NULL
+		 * value would violate mutex-serialized fresh-page ownership, and the
+		 * conditional exchange leaves any unexpected owner untouched. */
+		if (WARN_ON_ONCE(xa_err(old) || old)) {
+			error = xa_err(old) ?: -EEXIST;
+			goto rollback;
+		}
+		inserted++;
+	}
 	vm->flags |= VM_HDN_EXECMEM;
 	atomic64_inc(&hdn_execmem_allocations);
 	atomic64_add(region->nr, &hdn_execmem_live_pages);
@@ -332,8 +385,12 @@ static int hdn_execmem_claim_region(void *ptr, bool executable, bool bpf,
 
 rollback:
 	/* No executable or published mapping exists. vfree restores direct maps. */
+	if (first != ULONG_MAX)
+		flush_tlb_kernel_range(first, last);
 	while (inserted)
-		xa_erase(&hdn_execmem_pfns, page_to_pfn(vm->pages[--inserted]));
+		xa_erase(&hdn_execmem_pfns, region->pages[--inserted].pfn);
+	while (reserved)
+		xa_release(&hdn_execmem_pfns, region->pages[--reserved].pfn);
 	mutex_unlock(&hdn_execmem_mutex);
 	put_task_struct(region->owner);
 	kvfree_rcu(region, rcu);

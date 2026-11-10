@@ -70,7 +70,7 @@ static enum hrtimer_restart rap_timer(struct hrtimer *unused)
 	return HRTIMER_NORESTART;
 }
 
-static unsigned int rap_nmi(unsigned int type, struct pt_regs *regs)
+static int rap_nmi(unsigned int type, struct pt_regs *regs)
 {
 	rap_long_fn function = rap_good;
 
@@ -95,7 +95,7 @@ static int rap_positive_async(void)
 {
 	struct task_struct *task;
 	unsigned long count;
-	int error;
+	int cpu, error;
 
 	init_completion(&timer_done);
 	init_completion(&thread_done);
@@ -112,7 +112,12 @@ static int rap_positive_async(void)
 	if (error)
 		return error;
 	WRITE_ONCE(nmi_pending, true);
-	__apic_send_IPI_self(NMI_VECTOR);
+	/* APIC_SELF_IPI only delivers fixed interrupts in x2APIC mode.  Use
+	 * the same mask path as the architecture NMI self-test so vector 2 is
+	 * encoded with APIC_DM_NMI on every supported APIC implementation. */
+	cpu = get_cpu();
+	__apic_send_IPI_mask(cpumask_of(cpu), NMI_VECTOR);
+	put_cpu();
 	for (count = 0; READ_ONCE(nmi_pending) && count < 10000000; count++)
 		cpu_relax();
 	unregister_nmi_handler(NMI_LOCAL, "hdn-rap-probe");
@@ -125,6 +130,7 @@ static int __init rap_test_init(void)
 {
 	rap_long_fn function;
 	long value;
+	int error;
 
 	if (mode > 4)
 		return -EINVAL;
@@ -149,8 +155,13 @@ static int __init rap_test_init(void)
 		rap_copy_return();
 		return -EUCLEAN;
 	case 4:
-		if (rap_positive_async())
+		error = rap_positive_async();
+		if (error) {
+			pr_err("HDN_RAP_GUEST_ASYNC_FAIL error=%d timer=%ld nmi=%ld thread=%ld pending=%u\n",
+			       error, timer_value, nmi_value, thread_value,
+			       READ_ONCE(nmi_pending));
 			return -EUCLEAN;
+		}
 		break;
 	}
 	pr_info("HDN_RAP_GUEST_PASS mode=%u\n", mode);

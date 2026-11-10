@@ -441,7 +441,14 @@ const struct hdn_rap_entry_state *noinstr hdn_rap_frame_exit(struct pt_regs *reg
 	hdn_rap_context_store(context, (unsigned long *)&frame->sequence, 0);
 	hdn_rap_context_store(context, &context->async_top, top - 1);
 #ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
-	hdn_stack_mm_async_exit(frame->entry.cr3, frame->entry.gdt_window);
+	{
+		unsigned long entry_cr3 = frame->entry.cr3;
+		unsigned long target = hdn_stack_mm_async_target(context->owner, slot,
+							 entry_cr3, frame->entry.gdt_window);
+
+		hdn_rap_context_store(context, &frame->entry.cr3, target);
+		hdn_stack_mm_async_exit(entry_cr3, frame->entry.gdt_window);
+	}
 #endif
 	native_local_irq_restore(flags);
 	return &frame->entry;

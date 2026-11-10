@@ -3818,10 +3818,14 @@ out:
 int arch_bpf_trampoline_size(const struct btf_func_model *m, u32 flags,
 			     struct bpf_tramp_links *tlinks, void *func_addr)
 {
-	struct bpf_tramp_image im;
+	struct bpf_tramp_image *im;
 	struct hdn_rap_bpf_tramp_layout rap = {};
 	void *image;
 	int ret;
+
+	im = kzalloc_obj(*im);
+	if (!im)
+		return -ENOMEM;
 
 	/* Allocate a temporary buffer for __arch_prepare_bpf_trampoline().
 	 * This will NOT cause fragmentation in direct map, as we do not
@@ -3831,12 +3835,16 @@ int arch_bpf_trampoline_size(const struct btf_func_model *m, u32 flags,
 	 * module memory range.
 	 */
 	image = bpf_jit_alloc_exec(PAGE_SIZE);
-	if (!image)
-		return -ENOMEM;
+	if (!image) {
+		ret = -ENOMEM;
+		goto out_free_im;
+	}
 
-	ret = __arch_prepare_bpf_trampoline(&im, image, image + PAGE_SIZE, image,
+	ret = __arch_prepare_bpf_trampoline(im, image, image + PAGE_SIZE, image,
 					    m, flags, tlinks, func_addr, &rap);
 	bpf_jit_free_exec(image);
+out_free_im:
+	kfree(im);
 	return ret;
 }
 

@@ -4,6 +4,31 @@
  */
 #include "sched.h"
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+struct swait_queue *hdn_swait_acquire(void)
+{
+	struct swait_queue *wait = &current->hdn_swait;
+
+	if (unlikely(current->hdn_swait_active))
+		BUG();
+	current->hdn_swait_active = true;
+	wait->task = current;
+	INIT_LIST_HEAD(&wait->task_list);
+	return wait;
+}
+
+void hdn_swait_release(struct swait_queue *wait)
+{
+	if (unlikely(wait != &current->hdn_swait ||
+		     !current->hdn_swait_active ||
+		     !list_empty(&wait->task_list)))
+		BUG();
+	current->hdn_swait_active = false;
+}
+EXPORT_SYMBOL_GPL(hdn_swait_acquire);
+EXPORT_SYMBOL_GPL(hdn_swait_release);
+#endif
+
 void __init_swait_queue_head(struct swait_queue_head *q, const char *name,
 			     struct lock_class_key *key)
 {

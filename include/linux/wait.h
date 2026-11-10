@@ -7,12 +7,12 @@
 #include <linux/list.h>
 #include <linux/stddef.h>
 #include <linux/spinlock.h>
+#include <linux/wait_types.h>
 
 #include <asm/current.h>
 
 typedef struct wait_queue_entry wait_queue_entry_t;
 
-typedef int (*wait_queue_func_t)(struct wait_queue_entry *wq_entry, unsigned mode, int flags, void *key);
 int default_wake_function(struct wait_queue_entry *wq_entry, unsigned mode, int flags, void *key);
 
 /* wait_queue_entry::flags */
@@ -22,20 +22,6 @@ int default_wake_function(struct wait_queue_entry *wq_entry, unsigned mode, int 
 #define WQ_FLAG_DONE		0x08
 #define WQ_FLAG_PRIORITY	0x10
 
-/*
- * A single wait-queue entry structure:
- */
-struct wait_queue_entry {
-	unsigned int		flags;
-	void			*private;
-	wait_queue_func_t	func;
-	struct list_head	entry;
-};
-
-struct wait_queue_head {
-	spinlock_t		lock;
-	struct list_head	head;
-};
 typedef struct wait_queue_head wait_queue_head_t;
 
 struct task_struct;
@@ -287,6 +273,11 @@ static inline void wake_up_pollfree(struct wait_queue_head *wq_head)
 
 extern void init_wait_entry(struct wait_queue_entry *wq_entry, int flags);
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+struct wait_queue_entry *hdn_wait_acquire(void);
+void hdn_wait_release(struct wait_queue_entry *wait);
+#endif
+
 /*
  * The below macro ___wait_event() has an explicit shadow of the __ret
  * variable when used from the wait_event_*() macros.
@@ -299,6 +290,35 @@ extern void init_wait_entry(struct wait_queue_entry *wq_entry, int flags);
  * otherwise.
  */
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+#define ___wait_event(wq_head, condition, state, exclusive, ret, cmd)		\
+({									\
+	__label__ __out;							\
+	struct wait_queue_entry *__wq_entry = hdn_wait_acquire();		\
+	long __ret = ret;	/* explicit shadow */				\
+									\
+	init_wait_entry(__wq_entry, exclusive ? WQ_FLAG_EXCLUSIVE : 0);	\
+	for (;;) {							\
+		long __int = prepare_to_wait_event(&wq_head, __wq_entry, state);\
+									\
+		if (condition)						\
+			break;						\
+									\
+		if (___wait_is_interruptible(state) && __int) {			\
+			__ret = __int;					\
+			goto __out;					\
+		}							\
+									\
+		cmd;							\
+									\
+		if (condition)						\
+			break;						\
+	}								\
+	finish_wait(&wq_head, __wq_entry);				\
+__out:	hdn_wait_release(__wq_entry);					\
+	__ret;								\
+})
+#else
 #define ___wait_event(wq_head, condition, state, exclusive, ret, cmd)		\
 ({										\
 	__label__ __out;							\
@@ -325,6 +345,7 @@ extern void init_wait_entry(struct wait_queue_entry *wq_entry, int flags);
 	finish_wait(&wq_head, &__wq_entry);					\
 __out:	__ret;									\
 })
+#endif
 
 #define __wait_event(wq_head, condition)					\
 	(void)___wait_event(wq_head, condition, TASK_UNINTERRUPTIBLE, 0, 0,	\

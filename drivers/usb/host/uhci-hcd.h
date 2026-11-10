@@ -2,6 +2,8 @@
 #ifndef __LINUX_UHCI_HCD_H
 #define __LINUX_UHCI_HCD_H
 
+#define urb_priv uhci_urb_priv
+
 #include <linux/list.h>
 #include <linux/usb.h>
 #include <linux/clk.h>

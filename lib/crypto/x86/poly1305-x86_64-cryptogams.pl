@@ -4257,8 +4257,8 @@ foreach (split('\n',$code)) {
 			my $target = "poly1305_${1}_x86_64";
 			my $skip = ".Lhdn_poly_fallback_" . $hdn_branch++;
 			$_ = "#ifdef HDN_RAP_ASM_ACTIVE\n" .
-			     "\tjnz $skip\n\tsubq \$8, %rsp\n" .
-			     "\tHDN_C_CALL $target\n\taddq \$8, %rsp\n" .
+			     "\tjnz $skip\n\tpushq %rbp\n\tmovq %rsp, %rbp\n" .
+			     "\tHDN_C_CALL $target\n\tpopq %rbp\n" .
 			     "\tHDN_ASM_RETURN\n$skip:\n#else\n$_\n#endif";
 		}
 		s/(^\.type.*),[0-9]+$/\1/;

@@ -3276,36 +3276,52 @@ static int rcu_blocking_is_gp(void)
  */
 static void synchronize_rcu_normal(void)
 {
-	struct rcu_synchronize rs;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct rcu_synchronize *rs;
 
-	trace_rcu_sr_normal(rcu_state.name, &rs.head, TPS("request"));
+	/* rcu_sr_normal_gp_cleanup() consumes this node from the grace-period
+	 * kthread after the caller can switch away from its private stack. */
+	rs = kzalloc(sizeof(*rs), GFP_KERNEL | __GFP_NOFAIL);
+#else
+	struct rcu_synchronize rs_storage;
+	struct rcu_synchronize *rs = &rs_storage;
+#endif
+
+	trace_rcu_sr_normal(rcu_state.name, &rs->head, TPS("request"));
 
 	if (READ_ONCE(rcu_normal_wake_from_gp) < 1) {
 		wait_rcu_gp(call_rcu_hurry);
 		goto trace_complete_out;
 	}
 
-	init_rcu_head_on_stack(&rs.head);
-	init_completion(&rs.completion);
+#ifndef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	init_rcu_head_on_stack(&rs->head);
+#endif
+	init_completion(&rs->completion);
 
 	/*
 	 * This code might be preempted, therefore take a GP
 	 * snapshot before adding a request.
 	 */
 	if (IS_ENABLED(CONFIG_PROVE_RCU))
-		get_state_synchronize_rcu_full(&rs.oldstate);
+		get_state_synchronize_rcu_full(&rs->oldstate);
 
-	rcu_sr_normal_add_req(&rs);
+	rcu_sr_normal_add_req(rs);
 
 	/* Kick a GP and start waiting. */
 	(void) start_poll_synchronize_rcu();
 
 	/* Now we can wait. */
-	wait_for_completion(&rs.completion);
-	destroy_rcu_head_on_stack(&rs.head);
+	wait_for_completion(&rs->completion);
+#ifndef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	destroy_rcu_head_on_stack(&rs->head);
+#endif
 
 trace_complete_out:
-	trace_rcu_sr_normal(rcu_state.name, &rs.head, TPS("complete"));
+	trace_rcu_sr_normal(rcu_state.name, &rs->head, TPS("complete"));
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	kfree(rs);
+#endif
 }
 
 /**

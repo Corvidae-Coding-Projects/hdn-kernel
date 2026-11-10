@@ -11,6 +11,7 @@
 #define __LINUX_LIBATA_H__
 
 #include <linux/delay.h>
+#include <linux/completion.h>
 #include <linux/jiffies.h>
 #include <linux/interrupt.h>
 #include <linux/dma-mapping.h>
@@ -659,6 +660,9 @@ struct ata_queued_cmd {
 	unsigned int		curbytes;
 
 	struct scatterlist	sgent;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct completion	hdn_internal_wait;
+#endif
 
 	struct scatterlist	*sg;
 

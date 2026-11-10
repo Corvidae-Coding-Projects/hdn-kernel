@@ -536,6 +536,25 @@ static int elf_add_symbol(struct elf *elf, struct symbol *sym)
 	return 0;
 }
 
+/* GCC names a weak function's cold partition from its public declaration.
+ * HDN coverage intentionally binds the definition to a non-interposable local
+ * alias. Preserve the public name as a suffix so the partition cannot be
+ * attached to an unrelated strong definition after the final link. */
+static bool hdn_weak_body_for(const struct symbol *sym, const char *public_name)
+{
+	static const char prefix[] = "__hdn_rap_weak_body_";
+	const char *name = sym->name;
+
+	if (strncmp(name, prefix, sizeof(prefix) - 1))
+		return false;
+	name += sizeof(prefix) - 1;
+	if (*name < '0' || *name > '9')
+		return false;
+	while (*name >= '0' && *name <= '9')
+		name++;
+	return *name == '.' && !strcmp(name + 1, public_name);
+}
+
 static int read_symbols(struct elf *elf)
 {
 	struct section *symtab, *symtab_shndx, *sec;
@@ -629,6 +648,7 @@ static int read_symbols(struct elf *elf)
 		sec_for_each_sym(sec, sym) {
 			char *pname;
 			size_t pnamelen;
+			struct symbol *weak_body = NULL, *candidate;
 
 			if (!sym->cold)
 				continue;
@@ -647,6 +667,21 @@ static int read_symbols(struct elf *elf)
 			}
 
 			pfunc = find_local_symbol_by_file_and_name(elf, sym->file, pname);
+			if (!pfunc) {
+				for_each_sym(elf, candidate) {
+					if (candidate->file != sym->file || !is_local_sym(candidate) ||
+					    !is_func_sym(candidate) ||
+					    !hdn_weak_body_for(candidate, pname))
+						continue;
+					if (weak_body) {
+						ERROR("%s(): ambiguous HDN weak-body parent", sym->name);
+						free(pname);
+						return -1;
+					}
+					weak_body = candidate;
+				}
+				pfunc = weak_body;
+			}
 			if (!pfunc)
 				pfunc = find_global_symbol_by_name(elf, pname);
 			free(pname);

@@ -3,6 +3,39 @@
 struct rap_pair { long value; void *owner; };
 enum rap_choice { RAP_NEGATIVE = -1, RAP_FIRST, RAP_SECOND };
 struct rap_flexible { enum rap_choice choice; char data[]; };
+
+typedef long rap_parameter_plain(struct rap_pair *, const struct rap_pair *,
+				 unsigned int);
+typedef long rap_parameter_top_qualified(struct rap_pair *const,
+					 const struct rap_pair *const,
+					 const unsigned int);
+typedef long rap_parameter_mutable_pointee(struct rap_pair *);
+typedef long rap_parameter_const_pointee(const struct rap_pair *);
+
+/* Top-level parameter qualifiers are not part of a C function type, while
+ * qualifiers below a pointer remain an observable type-safety boundary. */
+_Static_assert(__builtin_types_compatible_p(rap_parameter_plain,
+					    rap_parameter_top_qualified),
+	       "top-level parameter qualifiers are ignored");
+_Static_assert(!__builtin_types_compatible_p(rap_parameter_mutable_pointee,
+					     rap_parameter_const_pointee),
+	       "pointee qualifiers remain significant");
+
+long rap_parameter_qualified_target(struct rap_pair *const value,
+				    const struct rap_pair *const old,
+				    const unsigned int flags)
+{
+	return value->value + old->value + flags;
+}
+
+long rap_invoke_parameter_qualified(rap_parameter_plain *function,
+				    struct rap_pair *value,
+				    const struct rap_pair *old,
+				    unsigned int flags)
+{
+	return function(value, old, flags);
+}
+
 long rap_flexible_read(struct rap_flexible *value) { return value->choice; }
 long rap_integer(long value) { return value + 7; }
 long rap_pointer(struct rap_pair *value) { return value->value; }

@@ -197,7 +197,7 @@ ifneq ($(CONFIG_KVM_AMD),)
 ifeq ($(CONFIG_MSHV_ROOT)$(CONFIG_CRASH_DUMP),yy)
 obj-$(CONFIG_SECURITY_HARDENING_RAP) += hdn_rap_hv_crash.o
 endif
-CFLAGS_REMOVE_hdn_rap_hv_crash.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+CFLAGS_REMOVE_hdn_rap_hv_crash.o += $(filter-out -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS)) $(CC_FLAGS_FTRACE)
 CFLAGS_hdn_rap_hv_crash.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
 KASAN_SANITIZE_hdn_rap_hv_crash.o := n
 KCSAN_SANITIZE_hdn_rap_hv_crash.o := n
@@ -223,7 +223,7 @@ obj-$(CONFIG_SECURITY_HARDENING_RAP) += hdn_rap_resume.o
 endif
 obj-$(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS) += hdn_stack.o hdn_stack_access.o hdn_stack_entry.o
 
-CFLAGS_REMOVE_hdn_stack_access.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+CFLAGS_REMOVE_hdn_stack_access.o += $(filter-out -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS)) $(CC_FLAGS_FTRACE)
 CFLAGS_hdn_stack_access.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
 KASAN_SANITIZE_hdn_stack_access.o := n
 KCSAN_SANITIZE_hdn_stack_access.o := n
@@ -233,17 +233,17 @@ UBSAN_SANITIZE_hdn_stack_access.o := n
 GCOV_PROFILE_hdn_stack_access.o := n
 # The validation engine is the root of the compiler's transfer protocol.
 # It must never recursively instrument its own validation or diagnostics.
-CFLAGS_REMOVE_hdn_rap_validate.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+CFLAGS_REMOVE_hdn_rap_validate.o += $(filter-out -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS)) $(CC_FLAGS_FTRACE)
 KASAN_SANITIZE_hdn_rap_validate.o := n
 KCSAN_SANITIZE_hdn_rap_validate.o := n
 KMSAN_SANITIZE_hdn_rap_validate.o := n
 KCOV_INSTRUMENT_hdn_rap_validate.o := n
 UBSAN_SANITIZE_hdn_rap_validate.o := n
 GCOV_PROFILE_hdn_rap_validate.o := n
-CFLAGS_REMOVE_hdn_rap_context.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+CFLAGS_REMOVE_hdn_rap_context.o += $(filter-out -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS)) $(CC_FLAGS_FTRACE)
 CFLAGS_hdn_rap_validate.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
 CFLAGS_hdn_rap_context.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
-CFLAGS_REMOVE_hdn_rap_resume.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+CFLAGS_REMOVE_hdn_rap_resume.o += $(filter-out -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS)) $(CC_FLAGS_FTRACE)
 CFLAGS_hdn_rap_resume.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
 KASAN_SANITIZE_hdn_rap_resume.o := n
 KCSAN_SANITIZE_hdn_rap_resume.o := n
@@ -251,7 +251,7 @@ KMSAN_SANITIZE_hdn_rap_resume.o := n
 KCOV_INSTRUMENT_hdn_rap_resume.o := n
 UBSAN_SANITIZE_hdn_rap_resume.o := n
 GCOV_PROFILE_hdn_rap_resume.o := n
-CFLAGS_REMOVE_hdn_rap_efi.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+CFLAGS_REMOVE_hdn_rap_efi.o += $(filter-out -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS)) $(CC_FLAGS_FTRACE)
 CFLAGS_hdn_rap_efi.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
 KASAN_SANITIZE_hdn_rap_efi.o := n
 KCSAN_SANITIZE_hdn_rap_efi.o := n
@@ -259,7 +259,7 @@ KMSAN_SANITIZE_hdn_rap_efi.o := n
 KCOV_INSTRUMENT_hdn_rap_efi.o := n
 UBSAN_SANITIZE_hdn_rap_efi.o := n
 GCOV_PROFILE_hdn_rap_efi.o := n
-CFLAGS_REMOVE_hdn_rap_kexec.o += $(GCC_PLUGINS_CFLAGS) $(CC_FLAGS_FTRACE)
+CFLAGS_REMOVE_hdn_rap_kexec.o += $(filter-out -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS)) $(CC_FLAGS_FTRACE)
 CFLAGS_hdn_rap_kexec.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
 KASAN_SANITIZE_hdn_rap_kexec.o := n
 KCSAN_SANITIZE_hdn_rap_kexec.o := n
@@ -276,7 +276,7 @@ GCOV_PROFILE_hdn_rap_context.o := n
 ifdef CONFIG_SECURITY_HARDENING_RAP
 # Runtime roots still emit type/call-site metadata and tag outgoing calls.
 # They omit their own return adapters to terminate recursive validation.
-hdn_rap_runtime_flags = $(filter -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS)) -fplugin-arg-hdn_rap_plugin-runtime=1
+hdn_rap_runtime_flags = -fplugin-arg-hdn_rap_plugin-runtime=1
 CFLAGS_hdn_rap_validate.o += $(hdn_rap_runtime_flags)
 CFLAGS_hdn_rap_context.o += $(hdn_rap_runtime_flags)
 CFLAGS_hdn_rap_resume.o += $(hdn_rap_runtime_flags)

@@ -3,6 +3,7 @@
 #include <linux/kvm_types.h>
 #include <linux/linkage.h>
 #include <asm/asm.h>
+#include <asm/frame.h>
 #include <asm/hdn_rap.h>
 
 	.section .noinstr.text, "ax"
@@ -27,13 +28,16 @@ EXPORT_SYMBOL_FOR_KVM(clear_bhb_loop)
 SYM_FUNC_START_LOCAL(__hdn_bhb_outer)
 	ANNOTATE_NOENDBR
 	HDN_PRIVATE_FUNC_ENTER __hdn_bhb_outer
+	FRAME_BEGIN
 	HDN_C_CALL __hdn_bhb_inner
+	FRAME_END
 	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(__hdn_bhb_outer)
 
 SYM_FUNC_START_LOCAL(__hdn_bhb_inner)
 	ANNOTATE_NOENDBR
 	HDN_PRIVATE_FUNC_ENTER __hdn_bhb_inner
+	FRAME_BEGIN
 	movl $5, %eax
 1:	jmp 2f
 	nop
@@ -42,5 +46,6 @@ SYM_FUNC_START_LOCAL(__hdn_bhb_inner)
 	subl $1, %ecx
 	jz 3f
 	HDN_C_CALL __hdn_bhb_inner
-3:	HDN_ENTRY_ROOT_RETURN
+3:	FRAME_END
+	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(__hdn_bhb_inner)

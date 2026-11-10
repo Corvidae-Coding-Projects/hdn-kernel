@@ -27,7 +27,7 @@
 #define HS_CSR_EIM	0x0002
 #define HS_CSR_DHA	0x0001
 
-struct slot {
+struct cpci_slot {
 	u8 number;
 	unsigned int devfn;
 	struct pci_bus *bus;
@@ -55,14 +55,14 @@ struct cpci_hp_controller {
 	struct cpci_hp_controller_ops *ops;
 };
 
-static inline const char *slot_name(struct slot *slot)
+static inline const char *slot_name(struct cpci_slot *slot)
 {
 	return hotplug_slot_name(&slot->hotplug_slot);
 }
 
-static inline struct slot *to_slot(struct hotplug_slot *hotplug_slot)
+static inline struct cpci_slot *to_slot(struct hotplug_slot *hotplug_slot)
 {
-	return container_of(hotplug_slot, struct slot, hotplug_slot);
+	return container_of(hotplug_slot, struct cpci_slot, hotplug_slot);
 }
 
 int cpci_hp_register_controller(struct cpci_hp_controller *controller);
@@ -79,16 +79,16 @@ extern int cpci_debug;
  * Internal function prototypes, these functions should not be used by
  * board/chassis drivers.
  */
-u8 cpci_get_attention_status(struct slot *slot);
-u16 cpci_get_hs_csr(struct slot *slot);
-int cpci_set_attention_status(struct slot *slot, int status);
-int cpci_check_and_clear_ins(struct slot *slot);
-int cpci_check_ext(struct slot *slot);
-int cpci_clear_ext(struct slot *slot);
-int cpci_led_on(struct slot *slot);
-int cpci_led_off(struct slot *slot);
-int cpci_configure_slot(struct slot *slot);
-int cpci_unconfigure_slot(struct slot *slot);
+u8 cpci_get_attention_status(struct cpci_slot *slot);
+u16 cpci_get_hs_csr(struct cpci_slot *slot);
+int cpci_set_attention_status(struct cpci_slot *slot, int status);
+int cpci_check_and_clear_ins(struct cpci_slot *slot);
+int cpci_check_ext(struct cpci_slot *slot);
+int cpci_clear_ext(struct cpci_slot *slot);
+int cpci_led_on(struct cpci_slot *slot);
+int cpci_led_off(struct cpci_slot *slot);
+int cpci_configure_slot(struct cpci_slot *slot);
+int cpci_unconfigure_slot(struct cpci_slot *slot);
 
 #ifdef CONFIG_HOTPLUG_PCI_CPCI
 int cpci_hotplug_init(int debug);

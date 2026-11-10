@@ -66,7 +66,7 @@ struct qrtr_server {
 	struct list_head qli;
 };
 
-struct qrtr_node {
+struct qrtr_ns_node {
 	unsigned int id;
 	struct xarray servers;
 	u32 server_count;
@@ -82,9 +82,9 @@ struct qrtr_node {
 
 static u8 node_count;
 
-static struct qrtr_node *node_get(unsigned int node_id)
+static struct qrtr_ns_node *node_get(unsigned int node_id)
 {
-	struct qrtr_node *node;
+	struct qrtr_ns_node *node;
 
 	node = xa_load(&nodes, node_id);
 	if (node)
@@ -215,7 +215,7 @@ static void lookup_notify(struct sockaddr_qrtr *to, struct qrtr_server *srv,
 static int announce_servers(struct sockaddr_qrtr *sq)
 {
 	struct qrtr_server *srv;
-	struct qrtr_node *node;
+	struct qrtr_ns_node *node;
 	unsigned long index;
 	int ret;
 
@@ -244,7 +244,7 @@ static struct qrtr_server *server_add(unsigned int service,
 {
 	struct qrtr_server *srv;
 	struct qrtr_server *old;
-	struct qrtr_node *node;
+	struct qrtr_ns_node *node;
 
 	if (!service || !port)
 		return NULL;
@@ -293,7 +293,7 @@ err:
 	return NULL;
 }
 
-static int server_del(struct qrtr_node *node, unsigned int port, bool bcast)
+static int server_del(struct qrtr_ns_node *node, unsigned int port, bool bcast)
 {
 	struct qrtr_lookup *lookup;
 	struct qrtr_server *srv;
@@ -363,12 +363,12 @@ static int ctrl_cmd_hello(struct sockaddr_qrtr *sq)
 
 static int ctrl_cmd_bye(struct sockaddr_qrtr *from)
 {
-	struct qrtr_node *local_node;
+	struct qrtr_ns_node *local_node;
 	struct qrtr_ctrl_pkt pkt;
 	struct qrtr_server *srv;
 	struct sockaddr_qrtr sq;
 	struct msghdr msg = { };
-	struct qrtr_node *node;
+	struct qrtr_ns_node *node;
 	unsigned long index;
 	struct kvec iv;
 	int ret = 0;
@@ -424,13 +424,13 @@ delete_node:
 static int ctrl_cmd_del_client(struct sockaddr_qrtr *from,
 			       unsigned int node_id, unsigned int port)
 {
-	struct qrtr_node *local_node;
+	struct qrtr_ns_node *local_node;
 	struct qrtr_lookup *lookup;
 	struct qrtr_ctrl_pkt pkt;
 	struct msghdr msg = { };
 	struct qrtr_server *srv;
 	struct sockaddr_qrtr sq;
-	struct qrtr_node *node;
+	struct qrtr_ns_node *node;
 	struct list_head *tmp;
 	struct list_head *li;
 	unsigned long index;
@@ -541,7 +541,7 @@ static int ctrl_cmd_del_server(struct sockaddr_qrtr *from,
 			       unsigned int service, unsigned int instance,
 			       unsigned int node_id, unsigned int port)
 {
-	struct qrtr_node *node;
+	struct qrtr_ns_node *node;
 
 	/* Ignore specified node and port for local servers*/
 	if (from->sq_node == qrtr_ns.local_node) {
@@ -568,7 +568,7 @@ static int ctrl_cmd_new_lookup(struct sockaddr_qrtr *from,
 	struct qrtr_server_filter filter;
 	struct qrtr_lookup *lookup;
 	struct qrtr_server *srv;
-	struct qrtr_node *node;
+	struct qrtr_ns_node *node;
 	unsigned long node_idx;
 	unsigned long srv_idx;
 

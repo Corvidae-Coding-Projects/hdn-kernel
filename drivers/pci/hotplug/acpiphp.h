@@ -30,22 +30,22 @@ struct acpiphp_bridge;
 struct acpiphp_slot;
 
 /*
- * struct slot - slot information for each *physical* slot
+ * struct acpiphp_hotplug_slot - slot information for each *physical* slot
  */
-struct slot {
+struct acpiphp_hotplug_slot {
 	struct hotplug_slot	hotplug_slot;
 	struct acpiphp_slot	*acpi_slot;
 	unsigned int sun;	/* ACPI _SUN (Slot User Number) value */
 };
 
-static inline const char *slot_name(struct slot *slot)
+static inline const char *slot_name(struct acpiphp_hotplug_slot *slot)
 {
 	return hotplug_slot_name(&slot->hotplug_slot);
 }
 
-static inline struct slot *to_slot(struct hotplug_slot *hotplug_slot)
+static inline struct acpiphp_hotplug_slot *to_slot(struct hotplug_slot *hotplug_slot)
 {
-	return container_of(hotplug_slot, struct slot, hotplug_slot);
+	return container_of(hotplug_slot, struct acpiphp_hotplug_slot, hotplug_slot);
 }
 
 /*
@@ -82,7 +82,7 @@ struct acpiphp_slot {
 	struct pci_bus *bus;
 	struct list_head funcs;		/* one slot may have different
 					   objects (i.e. for each function) */
-	struct slot *slot;
+	struct acpiphp_hotplug_slot *slot;
 
 	u8		device;		/* pci device# */
 	u32		flags;		/* see below */

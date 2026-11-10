@@ -24,10 +24,10 @@ KMSAN_SANITIZE_hdn_pgtable_window.o := n
 KCSAN_SANITIZE_hdn_pgtable_window.o := n
 KCOV_INSTRUMENT_hdn_pgtable_window.o := n
 UBSAN_SANITIZE_hdn_pgtable_window.o := n
-CFLAGS_REMOVE_hdn_pgtable_window.o = $(CC_FLAGS_FTRACE) $(GCC_PLUGINS_CFLAGS)
+CFLAGS_REMOVE_hdn_pgtable_window.o = $(CC_FLAGS_FTRACE) $(filter-out -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS))
 CFLAGS_hdn_pgtable_window.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
 ifdef CONFIG_SECURITY_HARDENING_RAP
-CFLAGS_hdn_pgtable_window.o += $(filter -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS)) -fplugin-arg-hdn_rap_plugin-runtime=1
+CFLAGS_hdn_pgtable_window.o += -fplugin-arg-hdn_rap_plugin-runtime=1
 endif
 
 ifdef CONFIG_FUNCTION_TRACER
@@ -48,10 +48,10 @@ KCSAN_SANITIZE_hdn_stack_mm.o := n
 KCOV_INSTRUMENT_hdn_stack_mm.o := n
 UBSAN_SANITIZE_hdn_stack_mm.o := n
 GCOV_PROFILE_hdn_stack_mm.o := n
-CFLAGS_REMOVE_hdn_stack_mm.o = $(CC_FLAGS_FTRACE) $(GCC_PLUGINS_CFLAGS)
+CFLAGS_REMOVE_hdn_stack_mm.o = $(CC_FLAGS_FTRACE) $(filter-out -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS))
 CFLAGS_hdn_stack_mm.o += $(DISABLE_KSTACK_ERASE) -fno-stack-protector
 ifdef CONFIG_SECURITY_HARDENING_RAP
-CFLAGS_hdn_stack_mm.o += $(filter -fplugin=%/hdn_rap_plugin.so -fplugin-arg-hdn_rap_plugin-%,$(GCC_PLUGINS_CFLAGS)) -fplugin-arg-hdn_rap_plugin-runtime=1
+CFLAGS_hdn_stack_mm.o += -fplugin-arg-hdn_rap_plugin-runtime=1
 endif
 
 obj-y				+= pat/

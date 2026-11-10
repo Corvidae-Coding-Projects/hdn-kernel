@@ -22,10 +22,10 @@
 #include "shpchp.h"
 
 static void interrupt_event_handler(struct work_struct *work);
-static int shpchp_enable_slot(struct slot *p_slot);
-static int shpchp_disable_slot(struct slot *p_slot);
+static int shpchp_enable_slot(struct shpchp_slot *p_slot);
+static int shpchp_disable_slot(struct shpchp_slot *p_slot);
 
-static int queue_interrupt_event(struct slot *p_slot, u32 event_type)
+static int queue_interrupt_event(struct shpchp_slot *p_slot, u32 event_type)
 {
 	struct event_info *info;
 
@@ -42,9 +42,9 @@ static int queue_interrupt_event(struct slot *p_slot, u32 event_type)
 	return 0;
 }
 
-u8 shpchp_handle_attention_button(u8 hp_slot, struct controller *ctrl)
+u8 shpchp_handle_attention_button(u8 hp_slot, struct shpchp_controller *ctrl)
 {
-	struct slot *p_slot;
+	struct shpchp_slot *p_slot;
 	u32 event_type;
 
 	/* Attention Button Change */
@@ -65,9 +65,9 @@ u8 shpchp_handle_attention_button(u8 hp_slot, struct controller *ctrl)
 
 }
 
-u8 shpchp_handle_switch_change(u8 hp_slot, struct controller *ctrl)
+u8 shpchp_handle_switch_change(u8 hp_slot, struct shpchp_controller *ctrl)
 {
-	struct slot *p_slot;
+	struct shpchp_slot *p_slot;
 	u8 getstatus;
 	u32 event_type;
 
@@ -103,9 +103,9 @@ u8 shpchp_handle_switch_change(u8 hp_slot, struct controller *ctrl)
 	return 1;
 }
 
-u8 shpchp_handle_presence_change(u8 hp_slot, struct controller *ctrl)
+u8 shpchp_handle_presence_change(u8 hp_slot, struct shpchp_controller *ctrl)
 {
-	struct slot *p_slot;
+	struct shpchp_slot *p_slot;
 	u32 event_type;
 
 	/* Presence Change */
@@ -138,9 +138,9 @@ u8 shpchp_handle_presence_change(u8 hp_slot, struct controller *ctrl)
 	return 1;
 }
 
-u8 shpchp_handle_power_fault(u8 hp_slot, struct controller *ctrl)
+u8 shpchp_handle_power_fault(u8 hp_slot, struct shpchp_controller *ctrl)
 {
-	struct slot *p_slot;
+	struct shpchp_slot *p_slot;
 	u32 event_type;
 
 	/* Power fault */
@@ -175,7 +175,7 @@ u8 shpchp_handle_power_fault(u8 hp_slot, struct controller *ctrl)
 /* The following routines constitute the bulk of the
    hotplug controller logic
  */
-static int change_bus_speed(struct controller *ctrl, struct slot *p_slot,
+static int change_bus_speed(struct shpchp_controller *ctrl, struct shpchp_slot *p_slot,
 		enum pci_bus_speed speed)
 {
 	int rc = 0;
@@ -190,7 +190,7 @@ static int change_bus_speed(struct controller *ctrl, struct slot *p_slot,
 	return rc;
 }
 
-static int fix_bus_speed(struct controller *ctrl, struct slot *pslot,
+static int fix_bus_speed(struct shpchp_controller *ctrl, struct shpchp_slot *pslot,
 		u8 flag, enum pci_bus_speed asp, enum pci_bus_speed bsp,
 		enum pci_bus_speed msp)
 {
@@ -226,13 +226,13 @@ static int fix_bus_speed(struct controller *ctrl, struct slot *pslot,
  * Turns power on for the board.
  * Configures board.
  */
-static int board_added(struct slot *p_slot)
+static int board_added(struct shpchp_slot *p_slot)
 {
 	u8 hp_slot;
 	u8 slots_not_empty = 0;
 	int rc = 0;
 	enum pci_bus_speed asp, bsp, msp;
-	struct controller *ctrl = p_slot->ctrl;
+	struct shpchp_controller *ctrl = p_slot->ctrl;
 	struct pci_bus *parent = ctrl->pci_dev->subordinate;
 
 	hp_slot = p_slot->device - ctrl->slot_device_offset;
@@ -334,9 +334,9 @@ err_exit:
  * remove_board - Turns off slot and LEDs
  * @p_slot: target &slot
  */
-static int remove_board(struct slot *p_slot)
+static int remove_board(struct shpchp_slot *p_slot)
 {
-	struct controller *ctrl = p_slot->ctrl;
+	struct shpchp_controller *ctrl = p_slot->ctrl;
 	u8 hp_slot;
 	int rc;
 
@@ -373,7 +373,7 @@ static int remove_board(struct slot *p_slot)
 
 
 struct pushbutton_work_info {
-	struct slot *p_slot;
+	struct shpchp_slot *p_slot;
 	struct work_struct work;
 };
 
@@ -388,7 +388,7 @@ static void shpchp_pushbutton_thread(struct work_struct *work)
 {
 	struct pushbutton_work_info *info =
 		container_of(work, struct pushbutton_work_info, work);
-	struct slot *p_slot = info->p_slot;
+	struct shpchp_slot *p_slot = info->p_slot;
 
 	mutex_lock(&p_slot->lock);
 	switch (p_slot->state) {
@@ -415,7 +415,7 @@ static void shpchp_pushbutton_thread(struct work_struct *work)
 
 void shpchp_queue_pushbutton_work(struct work_struct *work)
 {
-	struct slot *p_slot = container_of(work, struct slot, work.work);
+	struct shpchp_slot *p_slot = container_of(work, struct shpchp_slot, work.work);
 	struct pushbutton_work_info *info;
 
 	info = kmalloc_obj(*info);
@@ -444,7 +444,7 @@ void shpchp_queue_pushbutton_work(struct work_struct *work)
 	mutex_unlock(&p_slot->lock);
 }
 
-static void update_slot_info(struct slot *slot)
+static void update_slot_info(struct shpchp_slot *slot)
 {
 	shpchp_get_power_status(slot, &slot->pwr_save);
 	shpchp_get_attention_status(slot, &slot->attention_save);
@@ -455,10 +455,10 @@ static void update_slot_info(struct slot *slot)
 /*
  * Note: This function must be called with slot->lock held
  */
-static void handle_button_press_event(struct slot *p_slot)
+static void handle_button_press_event(struct shpchp_slot *p_slot)
 {
 	u8 getstatus;
-	struct controller *ctrl = p_slot->ctrl;
+	struct shpchp_controller *ctrl = p_slot->ctrl;
 
 	switch (p_slot->state) {
 	case STATIC_STATE:
@@ -517,7 +517,7 @@ static void handle_button_press_event(struct slot *p_slot)
 static void interrupt_event_handler(struct work_struct *work)
 {
 	struct event_info *info = container_of(work, struct event_info, work);
-	struct slot *p_slot = info->p_slot;
+	struct shpchp_slot *p_slot = info->p_slot;
 
 	mutex_lock(&p_slot->lock);
 	switch (info->event_type) {
@@ -539,11 +539,11 @@ static void interrupt_event_handler(struct work_struct *work)
 }
 
 
-static int shpchp_enable_slot (struct slot *p_slot)
+static int shpchp_enable_slot (struct shpchp_slot *p_slot)
 {
 	u8 getstatus = 0;
 	int rc, retval = -ENODEV;
-	struct controller *ctrl = p_slot->ctrl;
+	struct shpchp_controller *ctrl = p_slot->ctrl;
 
 	/* Check to see if (latch closed, card present, power off) */
 	mutex_lock(&p_slot->ctrl->crit_sect);
@@ -595,11 +595,11 @@ static int shpchp_enable_slot (struct slot *p_slot)
 }
 
 
-static int shpchp_disable_slot (struct slot *p_slot)
+static int shpchp_disable_slot (struct shpchp_slot *p_slot)
 {
 	u8 getstatus = 0;
 	int rc, retval = -ENODEV;
-	struct controller *ctrl = p_slot->ctrl;
+	struct shpchp_controller *ctrl = p_slot->ctrl;
 
 	if (!p_slot->ctrl)
 		return -ENODEV;
@@ -631,10 +631,10 @@ static int shpchp_disable_slot (struct slot *p_slot)
 	return retval;
 }
 
-int shpchp_sysfs_enable_slot(struct slot *p_slot)
+int shpchp_sysfs_enable_slot(struct shpchp_slot *p_slot)
 {
 	int retval = -ENODEV;
-	struct controller *ctrl = p_slot->ctrl;
+	struct shpchp_controller *ctrl = p_slot->ctrl;
 
 	mutex_lock(&p_slot->lock);
 	switch (p_slot->state) {
@@ -667,10 +667,10 @@ int shpchp_sysfs_enable_slot(struct slot *p_slot)
 	return retval;
 }
 
-int shpchp_sysfs_disable_slot(struct slot *p_slot)
+int shpchp_sysfs_disable_slot(struct shpchp_slot *p_slot)
 {
 	int retval = -ENODEV;
-	struct controller *ctrl = p_slot->ctrl;
+	struct shpchp_controller *ctrl = p_slot->ctrl;
 
 	mutex_lock(&p_slot->lock);
 	switch (p_slot->state) {

@@ -24,6 +24,9 @@ static bool bootstrap_unit;
 static unsigned long report_records;
 static std::set<tree> named_type_seen;
 static std::vector<tree> named_types;
+static std::set<tree> interface_types;
+static std::map<std::string, tree> global_anonymous_shapes;
+static std::set<tree> aggregate_member_anonymous_types;
 struct identity {
 	std::string canonical, label;
 	unsigned char digest[SHA256_DIGEST_LENGTH];
@@ -42,26 +45,139 @@ struct function_coverage { tree decl; unsigned int returns; bool runtime; };
 static std::vector<function_coverage> coverage;
 struct function_entry { tree decl; identity *type; std::string body, trace_return; };
 static std::vector<function_entry> function_entries;
+static std::set<tree> endbr_functions;
+
+static bool nocf_function(tree decl)
+{
+	return lookup_attribute("nocf_check", DECL_ATTRIBUTES(decl)) ||
+		lookup_attribute("nocf_check", TYPE_ATTRIBUTES(TREE_TYPE(decl)));
+}
 
 static const char *decl_name(tree decl)
 {
 	return decl && DECL_NAME(decl) ? IDENTIFIER_POINTER(DECL_NAME(decl)) : "<anonymous>";
 }
 
+#include "hdn_rap_type_owner.h"
+
+static void mark_interface_type(tree type, std::set<tree> &seen)
+{
+	if (!type)
+		return;
+	type = TYPE_MAIN_VARIANT(type);
+	if (!seen.insert(type).second)
+		return;
+	switch (TREE_CODE(type)) {
+	case RECORD_TYPE:
+	case UNION_TYPE:
+		interface_types.insert(type);
+		for (tree field = TYPE_FIELDS(type); field; field = DECL_CHAIN(field))
+			if (TREE_CODE(field) == FIELD_DECL)
+				mark_interface_type(TREE_TYPE(field), seen);
+		break;
+	case ENUMERAL_TYPE:
+		interface_types.insert(type);
+		break;
+	case POINTER_TYPE:
+	case ARRAY_TYPE:
+		mark_interface_type(TREE_TYPE(type), seen);
+		break;
+	case FUNCTION_TYPE:
+		mark_interface_type(TREE_TYPE(type), seen);
+		for (tree arg = TYPE_ARG_TYPES(type); arg; arg = TREE_CHAIN(arg))
+			mark_interface_type(TREE_VALUE(arg), seen);
+		break;
+	default:
+		break;
+	}
+}
+
+static void remember_interface_declaration(void *gcc_data, void *)
+{
+	tree decl = (tree)gcc_data;
+	if (!decl || decl == error_mark_node || !DECL_P(decl) ||
+	    !declaration_location_outside_unit(DECL_SOURCE_LOCATION(decl)))
+		return;
+	if (TREE_CODE(decl) != FUNCTION_DECL && TREE_CODE(decl) != VAR_DECL &&
+	    TREE_CODE(decl) != TYPE_DECL)
+		return;
+	std::set<tree> seen;
+	mark_interface_type(TREE_TYPE(decl), seen);
+}
+
 static const char *tag_name(tree type)
 {
-	tree name = TYPE_NAME(TYPE_MAIN_VARIANT(type));
-	if (!name)
-		return NULL;
-	return TREE_CODE(name) == IDENTIFIER_NODE ? IDENTIFIER_POINTER(name) : decl_name(name);
+	type = TYPE_MAIN_VARIANT(type);
+	tree name = TYPE_NAME(type);
+	/* A typedef is an alias, not a new C tag. Its anonymous underlying
+	 * declaration keeps one structural identity across all compatible aliases.
+	 * GCC represents some globally named compiler types, notably
+	 * __va_list_tag, with a built-in TYPE_DECL rather than an IDENTIFIER_NODE;
+	 * that compiler-owned name is stable and must not require source ownership. */
+	const char *tag = name && TREE_CODE(name) == IDENTIFIER_NODE ?
+		IDENTIFIER_POINTER(name) : NULL;
+	if (!tag && name && TREE_CODE(name) == TYPE_DECL && DECL_NAME(name) &&
+	    DECL_SOURCE_LOCATION(name) <= BUILTINS_LOCATION)
+		tag = IDENTIFIER_POINTER(DECL_NAME(name));
+	if (tag && !type_function_context(type)) {
+		tree stub = TYPE_STUB_DECL(type);
+
+		/* Header declarations form cross-unit interfaces and must not depend
+		 * on which harmless forward declaration GCC retained as the type stub.
+		 * Source-local tags retain declaration ownership so unrelated private
+		 * layouts cannot collide.  Private templated/driver headers namespace
+		 * their reused tags at the source level. */
+		if (!stub || DECL_SOURCE_LOCATION(stub) <= BUILTINS_LOCATION ||
+		    interface_types.count(type) ||
+		    type_declaration_outside_unit(type))
+			return tag;
+		return owned_type_name(type, tag);
+	}
+	if (type_function_context(type))
+		return owned_type_name(type, tag);
+	/* Header-declared anonymous wrappers (for example kuid_t and kgid_t)
+	 * intentionally use declaration identity to remain distinct despite equal
+	 * layout. Their relative source owner is stable in every including unit. */
+	if (!tag && (type_declaration_outside_unit(type) || type_has_aggregate_context(type) ||
+	    aggregate_member_anonymous_types.count(type)))
+		return owned_type_name(type, NULL);
+	return NULL;
+}
+
+static bool register_global_anonymous(tree type, const std::string &shape)
+{
+	type = TYPE_MAIN_VARIANT(type);
+	if (tag_name(type) || type_function_context(type))
+		return true;
+	auto found = global_anonymous_shapes.find(shape);
+	if (found == global_anonymous_shapes.end()) {
+		global_anonymous_shapes.emplace(shape, type);
+		return true;
+	}
+	if (found->second == type)
+		return true;
+	tree stub = TYPE_STUB_DECL(type);
+	location_t loc = stub ? DECL_SOURCE_LOCATION(stub) : UNKNOWN_LOCATION;
+	error_at(loc, G_("HDN RAP rejects distinct file-scope anonymous types with the same callable shape"));
+	return false;
 }
 
 static void remember_tag(tree type)
 {
 	type = TYPE_MAIN_VARIANT(type);
 	if ((TREE_CODE(type) == RECORD_TYPE || TREE_CODE(type) == UNION_TYPE ||
-	     TREE_CODE(type) == ENUMERAL_TYPE) && tag_name(type) && named_type_seen.insert(type).second)
+	     TREE_CODE(type) == ENUMERAL_TYPE) && tag_name(type) && named_type_seen.insert(type).second) {
 		named_types.push_back(type);
+		if (TREE_CODE(type) == RECORD_TYPE || TREE_CODE(type) == UNION_TYPE)
+			for (tree field = TYPE_FIELDS(type); field; field = DECL_CHAIN(field)) {
+				if (TREE_CODE(field) != FIELD_DECL)
+					continue;
+				tree member = TYPE_MAIN_VARIANT(TREE_TYPE(field));
+				if ((TREE_CODE(member) == RECORD_TYPE || TREE_CODE(member) == UNION_TYPE ||
+				     TREE_CODE(member) == ENUMERAL_TYPE) && !TYPE_NAME(member))
+					aggregate_member_anonymous_types.insert(member);
+			}
+	}
 }
 
 static bool enum_values(std::string &out, tree type)
@@ -88,12 +204,21 @@ static bool enum_values(std::string &out, tree type)
  * member types and offsets. Unknown and unprototyped types fail compilation.
  */
 static bool canonical_type(std::string &out, tree type, unsigned int depth = 0,
-		size_t limit = 16384)
+		size_t limit = 16384, bool parameter = false)
 {
 	if (!type || depth > 64 || out.size() > limit)
 		return false;
-	out += "q" + std::to_string(TYPE_QUALS(type)) + ":";
+	/*
+	 * C function type compatibility ignores qualifiers on the parameter
+	 * object itself.  GCC retains those qualifiers in TYPE_ARG_TYPES for
+	 * declarations such as "T *const p" and "const gfp_t p", even though
+	 * callers cannot observe them.  Strip only that outer parameter layer;
+	 * qualifiers below a pointer (for example "const T *p") remain part of
+	 * the callable identity.
+	 */
+	out += "q" + std::to_string(parameter ? 0 : TYPE_QUALS(type)) + ":";
 	type = TYPE_MAIN_VARIANT(type);
+	size_t shape_begin = out.size();
 	remember_tag(type);
 	switch (TREE_CODE(type)) {
 	case VOID_TYPE: out += "void"; break;
@@ -114,6 +239,7 @@ static bool canonical_type(std::string &out, tree type, unsigned int depth = 0,
 			std::to_string(TYPE_PRECISION(type));
 		out += TYPE_UNSIGNED(type) ? ":unsigned" : ":signed";
 		if (!tag_name(type) && !enum_values(out, type)) return false;
+		if (!register_global_anonymous(type, out.substr(shape_begin))) return false;
 		break;
 	case REAL_TYPE:
 		out += "real:" + std::to_string(TYPE_PRECISION(type));
@@ -127,6 +253,24 @@ static bool canonical_type(std::string &out, tree type, unsigned int depth = 0,
 			out += tag_name(main);
 			out += ":q" + std::to_string(TYPE_QUALS(to));
 		} else if (!canonical_type(out, to, depth + 1, limit)) return false;
+		out += ')';
+		break;
+	}
+	case VECTOR_TYPE: {
+		unsigned HOST_WIDE_INT lanes;
+
+		/* Fixed vectors are not arrays: preserve their element/ABI shape.
+		 * Reject scalable or otherwise non-constant layouts rather than
+		 * assigning them an incomplete callable identity.
+		 */
+		if (!TYPE_VECTOR_SUBPARTS(type).is_constant(&lanes) || !lanes ||
+		    !TYPE_SIZE(type) || !tree_fits_uhwi_p(TYPE_SIZE(type)))
+			return false;
+		out += "vector:lanes=" + std::to_string(lanes) +
+			":bits=" + std::to_string(tree_to_uhwi(TYPE_SIZE(type))) +
+			":align=" + std::to_string(TYPE_ALIGN(type)) + '(';
+		if (!canonical_type(out, TREE_TYPE(type), depth + 1, limit))
+			return false;
 		out += ')';
 		break;
 	}
@@ -157,6 +301,7 @@ static bool canonical_type(std::string &out, tree type, unsigned int depth = 0,
 			if (!canonical_type(out, TREE_TYPE(field), depth + 1, limit)) return false;
 		}
 		out += '}';
+		if (!register_global_anonymous(type, out.substr(shape_begin))) return false;
 		break;
 	case FUNCTION_TYPE: {
 		out += "fn(";
@@ -170,7 +315,7 @@ static bool canonical_type(std::string &out, tree type, unsigned int depth = 0,
 		tree arg;
 		for (arg = TYPE_ARG_TYPES(type); arg; arg = TREE_CHAIN(arg)) {
 			out += ';';
-			if (!canonical_type(out, TREE_VALUE(arg), depth + 1, limit)) return false;
+			if (!canonical_type(out, TREE_VALUE(arg), depth + 1, limit, true)) return false;
 		}
 		out += ")abi:";
 		out += lookup_attribute("ms_abi", TYPE_ATTRIBUTES(type)) ? "ms" : "sysv";
@@ -229,8 +374,28 @@ static std::string relative(const char *path)
 	if (!path) return "<unknown>";
 	size_t n = strlen(source_root);
 	if (!strncmp(path, source_root, n) && path[n] == '/') path += n + 1;
-	while (path[0] == '.' && path[1] == '/') path += 2;
-	return path;
+	std::string input(path);
+	bool absolute = !input.empty() && input[0] == '/';
+	std::vector<std::string> parts;
+	for (size_t begin = absolute ? 1 : 0; begin <= input.size();) {
+		size_t end = input.find('/', begin);
+		if (end == std::string::npos) end = input.size();
+		std::string part = input.substr(begin, end - begin);
+		if (!part.empty() && part != ".") {
+			if (part == ".." && !parts.empty() && parts.back() != "..")
+				parts.pop_back();
+			else if (part != ".." || !absolute)
+				parts.push_back(part);
+		}
+		if (end == input.size()) break;
+		begin = end + 1;
+	}
+	std::string result = absolute ? "/" : "";
+	for (const std::string &part : parts) {
+		if (!result.empty() && result.back() != '/') result += '/';
+		result += part;
+	}
+	return result.empty() ? (absolute ? "/" : ".") : result;
 }
 
 static void report(const char *kind, tree fn, location_t loc, identity *type,
@@ -428,6 +593,12 @@ static unsigned int hdn_rap_returns_execute(void)
 	}
 
 	FOR_EACH_VEC_SAFE_ELT(forced_labels, index, forced) {
+		/* GCC retains an address-only note for unreachable diagnostic
+		 * labels (e.g. XFS __this_address). final.cc still emits that symbol,
+		 * but it is not a live local control-transfer target. Grant it no
+		 * jump permission. Other failed label lowering remains an error. */
+		if (NOTE_P(forced) && NOTE_KIND(forced) == NOTE_INSN_DELETED_LABEL)
+			continue;
 		if (!LABEL_P(forced) || INSN_DELETED_P(forced)) {
 			error(G_("HDN RAP address-taken label did not survive lowering"));
 			continue;
@@ -632,6 +803,9 @@ static unsigned int hdn_rap_returns_execute(void)
 		if (type)
 			function_entries.push_back({current_function_decl, type, continuation, trace_return});
 		report("protected-entry", current_function_decl, DECL_SOURCE_LOCATION(current_function_decl), NULL, returns);
+		if ((flag_cf_protection & CF_BRANCH) &&
+		    (entry_endbr || (trace_entry && !entry_endbr)))
+			endbr_functions.insert(current_function_decl);
 	}
 	if (!runtime_unit && TREE_THIS_VOLATILE(current_function_decl)) {
 		if (returns) error(G_("HDN RAP noreturn function emitted a return"));
@@ -660,7 +834,7 @@ static void report_tags(void)
 		std::string tag = TREE_CODE(type) == RECORD_TYPE ? "struct:" :
 			TREE_CODE(type) == UNION_TYPE ? "union:" : "enum:";
 		tag += tag_name(type);
-		report("tag-reference", NULL_TREE, UNKNOWN_LOCATION, NULL, 0, tag);
+		report("tag-reference", NULL_TREE, TYPE_STUB_DECL(type) ? DECL_SOURCE_LOCATION(TYPE_STUB_DECL(type)) : UNKNOWN_LOCATION, NULL, 0, tag);
 		if (!COMPLETE_TYPE_P(type)) continue;
 		identity layout;
 		if (!canonical_type(layout.canonical, type, 0, 1 << 20)) {
@@ -675,8 +849,26 @@ static void report_tags(void)
 		}
 		std::string domain = "HDN-RAP-TYPE-v1;build=" + std::string(build_id) + ";type=" + layout.canonical;
 		SHA256((const unsigned char *)domain.data(), domain.size(), layout.digest);
-		report("tag-definition", NULL_TREE, UNKNOWN_LOCATION, &layout, 0, tag);
+		report("tag-definition", NULL_TREE, TYPE_STUB_DECL(type) ? DECL_SOURCE_LOCATION(TYPE_STUB_DECL(type)) : UNKNOWN_LOCATION, &layout, 0, tag);
 	}
+}
+
+/* ELF interposition may replace a weak public symbol while retaining its
+ * original text. Bind body coverage to a non-interposable local alias; public
+ * target/prototype records continue to use the resolved public symbol. */
+static std::string body_symbol(tree decl)
+{
+	if (DECL_WEAK(decl) && !DECL_EXTERNAL(decl)) {
+		const char *name = IDENTIFIER_POINTER(DECL_ASSEMBLER_NAME(decl));
+
+		/* Retain the public name after the unique local ID. GCC names cold
+		 * partitions from the public declaration; after interposition that
+		 * public symbol may name an unrelated strong body. Objtool uses this
+		 * suffix to bind the partition back to this exact local definition. */
+		return "__hdn_rap_weak_body_" + std::to_string(DECL_UID(decl)) + "." +
+			std::string(name + (name[0] == '*'));
+	}
+	return IDENTIFIER_POINTER(DECL_ASSEMBLER_NAME(decl));
 }
 
 static void finish_unit(void *, void *)
@@ -691,13 +883,22 @@ static void finish_unit(void *, void *)
 	for (const auto &thunk : typed_thunks)
 		fprintf(asm_out_file, "\t.set %s,__hdn_rap_call\n", thunk.first.c_str());
 	for (const auto &function : coverage) {
-		fputs("\t.pushsection .discard.hdn_rap.functions,\"\",@progbits\n\t.balign 8\n\t.quad ", asm_out_file);
+		if (!DECL_WEAK(function.decl) || DECL_EXTERNAL(function.decl))
+			continue;
+		std::string local = body_symbol(function.decl);
+		fprintf(asm_out_file, "\t.local %s\n\t.type %s,@function\n\t.set %s,",
+			local.c_str(), local.c_str(), local.c_str());
 		assemble_name(asm_out_file, IDENTIFIER_POINTER(DECL_ASSEMBLER_NAME(function.decl)));
+		fputc('\n', asm_out_file);
+	}
+	for (const auto &function : coverage) {
+		fputs("\t.pushsection .discard.hdn_rap.functions,\"\",@progbits\n\t.balign 8\n\t.quad ", asm_out_file);
+		assemble_name(asm_out_file, body_symbol(function.decl).c_str());
 		fprintf(asm_out_file, ",%u,%u\n\t.popsection\n", bootstrap_unit ? 7 : function.runtime ? 2 : 1, function.returns);
 	}
 	for (const auto &function : function_entries) {
 		fputs("\t.pushsection .hdn.rap.entries,\"a\",@progbits\n\t.balign 8\n\t.quad ", asm_out_file);
-		assemble_name(asm_out_file, IDENTIFIER_POINTER(DECL_ASSEMBLER_NAME(function.decl)));
+		assemble_name(asm_out_file, body_symbol(function.decl).c_str());
 		fprintf(asm_out_file, ",%s,%s,%s\n\t.popsection\n", function.type->label.c_str(),
 			function.body.c_str(), function.trace_return.c_str());
 	}
@@ -750,15 +951,17 @@ static void finish_unit(void *, void *)
 		fputs("\n\t.set ", asm_out_file);
 		assemble_name(asm_out_file, anchor.c_str());
 		fprintf(asm_out_file, ",%s\n", type->label.c_str());
-		/* Only scalar values returned entirely in RAX may use the native
-		 * static-call zero shortcut. Derive this from the actual prototype. */
+		/* Void callbacks and scalar values returned entirely in RAX may use
+		 * the native static-call zero shortcut. Derive this from the actual
+		 * prototype. */
 		const char *plain = symbol + (symbol[0] == '*');
 		if (!strncmp(plain, "__SCT__", 7)) {
 			tree result = TYPE_MAIN_VARIANT(TREE_TYPE(TREE_TYPE(node->decl)));
 			bool scalar = TREE_CODE(result) == INTEGER_TYPE || TREE_CODE(result) == ENUMERAL_TYPE ||
 				TREE_CODE(result) == BOOLEAN_TYPE || TREE_CODE(result) == POINTER_TYPE;
-			bool zero = scalar && TYPE_SIZE(result) && tree_fits_uhwi_p(TYPE_SIZE(result)) &&
-				tree_to_uhwi(TYPE_SIZE(result)) <= 64;
+			bool zero = TREE_CODE(result) == VOID_TYPE ||
+				(scalar && TYPE_SIZE(result) && tree_fits_uhwi_p(TYPE_SIZE(result)) &&
+				 tree_to_uhwi(TYPE_SIZE(result)) <= 64);
 			fprintf(asm_out_file, "\t.weak __hdn_rap_static_zero_%s\n"
 				"\t.set __hdn_rap_static_zero_%s,%u\n", plain, plain, zero);
 		}
@@ -769,6 +972,14 @@ static void finish_unit(void *, void *)
 		/* The roots of validation are direct-ABI services, never ordinary
 		 * function-pointer destinations, even if they have public linkage. */
 		if (runtime_unit || bootstrap_unit) continue;
+		/* A nocf_check declaration deliberately has no IBT landing pad and is
+		 * therefore never a legal RAP indirect destination.  Likewise, GCC can
+		 * retain address_taken on an optimized-away private use; publish a local
+		 * target only when the final RTL actually retained ENDBR. */
+		if (nocf_function(node->decl) ||
+		    ((flag_cf_protection & CF_BRANCH) && !TREE_PUBLIC(node->decl) &&
+		     !endbr_functions.count(node->decl)))
+			continue;
 		/* Direct-only local functions are not legal indirect destinations.
 		 * GCC may omit ENDBR for them; do not broaden that target surface. */
 		if (!TREE_PUBLIC(node->decl) && !node->address_taken) continue;
@@ -876,6 +1087,7 @@ __visible int plugin_init(struct plugin_name_args *info, struct plugin_gcc_versi
 	register_callback(info->base_name, PLUGIN_PASS_MANAGER_SETUP, NULL, &hdn_rap_sites_pass_info);
 	register_callback(info->base_name, PLUGIN_PASS_MANAGER_SETUP, NULL, &hdn_rap_transfers_pass_info);
 	register_callback(info->base_name, PLUGIN_PASS_MANAGER_SETUP, NULL, &hdn_rap_returns_pass_info);
+	register_callback(info->base_name, PLUGIN_FINISH_DECL, remember_interface_declaration, NULL);
 	register_callback(info->base_name, PLUGIN_FINISH_UNIT, finish_unit, NULL);
 	return 0;
 }

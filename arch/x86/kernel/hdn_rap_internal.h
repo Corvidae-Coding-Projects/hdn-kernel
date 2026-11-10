@@ -9,6 +9,7 @@ struct hdn_rap_module {
 	struct hdn_rap_module *next;
 	unsigned long header_pfn;
 	unsigned long text, text_size, init_text, init_size, init_live;
+	unsigned long noinstr_text, noinstr_size;
 	/* Compiler pointers are translated by offset into our sealed copy. */
 	struct hdn_rap_section original_types, types, functions;
 	struct hdn_rap_section static_calls, static_sites;
@@ -69,6 +70,7 @@ unsigned long hdn_rap_bpf_validate_jump(unsigned long target, unsigned long site
 unsigned long hdn_rap_bpf_dispatch_target(unsigned long target);
 int hdn_rap_function_copy(unsigned long address, struct hdn_rap_function *function,
 		struct hdn_rap_type *type, size_t capacity);
+bool hdn_rap_function_entry(unsigned long address);
 unsigned long hdn_rap_bpf_original_target(unsigned long site, unsigned long resume);
 bool hdn_rap_trace_compatible(unsigned long resume, const struct hdn_rap_type *expected);
 

@@ -10165,11 +10165,39 @@ int kvm_x86_vendor_init(struct kvm_x86_init_ops *ops)
 
 	kvm_ops_update(ops);
 
-	for_each_online_cpu(cpu) {
-		smp_call_function_single(cpu, kvm_x86_check_cpu_compat, &r, 1);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	{
+		int *compatibility = kmalloc_obj(*compatibility);
+
+		/* A remote CPU executes the compatibility callback from IPI context.
+		 * Its result therefore cannot target the loading task's private stack.
+		 * The synchronous call owns this shared object until every callback has
+		 * returned, and allocation failure leaves the vendor module disabled.
+		 */
+		if (!compatibility) {
+			r = -ENOMEM;
+			goto out_unwind_ops;
+		}
+		for_each_online_cpu(cpu) {
+			smp_call_function_single(cpu, kvm_x86_check_cpu_compat,
+					 compatibility, 1);
+			r = *compatibility;
+			if (r < 0)
+				break;
+		}
+		kfree(compatibility);
 		if (r < 0)
 			goto out_unwind_ops;
 	}
+#else
+	{
+		for_each_online_cpu(cpu) {
+			smp_call_function_single(cpu, kvm_x86_check_cpu_compat, &r, 1);
+			if (r < 0)
+				goto out_unwind_ops;
+		}
+	}
+#endif
 
 	/*
 	 * Point of no return!  DO NOT add error paths below this point unless

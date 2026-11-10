@@ -38,6 +38,7 @@
 #endif
 
 static struct task_struct *thread;
+static int setup_err;
 
 static int __initdata mount_dev = IS_ENABLED(CONFIG_DEVTMPFS_MOUNT);
 
@@ -110,6 +111,8 @@ static struct file_system_type dev_fs_type = {
 
 static int devtmpfs_submit_req(struct req *req, const char *tmp)
 {
+	int err;
+
 	init_completion(&req->done);
 
 	spin_lock(&req_lock);
@@ -120,54 +123,67 @@ static int devtmpfs_submit_req(struct req *req, const char *tmp)
 	wake_up_process(thread);
 	wait_for_completion(&req->done);
 
+	err = req->err;
+	kfree(req);
 	kfree(tmp);
 
-	return req->err;
+	return err;
 }
 
 int devtmpfs_create_node(struct device *dev)
 {
 	const char *tmp = NULL;
-	struct req req;
+	struct req *req;
 
 	if (!thread)
 		return 0;
 
-	req.mode = 0;
-	req.uid = GLOBAL_ROOT_UID;
-	req.gid = GLOBAL_ROOT_GID;
-	req.name = device_get_devnode(dev, &req.mode, &req.uid, &req.gid, &tmp);
-	if (!req.name)
+	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	if (!req)
 		return -ENOMEM;
 
-	if (req.mode == 0)
-		req.mode = 0600;
+	req->uid = GLOBAL_ROOT_UID;
+	req->gid = GLOBAL_ROOT_GID;
+	req->name = device_get_devnode(dev, &req->mode, &req->uid,
+				       &req->gid, &tmp);
+	if (!req->name) {
+		kfree(req);
+		return -ENOMEM;
+	}
+
+	if (req->mode == 0)
+		req->mode = 0600;
 	if (is_blockdev(dev))
-		req.mode |= S_IFBLK;
+		req->mode |= S_IFBLK;
 	else
-		req.mode |= S_IFCHR;
+		req->mode |= S_IFCHR;
 
-	req.dev = dev;
+	req->dev = dev;
 
-	return devtmpfs_submit_req(&req, tmp);
+	return devtmpfs_submit_req(req, tmp);
 }
 
 int devtmpfs_delete_node(struct device *dev)
 {
 	const char *tmp = NULL;
-	struct req req;
+	struct req *req;
 
 	if (!thread)
 		return 0;
 
-	req.name = device_get_devnode(dev, NULL, NULL, NULL, &tmp);
-	if (!req.name)
+	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	if (!req)
 		return -ENOMEM;
 
-	req.mode = 0;
-	req.dev = dev;
+	req->name = device_get_devnode(dev, NULL, NULL, NULL, &tmp);
+	if (!req->name) {
+		kfree(req);
+		return -ENOMEM;
+	}
 
-	return devtmpfs_submit_req(&req, tmp);
+	req->dev = dev;
+
+	return devtmpfs_submit_req(req, tmp);
 }
 
 static int dev_mkdir(const char *name, umode_t mode)
@@ -422,7 +438,7 @@ static noinline int __init devtmpfs_setup(void *p)
 	init_chdir("/.."); /* will traverse into overmounted root */
 	init_chroot(".");
 out:
-	*(int *)p = err;
+	WRITE_ONCE(setup_err, err);
 	return err;
 }
 
@@ -494,9 +510,10 @@ int __init devtmpfs_init(void)
 		return err;
 	}
 
-	thread = kthread_run(devtmpfsd, &err, "kdevtmpfs");
+	thread = kthread_run(devtmpfsd, NULL, "kdevtmpfs");
 	if (!IS_ERR(thread)) {
 		wait_for_completion(&setup_done);
+		err = READ_ONCE(setup_err);
 	} else {
 		err = PTR_ERR(thread);
 		thread = NULL;

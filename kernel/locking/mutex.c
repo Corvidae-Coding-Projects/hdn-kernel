@@ -43,6 +43,22 @@
 # define MUTEX_WARN_ON(cond)
 #endif
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+static struct mutex_waiter *hdn_mutex_waiter_acquire(void)
+{
+	BUG_ON(current->hdn_lock_waiter_active != HDN_LOCK_WAITER_NONE);
+	current->hdn_lock_waiter_active = HDN_LOCK_WAITER_MUTEX;
+	return &current->hdn_lock_waiter.mutex;
+}
+
+static void hdn_mutex_waiter_release(struct mutex_waiter *waiter)
+{
+	BUG_ON(current->hdn_lock_waiter_active != HDN_LOCK_WAITER_MUTEX);
+	BUG_ON(waiter != &current->hdn_lock_waiter.mutex);
+	current->hdn_lock_waiter_active = HDN_LOCK_WAITER_NONE;
+}
+#endif
+
 static void __mutex_init_generic(struct mutex *lock)
 {
 	atomic_long_set(&lock->owner, 0);
@@ -580,7 +596,12 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 		    struct ww_acquire_ctx *ww_ctx, const bool use_ww_ctx)
 {
 	DEFINE_WAKE_Q(wake_q);
-	struct mutex_waiter waiter;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct mutex_waiter *waiter;
+#else
+	struct mutex_waiter stack_waiter;
+	struct mutex_waiter *waiter = &stack_waiter;
+#endif
 	struct ww_mutex *ww;
 	unsigned long flags;
 	int ret;
@@ -636,22 +657,25 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 		goto skip_wait;
 	}
 
-	debug_mutex_lock_common(lock, &waiter);
-	waiter.task = current;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	waiter = hdn_mutex_waiter_acquire();
+#endif
+	debug_mutex_lock_common(lock, waiter);
+	waiter->task = current;
 	if (use_ww_ctx)
-		waiter.ww_ctx = ww_ctx;
+		waiter->ww_ctx = ww_ctx;
 
 	lock_contended(&lock->dep_map, ip);
 
 	if (!use_ww_ctx) {
 		/* add waiting tasks to the end of the waitqueue (FIFO): */
-		__mutex_add_waiter(lock, &waiter, &lock->wait_list);
+		__mutex_add_waiter(lock, waiter, &lock->wait_list);
 	} else {
 		/*
 		 * Add in stamp order, waking up waiters that must kill
 		 * themselves.
 		 */
-		ret = __ww_mutex_add_waiter(&waiter, lock, ww_ctx, &wake_q);
+		ret = __ww_mutex_add_waiter(waiter, lock, ww_ctx, &wake_q);
 		if (ret)
 			goto err_early_kill;
 	}
@@ -682,7 +706,7 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 		}
 
 		if (ww_ctx) {
-			ret = __ww_mutex_check_kill(lock, &waiter, ww_ctx);
+			ret = __ww_mutex_check_kill(lock, waiter, ww_ctx);
 			if (ret)
 				goto err;
 		}
@@ -691,7 +715,7 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 
 		schedule_preempt_disabled();
 
-		first = __mutex_waiter_is_first(lock, &waiter);
+		first = __mutex_waiter_is_first(lock, waiter);
 
 		/*
 		 * As we likely have been woken up by task
@@ -716,7 +740,7 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 			 * to run.
 			 */
 			clear_task_blocked_on(current, lock);
-			if (mutex_optimistic_spin(lock, ww_ctx, &waiter))
+			if (mutex_optimistic_spin(lock, ww_ctx, waiter))
 				break;
 			set_task_blocked_on(current, lock);
 			trace_contention_begin(lock, LCB_F_MUTEX);
@@ -735,13 +759,16 @@ acquired:
 		 * waiters as anyone might want to wound us.
 		 */
 		if (!ww_ctx->is_wait_die &&
-		    !__mutex_waiter_is_first(lock, &waiter))
+		    !__mutex_waiter_is_first(lock, waiter))
 			__ww_mutex_check_waiters(lock, ww_ctx, &wake_q);
 	}
 
-	__mutex_remove_waiter(lock, &waiter);
+	__mutex_remove_waiter(lock, waiter);
 
-	debug_mutex_free_waiter(&waiter);
+	debug_mutex_free_waiter(waiter);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_mutex_waiter_release(waiter);
+#endif
 
 skip_wait:
 	/* got the lock - cleanup and rejoice! */
@@ -758,12 +785,15 @@ skip_wait:
 err:
 	__clear_task_blocked_on(current, lock);
 	__set_current_state(TASK_RUNNING);
-	__mutex_remove_waiter(lock, &waiter);
+	__mutex_remove_waiter(lock, waiter);
 err_early_kill:
 	WARN_ON(__get_task_blocked_on(current));
 	trace_contention_end(lock, ret);
 	raw_spin_unlock_irqrestore_wake(&lock->wait_lock, flags, &wake_q);
-	debug_mutex_free_waiter(&waiter);
+	debug_mutex_free_waiter(waiter);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_mutex_waiter_release(waiter);
+#endif
 	mutex_release(&lock->dep_map, ip);
 	preempt_enable();
 	return ret;

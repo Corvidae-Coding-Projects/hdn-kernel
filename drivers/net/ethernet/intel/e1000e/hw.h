@@ -4,6 +4,12 @@
 #ifndef _E1000E_HW_H_
 #define _E1000E_HW_H_
 
+#define e1000_adapter e1000e_adapter
+#define e1000_hw e1000e_hw
+#define e1000_hw_stats e1000e_hw_stats
+#define e1000_phy_info e1000e_phy_info
+#define e1000_shadow_ram e1000e_shadow_ram
+
 #include "regs.h"
 #include "defines.h"
 

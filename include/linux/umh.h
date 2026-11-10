@@ -5,6 +5,7 @@
 #include <linux/stddef.h>
 #include <linux/errno.h>
 #include <linux/compiler.h>
+#include <linux/completion.h>
 #include <linux/workqueue.h>
 #include <linux/sysctl.h>
 
@@ -20,6 +21,10 @@ struct file;
 struct subprocess_info {
 	struct work_struct work;
 	struct completion *complete;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* Cross-task completion storage must outlive an unmapped caller stack. */
+	struct completion complete_storage;
+#endif
 	const char *path;
 	char **argv;
 	char **envp;

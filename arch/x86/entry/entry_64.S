@@ -289,6 +289,7 @@ SYM_INNER_LABEL(__hdn_stack_switch_rsp, SYM_L_GLOBAL)
 
 	jmp	__switch_to
 SYM_FUNC_END(__switch_to_asm)
+STACK_FRAME_NON_STANDARD __switch_to_asm
 .popsection
 
 /*
@@ -347,6 +348,7 @@ SYM_CODE_END(ret_from_fork_asm)
 #endif
 .endm
 
+#ifndef CONFIG_SECURITY_HARDENING_RAP
 SYM_CODE_START(xen_error_entry)
 	ANNOTATE_NOENDBR
 	UNWIND_HINT_FUNC
@@ -355,6 +357,7 @@ SYM_CODE_START(xen_error_entry)
 	UNTRAIN_RET_FROM_CALL
 	RET
 SYM_CODE_END(xen_error_entry)
+#endif
 
 /**
  * idtentry_body - Macro to emit code calling the C function

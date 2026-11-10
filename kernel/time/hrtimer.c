@@ -2086,6 +2086,20 @@ static void __hrtimer_setup_sleeper(struct hrtimer_sleeper *sl,
 }
 
 /**
+ * hrtimer_setup_sleeper - initialize a sleeper in persistent memory
+ * @sl: the sleeper to initialize
+ * @clock_id: the clock to use
+ * @mode: timer mode
+ */
+void hrtimer_setup_sleeper(struct hrtimer_sleeper *sl,
+			   clockid_t clock_id, enum hrtimer_mode mode)
+{
+	debug_setup(&sl->timer, clock_id, mode);
+	__hrtimer_setup_sleeper(sl, clock_id, mode);
+}
+EXPORT_SYMBOL_GPL(hrtimer_setup_sleeper);
+
+/**
  * hrtimer_setup_sleeper_on_stack - initialize a sleeper in stack memory
  * @sl:		sleeper to be initialized
  * @clock_id:	the clock to be used

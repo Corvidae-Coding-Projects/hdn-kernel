@@ -19,7 +19,10 @@
  * New page-table pointer is expected in %rdi (first parameter)
  *
  */
+#include <asm/hdn_rap.h>
+
 SYM_FUNC_START(sev_verify_cbit)
+	HDN_ASM_FUNCTION sev_verify_cbit
 #ifdef CONFIG_AMD_MEM_ENCRYPT
 	/* First check if a C-bit was detected */
 	movq	sme_me_mask(%rip), %rsi
@@ -85,5 +88,6 @@ SYM_FUNC_START(sev_verify_cbit)
 #endif
 	/* Return page-table pointer */
 	movq	%rdi, %rax
-	RET
+	HDN_ASM_RETURN
+	HDN_ASM_FUNCTION_END sev_verify_cbit
 SYM_FUNC_END(sev_verify_cbit)

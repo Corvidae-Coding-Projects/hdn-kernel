@@ -77,9 +77,51 @@ void noinstr hdn_stack_mm_refresh(struct hdn_stack_view *view, unsigned long can
 	view_store(view, &view->canonical_pair, paired);
 }
 
+/* hdn_stack_mm_prepare() constructs view 1 while the boot CPU is still on the
+ * linker stack and init_mm.  Publishing the sealed stack pointer precedes the
+ * two protected transition words, so RAP return bookkeeping in that short
+ * interval still needs view 0's write window.  Recognize only this one-time,
+ * staged bootstrap state; after the assembly CR3/RSP handoff the ordinary
+ * private-root match below applies, and retirement makes this path impossible.
+ */
+static __always_inline int bootstrap_transition_view(unsigned int cpu,
+		unsigned long cr3, unsigned long address)
+{
+	const struct hdn_stack_view *out, *in;
+	const struct hdn_stack_storage *storage;
+	unsigned long next_sp, next_cr3, sp;
+
+	if (cpu || READ_ONCE(hdn_stack_boot_retired) || current != &init_task ||
+	    address != (table_pfn(init_mm.pgd) << PAGE_SHIFT))
+		return -1;
+	asm volatile("movq %%rsp,%0" : "=r" (sp));
+	if (sp < (unsigned long)init_stack ||
+	    sp >= (unsigned long)init_stack + THREAD_SIZE)
+		return -1;
+	out = &hdn_stack_cpus[0].views[0];
+	in = &hdn_stack_cpus[0].views[1];
+	storage = READ_ONCE(in->stack);
+	if (READ_ONCE(out->stack) || !storage || storage->owner != &init_task ||
+	    !storage->published || READ_ONCE(init_task.stack) != (void *)storage->begin ||
+	    READ_ONCE(in->canonical_pgd) != table_pfn(init_mm.pgd) ||
+	    !READ_ONCE(in->canonical_pair))
+		return -1;
+	next_sp = READ_ONCE(in->transition.sp);
+	next_cr3 = READ_ONCE(in->transition.cr3);
+	if (next_sp && (next_sp < storage->begin ||
+			next_sp > storage->begin + THREAD_SIZE -
+				  sizeof(struct inactive_task_frame)))
+		return -1;
+	if (next_cr3 && (!next_sp || (next_cr3 & CR3_ADDR_MASK) != in->cr3 ||
+			 (next_cr3 & ~CR3_ADDR_MASK) != (cr3 & ~CR3_ADDR_MASK)))
+		return -1;
+	return 0;
+}
+
 unsigned int noinstr hdn_stack_mm_view(unsigned int cpu, unsigned long cr3)
 {
 	unsigned long address = cr3 & CR3_ADDR_MASK;
+	int bootstrap;
 
 	if (!READ_ONCE(hdn_stack_mm_ready))
 		return 0;
@@ -94,6 +136,9 @@ unsigned int noinstr hdn_stack_mm_view(unsigned int cpu, unsigned long cr3)
 		    address == windows->normal.cr3 || address == windows->emergency.cr3)
 			return i;
 	}
+	bootstrap = bootstrap_transition_view(cpu, cr3, address);
+	if (bootstrap >= 0)
+		return bootstrap;
 	/* Early idle startup still uses the canonical root and static stack.
 	 * Once a private task has been activated an unknown root is an error. */
 	if (!READ_ONCE(hdn_stack_cpus[cpu].views[0].stack) &&
@@ -339,6 +384,52 @@ bool noinstr hdn_stack_mm_async_enter(void)
 		native_write_cr3(hdn_stack_cpus[cpu].views[index].cr3);
 	}
 	return private_gdt;
+}
+
+/* A task can schedule or migrate while an ordinary interrupt frame remains
+ * live.  Its old alternating root is then retired, so return through the
+ * currently authenticated task root.  A page-update window cannot schedule;
+ * preserve that exact root and require its original CPU/view to remain active. */
+unsigned long noinstr hdn_stack_mm_async_target(const struct task_struct *owner,
+		unsigned long address, unsigned long cr3, bool gdt_window)
+{
+	unsigned long saved = cr3 & CR3_ADDR_MASK;
+	unsigned long active = __native_read_cr3();
+	unsigned int current_cpu = hdn_pt_cpu();
+
+	if (!READ_ONCE(hdn_stack_mm_ready) || !owner)
+		return cr3;
+	if (!hdn_stack_mm_active(owner, address))
+		__hdn_rap_fail(HDN_RAP_FAIL_STACK);
+	/* Timer exceptions are enabled before the one-time bootstrap handoff.
+	 * Accept only the unchanged CPU0/init_mm/linker-stack identity, and make
+	 * the path permanently unreachable when that backing is retired. */
+	if (!current_cpu && owner == &init_task && !READ_ONCE(hdn_stack_boot_retired) &&
+	    active == cr3 && address >= (unsigned long)init_stack &&
+	    address - (unsigned long)init_stack < THREAD_SIZE)
+		return cr3;
+	for (unsigned int n = 0; n < READ_ONCE(hdn_pt_cpu_count); n++) {
+		unsigned int cpu = hdn_pt_cpu_identities[n].cpu;
+
+		for (unsigned int i = 0; i < HDN_STACK_TASK_VIEWS; i++) {
+			const struct hdn_stack_view *view = &hdn_stack_cpus[cpu].views[i];
+			const struct hdn_pt_window_pair *windows = &hdn_pt_windows[cpu].views[i];
+
+			if (saved == READ_ONCE(view->cr3)) {
+				if (gdt_window)
+					__hdn_rap_fail(HDN_RAP_FAIL_STACK);
+				return active;
+			}
+			if (saved == windows->normal.cr3 || saved == windows->emergency.cr3) {
+				if (cpu != current_cpu ||
+				    (active & CR3_ADDR_MASK) != READ_ONCE(view->cr3) ||
+				    READ_ONCE(view->stack)->owner != owner)
+					__hdn_rap_fail(HDN_RAP_FAIL_STACK);
+				return cr3;
+			}
+		}
+	}
+	__hdn_rap_fail(HDN_RAP_FAIL_STACK);
 }
 
 void noinstr hdn_stack_mm_async_exit(unsigned long cr3, bool gdt_window)

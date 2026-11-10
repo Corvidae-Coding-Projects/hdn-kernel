@@ -485,6 +485,44 @@ static unsigned long *probe_stack_word(struct pt_regs *regs, bool push)
 	return (unsigned long *)address;
 }
 
+/* The alternatives INT3 self-test deliberately turns one authenticated
+ * breakpoint frame into the exact state a five-byte protected CALL would
+ * have produced.  Reconstruct that transition from the sealed entry snapshot;
+ * never bless arbitrary register edits made by the notifier chain. */
+void __init hdn_rap_int3_selftest_call(struct pt_regs *regs,
+		unsigned long return_site, unsigned long target)
+{
+	struct rap_context *context;
+	struct rap_async_frame *frame;
+	struct pt_regs expected;
+	unsigned long *slot;
+	unsigned long flags = native_local_irq_save();
+
+	context = hdn_rap_context_for((unsigned long)regs);
+	frame = fixup_frame(context, regs, X86_TRAP_BP);
+	if (!frame)
+		__hdn_rap_fail(HDN_RAP_FAIL_ASYNC);
+	memcpy(&expected, frame->words, sizeof(expected));
+	if (memcmp(regs, &expected, sizeof(expected)) ||
+	    expected.ip > ULONG_MAX - (CALL_INSN_SIZE - INT3_INSN_SIZE) ||
+	    return_site != expected.ip + CALL_INSN_SIZE - INT3_INSN_SIZE ||
+	    !hdn_rap_return_site(return_site) ||
+	    !hdn_rap_function_entry(target))
+		__hdn_rap_fail(HDN_RAP_FAIL_ASYNC);
+	slot = probe_stack_word(&expected, true);
+	if ((unsigned long)slot >= (unsigned long)regs &&
+	    (unsigned long)slot < (unsigned long)(regs + 1))
+		__hdn_rap_fail(HDN_RAP_FAIL_ASYNC);
+	expected.r10 = return_site;
+	expected.sp = (unsigned long)slot;
+	expected.ip = target;
+	WRITE_ONCE(*slot, return_site);
+	*regs = expected;
+	commit_fixup(context, frame, regs, &expected);
+	native_local_irq_restore(flags);
+}
+NOKPROBE_SYMBOL(hdn_rap_int3_selftest_call);
+
 #ifdef CONFIG_FUNCTION_ERROR_INJECTION
 void hdn_rap_probe_override(struct pt_regs *regs)
 {

@@ -58,7 +58,7 @@ do {							\
 #define sysfs_attr_init(attr) do {} while (0)
 #endif
 
-#ifdef CONFIG_CFI
+#if defined(CONFIG_CFI) || defined(CONFIG_SECURITY_HARDENING_RAP)
 #define __SYSFS_FUNCTION_ALTERNATIVE(MEMBERS...) struct { MEMBERS }
 #else
 #define __SYSFS_FUNCTION_ALTERNATIVE(MEMBERS...) union { MEMBERS }

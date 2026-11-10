@@ -48,6 +48,10 @@ struct kthread_create_info
 
 	/* Result passed back to kthread_create() from kthreadd. */
 	struct task_struct *result;
+	/* A private-stack kernel must not ask the child to complete an object on
+	 * its creator's isolated stack.  Keep the wait object in the shared,
+	 * lifetime-owned create record; @done remains the cleanup ownership token. */
+	struct completion completion;
 	struct completion *done;
 
 	struct list_head list;
@@ -478,7 +482,6 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
 						    const char namefmt[],
 						    va_list args)
 {
-	DECLARE_COMPLETION_ONSTACK(done);
 	struct task_struct *task;
 	struct kthread_create_info *create = kmalloc_obj(*create);
 
@@ -487,7 +490,8 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
 	create->threadfn = threadfn;
 	create->data = data;
 	create->node = node;
-	create->done = &done;
+	init_completion(&create->completion);
+	create->done = &create->completion;
 	create->full_name = kvasprintf(GFP_KERNEL, namefmt, args);
 	if (!create->full_name) {
 		task = ERR_PTR(-ENOMEM);
@@ -504,7 +508,7 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
 	 * the OOM killer while kthreadd is trying to allocate memory for
 	 * new kernel thread.
 	 */
-	if (unlikely(wait_for_completion_killable(&done))) {
+	if (unlikely(wait_for_completion_killable(&create->completion))) {
 		/*
 		 * If I was killed by a fatal signal before kthreadd (or new
 		 * kernel thread) calls complete(), leave the cleanup of this
@@ -516,7 +520,7 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
 		 * kthreadd (or new kernel thread) will call complete()
 		 * shortly.
 		 */
-		wait_for_completion(&done);
+		wait_for_completion(&create->completion);
 	}
 	task = create->result;
 free_create:

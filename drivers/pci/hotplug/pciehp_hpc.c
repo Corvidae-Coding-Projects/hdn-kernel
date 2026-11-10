@@ -46,7 +46,7 @@ static const struct dmi_system_id inband_presence_disabled_dmi_table[] = {
 	{}
 };
 
-static inline struct pci_dev *ctrl_dev(struct controller *ctrl)
+static inline struct pci_dev *ctrl_dev(struct pciehp_controller *ctrl)
 {
 	return ctrl->pcie->port;
 }
@@ -55,7 +55,7 @@ static irqreturn_t pciehp_isr(int irq, void *dev_id);
 static irqreturn_t pciehp_ist(int irq, void *dev_id);
 static int pciehp_poll(void *data);
 
-static inline int pciehp_request_irq(struct controller *ctrl)
+static inline int pciehp_request_irq(struct pciehp_controller *ctrl)
 {
 	int retval, irq = ctrl->pcie->irq;
 
@@ -75,7 +75,7 @@ static inline int pciehp_request_irq(struct controller *ctrl)
 	return retval;
 }
 
-static inline void pciehp_free_irq(struct controller *ctrl)
+static inline void pciehp_free_irq(struct pciehp_controller *ctrl)
 {
 	if (pciehp_poll_mode)
 		kthread_stop(ctrl->poll_thread);
@@ -83,7 +83,7 @@ static inline void pciehp_free_irq(struct controller *ctrl)
 		free_irq(ctrl->pcie->irq, ctrl);
 }
 
-static int pcie_poll_cmd(struct controller *ctrl, int timeout)
+static int pcie_poll_cmd(struct pciehp_controller *ctrl, int timeout)
 {
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 	u16 slot_status;
@@ -109,7 +109,7 @@ static int pcie_poll_cmd(struct controller *ctrl, int timeout)
 	return 0;	/* timeout */
 }
 
-static void pcie_wait_cmd(struct controller *ctrl)
+static void pcie_wait_cmd(struct pciehp_controller *ctrl)
 {
 	unsigned int msecs = pciehp_poll_mode ? 2500 : 1000;
 	unsigned long duration = msecs_to_jiffies(msecs);
@@ -154,7 +154,7 @@ static void pcie_wait_cmd(struct controller *ctrl)
 				 PCI_EXP_SLTCTL_AIC |	\
 				 PCI_EXP_SLTCTL_EIC)
 
-static void pcie_do_write_cmd(struct controller *ctrl, u16 cmd,
+static void pcie_do_write_cmd(struct pciehp_controller *ctrl, u16 cmd,
 			      u16 mask, bool wait)
 {
 	struct pci_dev *pdev = ctrl_dev(ctrl);
@@ -210,13 +210,13 @@ out:
  * @cmd:  command value written to slot control register
  * @mask: bitmask of slot control register to be modified
  */
-static void pcie_write_cmd(struct controller *ctrl, u16 cmd, u16 mask)
+static void pcie_write_cmd(struct pciehp_controller *ctrl, u16 cmd, u16 mask)
 {
 	pcie_do_write_cmd(ctrl, cmd, mask, true);
 }
 
 /* Same as above without waiting for the hardware to latch */
-static void pcie_write_cmd_nowait(struct controller *ctrl, u16 cmd, u16 mask)
+static void pcie_write_cmd_nowait(struct pciehp_controller *ctrl, u16 cmd, u16 mask)
 {
 	pcie_do_write_cmd(ctrl, cmd, mask, false);
 }
@@ -232,7 +232,7 @@ static void pcie_write_cmd_nowait(struct controller *ctrl, u16 cmd, u16 mask)
  * If the hotplug controller itself is not available anymore returns
  * %-ENODEV.
  */
-int pciehp_check_link_active(struct controller *ctrl)
+int pciehp_check_link_active(struct pciehp_controller *ctrl)
 {
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 	u16 lnk_status;
@@ -288,7 +288,7 @@ static void pcie_wait_for_presence(struct pci_dev *pdev)
 	} while (timeout > 0);
 }
 
-int pciehp_check_link_status(struct controller *ctrl)
+int pciehp_check_link_status(struct pciehp_controller *ctrl)
 {
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 	bool found;
@@ -332,7 +332,7 @@ int pciehp_check_link_status(struct controller *ctrl)
 	return 0;
 }
 
-static int __pciehp_link_set(struct controller *ctrl, bool enable)
+static int __pciehp_link_set(struct pciehp_controller *ctrl, bool enable)
 {
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 
@@ -343,7 +343,7 @@ static int __pciehp_link_set(struct controller *ctrl, bool enable)
 	return 0;
 }
 
-static int pciehp_link_enable(struct controller *ctrl)
+static int pciehp_link_enable(struct pciehp_controller *ctrl)
 {
 	return __pciehp_link_set(ctrl, true);
 }
@@ -351,7 +351,7 @@ static int pciehp_link_enable(struct controller *ctrl)
 int pciehp_get_raw_indicator_status(struct hotplug_slot *hotplug_slot,
 				    u8 *status)
 {
-	struct controller *ctrl = to_ctrl(hotplug_slot);
+	struct pciehp_controller *ctrl = to_ctrl(hotplug_slot);
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 	u16 slot_ctrl;
 
@@ -364,7 +364,7 @@ int pciehp_get_raw_indicator_status(struct hotplug_slot *hotplug_slot,
 
 int pciehp_get_attention_status(struct hotplug_slot *hotplug_slot, u8 *status)
 {
-	struct controller *ctrl = to_ctrl(hotplug_slot);
+	struct pciehp_controller *ctrl = to_ctrl(hotplug_slot);
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 	u16 slot_ctrl;
 
@@ -392,7 +392,7 @@ int pciehp_get_attention_status(struct hotplug_slot *hotplug_slot, u8 *status)
 	return 0;
 }
 
-void pciehp_get_power_status(struct controller *ctrl, u8 *status)
+void pciehp_get_power_status(struct pciehp_controller *ctrl, u8 *status)
 {
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 	u16 slot_ctrl;
@@ -414,7 +414,7 @@ void pciehp_get_power_status(struct controller *ctrl, u8 *status)
 	}
 }
 
-void pciehp_get_latch_status(struct controller *ctrl, u8 *status)
+void pciehp_get_latch_status(struct pciehp_controller *ctrl, u8 *status)
 {
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 	u16 slot_status;
@@ -435,7 +435,7 @@ void pciehp_get_latch_status(struct controller *ctrl, u8 *status)
  * If the hotplug controller itself is not available anymore returns
  * %-ENODEV.
  */
-int pciehp_card_present(struct controller *ctrl)
+int pciehp_card_present(struct pciehp_controller *ctrl)
 {
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 	u16 slot_status;
@@ -460,7 +460,7 @@ int pciehp_card_present(struct controller *ctrl)
  * Returns: %1 if the slot is occupied and %0 if it is not. If the hotplug
  *	    port is not present anymore returns %-ENODEV.
  */
-int pciehp_card_present_or_link_active(struct controller *ctrl)
+int pciehp_card_present_or_link_active(struct pciehp_controller *ctrl)
 {
 	int ret;
 
@@ -471,7 +471,7 @@ int pciehp_card_present_or_link_active(struct controller *ctrl)
 	return pciehp_check_link_active(ctrl);
 }
 
-int pciehp_query_power_fault(struct controller *ctrl)
+int pciehp_query_power_fault(struct pciehp_controller *ctrl)
 {
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 	u16 slot_status;
@@ -483,7 +483,7 @@ int pciehp_query_power_fault(struct controller *ctrl)
 int pciehp_set_raw_indicator_status(struct hotplug_slot *hotplug_slot,
 				    u8 status)
 {
-	struct controller *ctrl = to_ctrl(hotplug_slot);
+	struct pciehp_controller *ctrl = to_ctrl(hotplug_slot);
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 
 	pci_config_pm_runtime_get(pdev);
@@ -510,7 +510,7 @@ int pciehp_set_raw_indicator_status(struct hotplug_slot *hotplug_slot,
  * Either @pwr or @attn can also be INDICATOR_NOOP to leave that indicator
  * unchanged.
  */
-void pciehp_set_indicators(struct controller *ctrl, int pwr, int attn)
+void pciehp_set_indicators(struct pciehp_controller *ctrl, int pwr, int attn)
 {
 	u16 cmd = 0, mask = 0;
 
@@ -531,7 +531,7 @@ void pciehp_set_indicators(struct controller *ctrl, int pwr, int attn)
 	}
 }
 
-int pciehp_power_on_slot(struct controller *ctrl)
+int pciehp_power_on_slot(struct pciehp_controller *ctrl)
 {
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 	u16 slot_status;
@@ -556,7 +556,7 @@ int pciehp_power_on_slot(struct controller *ctrl)
 	return retval;
 }
 
-void pciehp_power_off_slot(struct controller *ctrl)
+void pciehp_power_off_slot(struct pciehp_controller *ctrl)
 {
 	pcie_write_cmd(ctrl, PCI_EXP_SLTCTL_PWR_OFF, PCI_EXP_SLTCTL_PCC);
 	ctrl_dbg(ctrl, "%s: SLOTCTRL %x write cmd %x\n", __func__,
@@ -564,7 +564,7 @@ void pciehp_power_off_slot(struct controller *ctrl)
 		 PCI_EXP_SLTCTL_PWR_OFF);
 }
 
-bool pciehp_device_replaced(struct controller *ctrl)
+bool pciehp_device_replaced(struct pciehp_controller *ctrl)
 {
 	struct pci_dev *pdev __free(pci_dev_put) = NULL;
 	u32 reg;
@@ -593,7 +593,7 @@ bool pciehp_device_replaced(struct controller *ctrl)
 	return false;
 }
 
-static void pciehp_ignore_link_change(struct controller *ctrl,
+static void pciehp_ignore_link_change(struct pciehp_controller *ctrl,
 				      struct pci_dev *pdev, int irq,
 				      u16 ignored_events)
 {
@@ -622,7 +622,7 @@ static void pciehp_ignore_link_change(struct controller *ctrl,
 
 static irqreturn_t pciehp_isr(int irq, void *dev_id)
 {
-	struct controller *ctrl = (struct controller *)dev_id;
+	struct pciehp_controller *ctrl = (struct pciehp_controller *)dev_id;
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 	struct device *parent = pdev->dev.parent;
 	u16 status, events = 0;
@@ -727,7 +727,7 @@ read_status:
 
 static irqreturn_t pciehp_ist(int irq, void *dev_id)
 {
-	struct controller *ctrl = (struct controller *)dev_id;
+	struct pciehp_controller *ctrl = (struct pciehp_controller *)dev_id;
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 	irqreturn_t ret;
 	u32 events;
@@ -799,7 +799,7 @@ out:
 
 static int pciehp_poll(void *data)
 {
-	struct controller *ctrl = data;
+	struct pciehp_controller *ctrl = data;
 
 	schedule_timeout_idle(10 * HZ); /* start with 10 sec delay */
 
@@ -818,7 +818,7 @@ static int pciehp_poll(void *data)
 	return 0;
 }
 
-static void pcie_enable_notification(struct controller *ctrl)
+static void pcie_enable_notification(struct pciehp_controller *ctrl)
 {
 	u16 cmd, mask;
 
@@ -858,7 +858,7 @@ static void pcie_enable_notification(struct controller *ctrl)
 		 pci_pcie_cap(ctrl->pcie->port) + PCI_EXP_SLTCTL, cmd);
 }
 
-static void pcie_disable_notification(struct controller *ctrl)
+static void pcie_disable_notification(struct pciehp_controller *ctrl)
 {
 	u16 mask;
 
@@ -871,13 +871,13 @@ static void pcie_disable_notification(struct controller *ctrl)
 		 pci_pcie_cap(ctrl->pcie->port) + PCI_EXP_SLTCTL, 0);
 }
 
-void pcie_clear_hotplug_events(struct controller *ctrl)
+void pcie_clear_hotplug_events(struct pciehp_controller *ctrl)
 {
 	pcie_capability_write_word(ctrl_dev(ctrl), PCI_EXP_SLTSTA,
 				   PCI_EXP_SLTSTA_PDC | PCI_EXP_SLTSTA_DLLSC);
 }
 
-void pcie_enable_interrupt(struct controller *ctrl)
+void pcie_enable_interrupt(struct pciehp_controller *ctrl)
 {
 	u16 mask;
 
@@ -887,7 +887,7 @@ void pcie_enable_interrupt(struct controller *ctrl)
 	pcie_write_cmd(ctrl, mask, mask);
 }
 
-void pcie_disable_interrupt(struct controller *ctrl)
+void pcie_disable_interrupt(struct pciehp_controller *ctrl)
 {
 	u16 mask;
 
@@ -914,7 +914,7 @@ void pcie_disable_interrupt(struct controller *ctrl)
  */
 int pciehp_slot_reset(struct pcie_device *dev)
 {
-	struct controller *ctrl = get_service_data(dev);
+	struct pciehp_controller *ctrl = get_service_data(dev);
 
 	if (ctrl->state != ON_STATE)
 		return 0;
@@ -938,7 +938,7 @@ int pciehp_slot_reset(struct pcie_device *dev)
  */
 int pciehp_reset_slot(struct hotplug_slot *hotplug_slot, bool probe)
 {
-	struct controller *ctrl = to_ctrl(hotplug_slot);
+	struct pciehp_controller *ctrl = to_ctrl(hotplug_slot);
 	struct pci_dev *pdev = ctrl_dev(ctrl);
 	int rc;
 
@@ -957,7 +957,7 @@ int pciehp_reset_slot(struct hotplug_slot *hotplug_slot, bool probe)
 	return rc;
 }
 
-int pcie_init_notification(struct controller *ctrl)
+int pcie_init_notification(struct pciehp_controller *ctrl)
 {
 	if (pciehp_request_irq(ctrl))
 		return -1;
@@ -966,7 +966,7 @@ int pcie_init_notification(struct controller *ctrl)
 	return 0;
 }
 
-void pcie_shutdown_notification(struct controller *ctrl)
+void pcie_shutdown_notification(struct pciehp_controller *ctrl)
 {
 	if (ctrl->notification_enabled) {
 		pcie_disable_notification(ctrl);
@@ -975,7 +975,7 @@ void pcie_shutdown_notification(struct controller *ctrl)
 	}
 }
 
-static inline void dbg_ctrl(struct controller *ctrl)
+static inline void dbg_ctrl(struct pciehp_controller *ctrl)
 {
 	struct pci_dev *pdev = ctrl->pcie->port;
 	u16 reg16;
@@ -1003,9 +1003,9 @@ static inline int pcie_hotplug_depth(struct pci_dev *dev)
 	return depth;
 }
 
-struct controller *pcie_init(struct pcie_device *dev)
+struct pciehp_controller *pcie_init(struct pcie_device *dev)
 {
-	struct controller *ctrl;
+	struct pciehp_controller *ctrl;
 	u32 slot_cap, slot_cap2;
 	u8 poweron;
 	struct pci_dev *pdev = dev->port;
@@ -1093,7 +1093,7 @@ struct controller *pcie_init(struct pcie_device *dev)
 	return ctrl;
 }
 
-void pciehp_release_ctrl(struct controller *ctrl)
+void pciehp_release_ctrl(struct pciehp_controller *ctrl)
 {
 	cancel_delayed_work_sync(&ctrl->button_work);
 	kfree(ctrl);

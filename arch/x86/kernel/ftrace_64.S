@@ -490,6 +490,7 @@ SYM_CODE_START(return_to_handler)
 #ifdef CONFIG_SECURITY_HARDENING_RAP
 SYM_FUNC_END(return_to_handler)
 _ASM_NOKPROBE(return_to_handler)
+STACK_FRAME_NON_STANDARD return_to_handler
 	.pushsection .discard.hdn_rap.functions, "", @progbits
 	.balign 8
 	.quad return_to_handler, 4, 0

@@ -403,7 +403,8 @@ static void vunmap_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 		} else
 #endif
 			ptent = ptep_get_and_clear(&init_mm, addr, pte);
-		WARN_ON(!pte_none(ptent) && !pte_present(ptent));
+		WARN_ON(!pte_none(ptent) && !pte_present(ptent) &&
+			!hdn_execmem_retiring_pte(addr, pte_pfn(ptent)));
 	} while (pte += (size >> PAGE_SHIFT), addr += size, addr != end);
 
 	lazy_mmu_mode_disable();

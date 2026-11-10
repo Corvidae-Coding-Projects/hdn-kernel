@@ -21,6 +21,8 @@
 #include <linux/pid_types.h>
 #include <linux/sem_types.h>
 #include <linux/shm.h>
+#include <linux/swait_types.h>
+#include <linux/wait_types.h>
 #include <linux/kmsan_types.h>
 #include <linux/mutex_types.h>
 #include <linux/plist_types.h>
@@ -31,6 +33,7 @@
 #include <linux/refcount_types.h>
 #include <linux/resource.h>
 #include <linux/latencytop.h>
+#include <linux/lock_waiter_types.h>
 #include <linux/sched/prio.h>
 #include <linux/sched/types.h>
 #include <linux/signal_types.h>
@@ -1242,6 +1245,25 @@ struct task_struct {
 	raw_spinlock_t			pi_lock;
 
 	struct wake_q_node		wake_q;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* Waiters must remain reachable while another private stack is active. */
+	struct swait_queue		hdn_swait;
+	bool				hdn_swait_active;
+	struct wait_queue_entry	hdn_wait;
+	bool				hdn_wait_active;
+	struct wait_bit_queue_entry hdn_wait_bit;
+	bool				hdn_wait_bit_active;
+	struct timer_list		hdn_timeout_timer;
+	bool				hdn_timeout_active;
+	struct hrtimer_sleeper		hdn_hrtimeout;
+	bool				hdn_hrtimeout_active;
+	union hdn_lock_waiter		hdn_lock_waiter;
+	enum hdn_lock_waiter_type	hdn_lock_waiter_active;
+	/* A synchronous remote CPU must not dequeue a descriptor from this
+	 * task's private, non-current kernel stack. */
+	call_single_data_t		hdn_csd;
+	bool				hdn_csd_active;
+#endif
 
 #ifdef CONFIG_RT_MUTEXES
 	/* PI waiters blocked on a rt_mutex held by this task: */

@@ -9,6 +9,7 @@
 
 #include <asm/text-patching.h>
 #include <asm/hdn_text.h>
+#include <asm/hdn_rap.h>
 #include <asm/hdn_rap_patch.h>
 #include <linux/hdn_rap.h>
 #ifdef CONFIG_SECURITY_HARDENING_RAP
@@ -2287,19 +2288,52 @@ int alternatives_text_reserved(void *start, void *end)
 
 extern void int3_selftest_asm(unsigned int *ptr);
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+#define HDN_INT3_SELFTEST_ENTRY(name)                                    \
+"\tleaq .Lhdn_" #name "_body(%rip), %r11\n"                           \
+"\tcall __hdn_rap_enter\n"                                             \
+".Lhdn_" #name "_body:\n"                                             \
+"\t.pushsection .hdn.rap.entries, \"a\", @progbits\n"                \
+"\t.balign 8\n"                                                         \
+"\t.quad " #name ", __hdn_rap_type_" #name ", .Lhdn_" #name          \
+"_body, 0\n"                                                            \
+"\t.popsection\n"
+#define HDN_INT3_SELFTEST_RETURN "\tjmp __hdn_rap_return\n"
+#define HDN_INT3_SELFTEST_SITE(name)                                     \
+".Lhdn_" #name "_emulated_return:\n"                                  \
+"\t.pushsection .hdn.rap.sites, \"a\", @progbits\n"                  \
+"\t.balign 8\n"                                                         \
+"\t.quad .Lhdn_" #name "_emulated_return, 0\n"                      \
+"\t.popsection\n"
+#define HDN_INT3_SELFTEST_COVERAGE(name)                                 \
+"\t.pushsection .discard.hdn_rap.functions, \"\", @progbits\n"        \
+"\t.balign 8\n"                                                         \
+"\t.quad " #name ", 1, 1\n"                                          \
+"\t.popsection\n"
+#else
+#define HDN_INT3_SELFTEST_ENTRY(name)
+#define HDN_INT3_SELFTEST_RETURN ASM_RET
+#define HDN_INT3_SELFTEST_SITE(name)
+#define HDN_INT3_SELFTEST_COVERAGE(name)
+#endif
+
 asm (
 "	.pushsection	.init.text, \"ax\", @progbits\n"
 "	.type		int3_selftest_asm, @function\n"
 "int3_selftest_asm:\n"
 	ANNOTATE_NOENDBR "\n"
+	HDN_INT3_SELFTEST_ENTRY(int3_selftest_asm)
 	/*
 	 * INT3 padded with NOP to CALL_INSN_SIZE. The INT3 triggers an
 	 * exception, then the int3_exception_nb notifier emulates a call to
 	 * int3_selftest_callee().
 	 */
+"int3_selftest_ip:\n"
 "	int3; nop; nop; nop; nop\n"
-	ASM_RET
+	HDN_INT3_SELFTEST_SITE(int3_selftest_asm)
+	HDN_INT3_SELFTEST_RETURN
 "	.size		int3_selftest_asm, . - int3_selftest_asm\n"
+	HDN_INT3_SELFTEST_COVERAGE(int3_selftest_asm)
 "	.popsection\n"
 );
 
@@ -2310,9 +2344,11 @@ asm (
 "	.type		int3_selftest_callee, @function\n"
 "int3_selftest_callee:\n"
 	ANNOTATE_NOENDBR "\n"
+	HDN_INT3_SELFTEST_ENTRY(int3_selftest_callee)
 "	movl	$0x1234, (%" _ASM_ARG1 ")\n"
-	ASM_RET
+	HDN_INT3_SELFTEST_RETURN
 "	.size		int3_selftest_callee, . - int3_selftest_callee\n"
+	HDN_INT3_SELFTEST_COVERAGE(int3_selftest_callee)
 "	.popsection\n"
 );
 
@@ -2321,9 +2357,10 @@ extern void int3_selftest_ip(void); /* defined in asm below */
 static int __init
 int3_exception_notify(struct notifier_block *self, unsigned long val, void *data)
 {
-	unsigned long selftest = (unsigned long)&int3_selftest_asm;
+	unsigned long selftest = (unsigned long)&int3_selftest_ip;
 	struct die_args *args = data;
 	struct pt_regs *regs = args->regs;
+	unsigned long ip;
 
 	OPTIMIZER_HIDE_VAR(selftest);
 
@@ -2336,7 +2373,13 @@ int3_exception_notify(struct notifier_block *self, unsigned long val, void *data
 	if (regs->ip - INT3_INSN_SIZE != selftest)
 		return NOTIFY_DONE;
 
+	ip = regs->ip - INT3_INSN_SIZE + CALL_INSN_SIZE;
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+	hdn_rap_int3_selftest_call(regs, ip,
+			(unsigned long)&int3_selftest_callee);
+#else
 	int3_emulate_call(regs, (unsigned long)&int3_selftest_callee);
+#endif
 	return NOTIFY_STOP;
 }
 
@@ -2369,6 +2412,25 @@ __visible noinline void __init __alt_reloc_selftest(void *arg)
 	WARN_ON(arg != &__alt_reloc_selftest_addr);
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+#define HDN_ALT_RELOC_SELFTEST_INSN                                      \
+	"lea %[mem], %%" _ASM_ARG1 "; "                                 \
+	"lea .Lhdn_alt_reloc_return%=(%%rip), %%r10; "                    \
+	"call __alt_reloc_selftest;"
+#define HDN_ALT_RELOC_SELFTEST_SITE                                      \
+	".Lhdn_alt_reloc_return%=:\n\t"                                    \
+	".pushsection .hdn.rap.sites, \"a\", @progbits\n\t"                \
+	".balign 8\n\t"                                                     \
+	".quad .Lhdn_alt_reloc_return%=, 0\n\t"                          \
+	".popsection\n\t"
+#define HDN_ALT_RELOC_SELFTEST_CLOBBER , "r10"
+#else
+#define HDN_ALT_RELOC_SELFTEST_INSN \
+	"lea %[mem], %%" _ASM_ARG1 "; call __alt_reloc_selftest;"
+#define HDN_ALT_RELOC_SELFTEST_SITE
+#define HDN_ALT_RELOC_SELFTEST_CLOBBER
+#endif
+
 static noinline void __init alt_reloc_selftest(void)
 {
 	/*
@@ -2384,10 +2446,11 @@ static noinline void __init alt_reloc_selftest(void)
 	 * above.
 	 */
 	asm_inline volatile (
-		ALTERNATIVE("", "lea %[mem], %%" _ASM_ARG1 "; call __alt_reloc_selftest;", X86_FEATURE_ALWAYS)
+		ALTERNATIVE("", HDN_ALT_RELOC_SELFTEST_INSN, X86_FEATURE_ALWAYS)
+		HDN_ALT_RELOC_SELFTEST_SITE
 		: ASM_CALL_CONSTRAINT
 		: [mem] "m" (__alt_reloc_selftest_addr)
-		: _ASM_ARG1
+		: _ASM_ARG1 HDN_ALT_RELOC_SELFTEST_CLOBBER
 	);
 }
 

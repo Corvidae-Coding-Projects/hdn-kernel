@@ -48,7 +48,7 @@ static int get_power_status(struct hotplug_slot *slot, u8 *value);
 static int get_latch_status(struct hotplug_slot *slot, u8 *value);
 static int get_adapter_status(struct hotplug_slot *slot, u8 *value);
 
-static int init_slot(struct controller *ctrl)
+static int init_slot(struct pciehp_controller *ctrl)
 {
 	struct hotplug_slot_ops *ops;
 	char name[SLOT_NAME_SIZE];
@@ -87,7 +87,7 @@ static int init_slot(struct controller *ctrl)
 	return retval;
 }
 
-static void cleanup_slot(struct controller *ctrl)
+static void cleanup_slot(struct pciehp_controller *ctrl)
 {
 	struct hotplug_slot *hotplug_slot = &ctrl->hotplug_slot;
 
@@ -100,7 +100,7 @@ static void cleanup_slot(struct controller *ctrl)
  */
 static int set_attention_status(struct hotplug_slot *hotplug_slot, u8 status)
 {
-	struct controller *ctrl = to_ctrl(hotplug_slot);
+	struct pciehp_controller *ctrl = to_ctrl(hotplug_slot);
 	struct pci_dev *pdev = ctrl->pcie->port;
 
 	if (status)
@@ -116,7 +116,7 @@ static int set_attention_status(struct hotplug_slot *hotplug_slot, u8 status)
 
 static int get_power_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct controller *ctrl = to_ctrl(hotplug_slot);
+	struct pciehp_controller *ctrl = to_ctrl(hotplug_slot);
 	struct pci_dev *pdev = ctrl->pcie->port;
 
 	pci_config_pm_runtime_get(pdev);
@@ -127,7 +127,7 @@ static int get_power_status(struct hotplug_slot *hotplug_slot, u8 *value)
 
 static int get_latch_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct controller *ctrl = to_ctrl(hotplug_slot);
+	struct pciehp_controller *ctrl = to_ctrl(hotplug_slot);
 	struct pci_dev *pdev = ctrl->pcie->port;
 
 	pci_config_pm_runtime_get(pdev);
@@ -138,7 +138,7 @@ static int get_latch_status(struct hotplug_slot *hotplug_slot, u8 *value)
 
 static int get_adapter_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
-	struct controller *ctrl = to_ctrl(hotplug_slot);
+	struct pciehp_controller *ctrl = to_ctrl(hotplug_slot);
 	struct pci_dev *pdev = ctrl->pcie->port;
 	int ret;
 
@@ -163,7 +163,7 @@ static int get_adapter_status(struct hotplug_slot *hotplug_slot, u8 *value)
  * interrupt generation is disabled [when] interrupt generation is subsequently
  * enabled" is optional per PCIe r4.0, sec 6.7.3.4.
  */
-static void pciehp_check_presence(struct controller *ctrl)
+static void pciehp_check_presence(struct pciehp_controller *ctrl)
 {
 	int occupied;
 
@@ -184,7 +184,7 @@ static void pciehp_check_presence(struct controller *ctrl)
 static int pciehp_probe(struct pcie_device *dev)
 {
 	int rc;
-	struct controller *ctrl;
+	struct pciehp_controller *ctrl;
 
 	/* If this is not a "hotplug" service, we have no business here. */
 	if (dev->service != PCIE_PORT_SERVICE_HP)
@@ -243,7 +243,7 @@ err_out_release_ctlr:
 
 static void pciehp_remove(struct pcie_device *dev)
 {
-	struct controller *ctrl = get_service_data(dev);
+	struct pciehp_controller *ctrl = get_service_data(dev);
 
 	pci_hp_del(&ctrl->hotplug_slot);
 	pcie_shutdown_notification(ctrl);
@@ -286,7 +286,7 @@ static int pciehp_suspend(struct pcie_device *dev)
 
 static int pciehp_resume_noirq(struct pcie_device *dev)
 {
-	struct controller *ctrl = get_service_data(dev);
+	struct pciehp_controller *ctrl = get_service_data(dev);
 
 	/* pci_restore_state() just wrote to the Slot Control register */
 	ctrl->cmd_started = jiffies;
@@ -316,7 +316,7 @@ static int pciehp_resume_noirq(struct pcie_device *dev)
 
 static int pciehp_resume(struct pcie_device *dev)
 {
-	struct controller *ctrl = get_service_data(dev);
+	struct pciehp_controller *ctrl = get_service_data(dev);
 
 	if (pme_is_native(dev))
 		pcie_enable_interrupt(ctrl);
@@ -334,7 +334,7 @@ static int pciehp_runtime_suspend(struct pcie_device *dev)
 
 static int pciehp_runtime_resume(struct pcie_device *dev)
 {
-	struct controller *ctrl = get_service_data(dev);
+	struct pciehp_controller *ctrl = get_service_data(dev);
 
 	/* pci_restore_state() just wrote to the Slot Control register */
 	ctrl->cmd_started = jiffies;

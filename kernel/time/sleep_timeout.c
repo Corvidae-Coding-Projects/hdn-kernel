@@ -11,6 +11,7 @@
 
 #include "tick-internal.h"
 
+#ifndef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
 /*
  * Since schedule_timeout()'s timer is defined on the stack, it must store
  * the target task on the stack as well.
@@ -26,6 +27,15 @@ static void process_timeout(struct timer_list *t)
 
 	wake_up_process(timeout->task);
 }
+#else
+static void hdn_process_timeout(struct timer_list *timer)
+{
+	struct task_struct *task;
+
+	task = container_of(timer, struct task_struct, hdn_timeout_timer);
+	wake_up_process(task);
+}
+#endif
 
 /**
  * schedule_timeout - sleep until timeout
@@ -60,7 +70,11 @@ static void process_timeout(struct timer_list *t)
  */
 signed long __sched schedule_timeout(signed long timeout)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct timer_list *timer = &current->hdn_timeout_timer;
+#else
 	struct process_timer timer;
+#endif
 	unsigned long expire;
 
 	switch (timeout) {
@@ -92,6 +106,16 @@ signed long __sched schedule_timeout(signed long timeout)
 
 	expire = timeout + jiffies;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	BUG_ON(current->hdn_timeout_active);
+	current->hdn_timeout_active = true;
+	timer_setup(timer, hdn_process_timeout, 0);
+	timer->expires = expire;
+	add_timer(timer);
+	schedule();
+	timer_delete_sync(timer);
+	current->hdn_timeout_active = false;
+#else
 	timer.task = current;
 	timer_setup_on_stack(&timer.timer, process_timeout, 0);
 	timer.timer.expires = expire;
@@ -101,6 +125,7 @@ signed long __sched schedule_timeout(signed long timeout)
 
 	/* Remove the timer from the object tracker */
 	timer_destroy_on_stack(&timer.timer);
+#endif
 
 	timeout = expire - jiffies;
 
@@ -189,7 +214,11 @@ EXPORT_SYMBOL(schedule_timeout_idle);
 int __sched schedule_hrtimeout_range_clock(ktime_t *expires, u64 delta,
 					   const enum hrtimer_mode mode, clockid_t clock_id)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct hrtimer_sleeper *t = &current->hdn_hrtimeout;
+#else
 	struct hrtimer_sleeper t;
+#endif
 
 	/*
 	 * Optimize when a zero timeout value is given. It does not
@@ -208,6 +237,23 @@ int __sched schedule_hrtimeout_range_clock(ktime_t *expires, u64 delta,
 		return -EINTR;
 	}
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	BUG_ON(current->hdn_hrtimeout_active);
+	current->hdn_hrtimeout_active = true;
+	hrtimer_setup_sleeper(t, clock_id, mode);
+	hrtimer_set_expires_range_ns(&t->timer, *expires, delta);
+	hrtimer_sleeper_start_expires(t, mode);
+
+	if (likely(t->task))
+		schedule();
+
+	hrtimer_cancel(&t->timer);
+	current->hdn_hrtimeout_active = false;
+
+	__set_current_state(TASK_RUNNING);
+
+	return !t->task ? 0 : -EINTR;
+#else
 	hrtimer_setup_sleeper_on_stack(&t, clock_id, mode);
 	hrtimer_set_expires_range_ns(&t.timer, *expires, delta);
 	hrtimer_sleeper_start_expires(&t, mode);
@@ -221,6 +267,7 @@ int __sched schedule_hrtimeout_range_clock(ktime_t *expires, u64 delta,
 	__set_current_state(TASK_RUNNING);
 
 	return !t.task ? 0 : -EINTR;
+#endif
 }
 EXPORT_SYMBOL_GPL(schedule_hrtimeout_range_clock);
 

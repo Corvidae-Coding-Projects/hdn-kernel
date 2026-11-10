@@ -388,8 +388,8 @@ static const struct file_operations debug_registers_fops = {
 
 static struct dentry *ohci_debug_root;
 
-struct debug_buffer {
-	ssize_t (*fill_func)(struct debug_buffer *);	/* fill method */
+struct ohci_debug_buffer {
+	ssize_t (*fill_func)(struct ohci_debug_buffer *);	/* fill method */
 	struct ohci_hcd *ohci;
 	struct mutex mutex;	/* protect filling of buffer */
 	size_t count;		/* number of characters filled into buffer */
@@ -462,7 +462,7 @@ show_list (struct ohci_hcd *ohci, char *buf, size_t count, struct ed *ed)
 	return count - size;
 }
 
-static ssize_t fill_async_buffer(struct debug_buffer *buf)
+static ssize_t fill_async_buffer(struct ohci_debug_buffer *buf)
 {
 	struct ohci_hcd		*ohci;
 	size_t			temp, size;
@@ -483,7 +483,7 @@ static ssize_t fill_async_buffer(struct debug_buffer *buf)
 
 #define DBG_SCHED_LIMIT 64
 
-static ssize_t fill_periodic_buffer(struct debug_buffer *buf)
+static ssize_t fill_periodic_buffer(struct ohci_debug_buffer *buf)
 {
 	struct ohci_hcd		*ohci;
 	struct ed		**seen, *ed;
@@ -578,7 +578,7 @@ static ssize_t fill_periodic_buffer(struct debug_buffer *buf)
 }
 #undef DBG_SCHED_LIMIT
 
-static ssize_t fill_registers_buffer(struct debug_buffer *buf)
+static ssize_t fill_registers_buffer(struct ohci_debug_buffer *buf)
 {
 	struct usb_hcd		*hcd;
 	struct ohci_hcd		*ohci;
@@ -662,12 +662,12 @@ done:
 	return PAGE_SIZE - size;
 }
 
-static struct debug_buffer *alloc_buffer(struct ohci_hcd *ohci,
-				ssize_t (*fill_func)(struct debug_buffer *))
+static struct ohci_debug_buffer *alloc_buffer(struct ohci_hcd *ohci,
+				ssize_t (*fill_func)(struct ohci_debug_buffer *))
 {
-	struct debug_buffer *buf;
+	struct ohci_debug_buffer *buf;
 
-	buf = kzalloc_obj(struct debug_buffer);
+	buf = kzalloc_obj(struct ohci_debug_buffer);
 
 	if (buf) {
 		buf->ohci = ohci;
@@ -678,7 +678,7 @@ static struct debug_buffer *alloc_buffer(struct ohci_hcd *ohci,
 	return buf;
 }
 
-static int fill_buffer(struct debug_buffer *buf)
+static int fill_buffer(struct ohci_debug_buffer *buf)
 {
 	int ret;
 
@@ -704,7 +704,7 @@ out:
 static ssize_t debug_output(struct file *file, char __user *user_buf,
 			size_t len, loff_t *offset)
 {
-	struct debug_buffer *buf = file->private_data;
+	struct ohci_debug_buffer *buf = file->private_data;
 	int ret;
 
 	mutex_lock(&buf->mutex);
@@ -727,7 +727,7 @@ out:
 
 static int debug_close(struct inode *inode, struct file *file)
 {
-	struct debug_buffer *buf = file->private_data;
+	struct ohci_debug_buffer *buf = file->private_data;
 
 	if (buf) {
 		if (buf->page)

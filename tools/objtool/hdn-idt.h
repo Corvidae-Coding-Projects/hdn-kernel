@@ -340,7 +340,7 @@ bad:
  * points are not ordinary function-pointer targets or callable C functions. */
 static int validate_rap_idt_peers(struct objtool_file *file)
 {
-	struct instruction *insn;
+	struct instruction *insn = NULL;
 	struct symbol *func;
 
 	for_each_sym(file->elf, func) {
@@ -369,6 +369,7 @@ static int validate_rap_idt_peers(struct objtool_file *file)
 			}
 		}
 	}
+	func = NULL;
 	for_each_insn(file, insn) {
 		struct symbol *owner = rap_entry_owner(insn);
 		struct instruction *dest;
@@ -383,6 +384,14 @@ static int validate_rap_idt_peers(struct objtool_file *file)
 		func = dest ? rap_insn_owner(dest) : NULL;
 		if (!func || !func->rap_idt_protocol || owner == func)
 			continue;
+		/* KVM VMX NMI injection constructs an architectural frame in a
+		 * separately closed kind-13 wrapper, then CALLs the one dedicated
+		 * IDT entry.  Admit only that exact reviewed pairing. */
+		if (offset == func->offset && insn->type == INSN_CALL && owner &&
+		    owner->rap_kind == 13 && owner->rap_hardware_event &&
+		    !strcmp(owner->name, "idt_do_nmi_irqoff") &&
+		    !strcmp(func->name, "asm_exc_nmi_kvm_vmx"))
+			continue;
 		if (offset != func->offset || insn->type != INSN_JUMP_UNCONDITIONAL || !owner)
 			goto bad;
 		if (func->rap_kind == 36 && owner->rap_idt_protocol &&
@@ -396,6 +405,19 @@ static int validate_rap_idt_peers(struct objtool_file *file)
 	}
 	return 0;
 bad:
-	ERROR("RAP native IDT entry has an unverified peer or an unauthorized incoming edge");
+	if (insn) {
+		struct symbol *owner = rap_entry_owner(insn);
+
+		ERROR_INSN(insn,
+			   "RAP native IDT entry has an unauthorized incoming edge from %s (kind %u, protocol %u, type %u)%s%s",
+			   owner ? owner->name : "<none>", owner ? owner->rap_kind : 0,
+			   owner ? owner->rap_hardware_event : 0, insn->type,
+			   func ? " to " : "", func ? func->name : "");
+	}
+	else if (func)
+		ERROR_FUNC(func->sec, func->offset,
+			   "RAP native IDT entry has an unverified handler or runtime peer");
+	else
+		ERROR("RAP native IDT validation failed without a resolved peer or edge");
 	return -1;
 }

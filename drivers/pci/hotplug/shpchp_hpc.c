@@ -166,34 +166,34 @@
 #define SLOT_SERR_INT_MASK	0x3
 
 static irqreturn_t shpc_isr(int irq, void *dev_id);
-static void start_int_poll_timer(struct controller *ctrl, int sec);
+static void start_int_poll_timer(struct shpchp_controller *ctrl, int sec);
 
-static inline u8 shpc_readb(struct controller *ctrl, int reg)
+static inline u8 shpc_readb(struct shpchp_controller *ctrl, int reg)
 {
 	return readb(ctrl->creg + reg);
 }
 
-static inline u16 shpc_readw(struct controller *ctrl, int reg)
+static inline u16 shpc_readw(struct shpchp_controller *ctrl, int reg)
 {
 	return readw(ctrl->creg + reg);
 }
 
-static inline void shpc_writew(struct controller *ctrl, int reg, u16 val)
+static inline void shpc_writew(struct shpchp_controller *ctrl, int reg, u16 val)
 {
 	writew(val, ctrl->creg + reg);
 }
 
-static inline u32 shpc_readl(struct controller *ctrl, int reg)
+static inline u32 shpc_readl(struct shpchp_controller *ctrl, int reg)
 {
 	return readl(ctrl->creg + reg);
 }
 
-static inline void shpc_writel(struct controller *ctrl, int reg, u32 val)
+static inline void shpc_writel(struct shpchp_controller *ctrl, int reg, u32 val)
 {
 	writel(val, ctrl->creg + reg);
 }
 
-static inline int shpc_indirect_read(struct controller *ctrl, int index,
+static inline int shpc_indirect_read(struct shpchp_controller *ctrl, int index,
 				     u32 *value)
 {
 	int rc;
@@ -211,7 +211,7 @@ static inline int shpc_indirect_read(struct controller *ctrl, int index,
  */
 static void int_poll_timeout(struct timer_list *t)
 {
-	struct controller *ctrl = timer_container_of(ctrl, t, poll_timer);
+	struct shpchp_controller *ctrl = timer_container_of(ctrl, t, poll_timer);
 
 	/* Poll for interrupt events.  regs == NULL => polling */
 	shpc_isr(0, ctrl);
@@ -225,7 +225,7 @@ static void int_poll_timeout(struct timer_list *t)
 /*
  * This function starts the interrupt polling timer.
  */
-static void start_int_poll_timer(struct controller *ctrl, int sec)
+static void start_int_poll_timer(struct shpchp_controller *ctrl, int sec)
 {
 	/* Clamp to sane value */
 	if ((sec <= 0) || (sec > 60))
@@ -235,7 +235,7 @@ static void start_int_poll_timer(struct controller *ctrl, int sec)
 	add_timer(&ctrl->poll_timer);
 }
 
-static inline int is_ctrl_busy(struct controller *ctrl)
+static inline int is_ctrl_busy(struct shpchp_controller *ctrl)
 {
 	u16 cmd_status = shpc_readw(ctrl, CMD_STATUS);
 	return cmd_status & 0x1;
@@ -245,7 +245,7 @@ static inline int is_ctrl_busy(struct controller *ctrl)
  * Returns 1 if SHPC finishes executing a command within 1 sec,
  * otherwise returns 0.
  */
-static inline int shpc_poll_ctrl_busy(struct controller *ctrl)
+static inline int shpc_poll_ctrl_busy(struct shpchp_controller *ctrl)
 {
 	int i;
 
@@ -262,7 +262,7 @@ static inline int shpc_poll_ctrl_busy(struct controller *ctrl)
 	return 0;
 }
 
-static inline int shpc_wait_cmd(struct controller *ctrl)
+static inline int shpc_wait_cmd(struct shpchp_controller *ctrl)
 {
 	int retval = 0;
 	unsigned long timeout = msecs_to_jiffies(1000);
@@ -284,9 +284,9 @@ static inline int shpc_wait_cmd(struct controller *ctrl)
 	return retval;
 }
 
-static int shpc_write_cmd(struct slot *slot, u8 t_slot, u8 cmd)
+static int shpc_write_cmd(struct shpchp_slot *slot, u8 t_slot, u8 cmd)
 {
-	struct controller *ctrl = slot->ctrl;
+	struct shpchp_controller *ctrl = slot->ctrl;
 	u16 cmd_status;
 	int retval = 0;
 	u16 temp_word;
@@ -327,7 +327,7 @@ static int shpc_write_cmd(struct slot *slot, u8 t_slot, u8 cmd)
 	return retval;
 }
 
-int shpchp_check_cmd_status(struct controller *ctrl)
+int shpchp_check_cmd_status(struct shpchp_controller *ctrl)
 {
 	int retval = 0;
 	u16 cmd_status = shpc_readw(ctrl, CMD_STATUS) & 0x000F;
@@ -356,9 +356,9 @@ int shpchp_check_cmd_status(struct controller *ctrl)
 }
 
 
-int shpchp_get_attention_status(struct slot *slot, u8 *status)
+int shpchp_get_attention_status(struct shpchp_slot *slot, u8 *status)
 {
-	struct controller *ctrl = slot->ctrl;
+	struct shpchp_controller *ctrl = slot->ctrl;
 	u32 slot_reg = shpc_readl(ctrl, SLOT_REG(slot->hp_slot));
 	u8 state = (slot_reg & ATN_LED_STATE_MASK) >> ATN_LED_STATE_SHIFT;
 
@@ -380,9 +380,9 @@ int shpchp_get_attention_status(struct slot *slot, u8 *status)
 	return 0;
 }
 
-int shpchp_get_power_status(struct slot *slot, u8 *status)
+int shpchp_get_power_status(struct shpchp_slot *slot, u8 *status)
 {
-	struct controller *ctrl = slot->ctrl;
+	struct shpchp_controller *ctrl = slot->ctrl;
 	u32 slot_reg = shpc_readl(ctrl, SLOT_REG(slot->hp_slot));
 	u8 state = (slot_reg & SLOT_STATE_MASK) >> SLOT_STATE_SHIFT;
 
@@ -405,9 +405,9 @@ int shpchp_get_power_status(struct slot *slot, u8 *status)
 }
 
 
-int shpchp_get_latch_status(struct slot *slot, u8 *status)
+int shpchp_get_latch_status(struct shpchp_slot *slot, u8 *status)
 {
-	struct controller *ctrl = slot->ctrl;
+	struct shpchp_controller *ctrl = slot->ctrl;
 	u32 slot_reg = shpc_readl(ctrl, SLOT_REG(slot->hp_slot));
 
 	*status = !!(slot_reg & MRL_SENSOR);	/* 0 -> close; 1 -> open */
@@ -415,9 +415,9 @@ int shpchp_get_latch_status(struct slot *slot, u8 *status)
 	return 0;
 }
 
-int shpchp_get_adapter_status(struct slot *slot, u8 *status)
+int shpchp_get_adapter_status(struct shpchp_slot *slot, u8 *status)
 {
-	struct controller *ctrl = slot->ctrl;
+	struct shpchp_controller *ctrl = slot->ctrl;
 	u32 slot_reg = shpc_readl(ctrl, SLOT_REG(slot->hp_slot));
 	u8 state = (slot_reg & PRSNT_MASK) >> PRSNT_SHIFT;
 
@@ -426,19 +426,19 @@ int shpchp_get_adapter_status(struct slot *slot, u8 *status)
 	return 0;
 }
 
-int shpchp_get_prog_int(struct slot *slot, u8 *prog_int)
+int shpchp_get_prog_int(struct shpchp_slot *slot, u8 *prog_int)
 {
-	struct controller *ctrl = slot->ctrl;
+	struct shpchp_controller *ctrl = slot->ctrl;
 
 	*prog_int = shpc_readb(ctrl, PROG_INTERFACE);
 
 	return 0;
 }
 
-int shpchp_get_adapter_speed(struct slot *slot, enum pci_bus_speed *value)
+int shpchp_get_adapter_speed(struct shpchp_slot *slot, enum pci_bus_speed *value)
 {
 	int retval = 0;
-	struct controller *ctrl = slot->ctrl;
+	struct shpchp_controller *ctrl = slot->ctrl;
 	u32 slot_reg = shpc_readl(ctrl, SLOT_REG(slot->hp_slot));
 	u8 m66_cap  = !!(slot_reg & MHZ66_CAP);
 	u8 pi, pcix_cap;
@@ -488,16 +488,16 @@ int shpchp_get_adapter_speed(struct slot *slot, enum pci_bus_speed *value)
 	return retval;
 }
 
-int shpchp_query_power_fault(struct slot *slot)
+int shpchp_query_power_fault(struct shpchp_slot *slot)
 {
-	struct controller *ctrl = slot->ctrl;
+	struct shpchp_controller *ctrl = slot->ctrl;
 	u32 slot_reg = shpc_readl(ctrl, SLOT_REG(slot->hp_slot));
 
 	/* Note: Logic 0 => fault */
 	return !(slot_reg & POWER_FAULT);
 }
 
-int shpchp_set_attention_status(struct slot *slot, u8 value)
+int shpchp_set_attention_status(struct shpchp_slot *slot, u8 value)
 {
 	u8 slot_cmd = 0;
 
@@ -519,22 +519,22 @@ int shpchp_set_attention_status(struct slot *slot, u8 value)
 }
 
 
-void shpchp_green_led_on(struct slot *slot)
+void shpchp_green_led_on(struct shpchp_slot *slot)
 {
 	shpc_write_cmd(slot, slot->hp_slot, SET_PWR_ON);
 }
 
-void shpchp_green_led_off(struct slot *slot)
+void shpchp_green_led_off(struct shpchp_slot *slot)
 {
 	shpc_write_cmd(slot, slot->hp_slot, SET_PWR_OFF);
 }
 
-void shpchp_green_led_blink(struct slot *slot)
+void shpchp_green_led_blink(struct shpchp_slot *slot)
 {
 	shpc_write_cmd(slot, slot->hp_slot, SET_PWR_BLINK);
 }
 
-void shpchp_release_ctlr(struct controller *ctrl)
+void shpchp_release_ctlr(struct shpchp_controller *ctrl)
 {
 	int i;
 	u32 slot_reg, serr_int;
@@ -574,7 +574,7 @@ void shpchp_release_ctlr(struct controller *ctrl)
 	release_mem_region(ctrl->mmio_base, ctrl->mmio_size);
 }
 
-int shpchp_power_on_slot(struct slot *slot)
+int shpchp_power_on_slot(struct shpchp_slot *slot)
 {
 	int retval;
 
@@ -585,7 +585,7 @@ int shpchp_power_on_slot(struct slot *slot)
 	return retval;
 }
 
-int shpchp_slot_enable(struct slot *slot)
+int shpchp_slot_enable(struct shpchp_slot *slot)
 {
 	int retval;
 
@@ -598,7 +598,7 @@ int shpchp_slot_enable(struct slot *slot)
 	return retval;
 }
 
-int shpchp_slot_disable(struct slot *slot)
+int shpchp_slot_disable(struct shpchp_slot *slot)
 {
 	int retval;
 
@@ -611,7 +611,7 @@ int shpchp_slot_disable(struct slot *slot)
 	return retval;
 }
 
-static int shpc_get_cur_bus_speed(struct controller *ctrl)
+static int shpc_get_cur_bus_speed(struct shpchp_controller *ctrl)
 {
 	int retval = 0;
 	struct pci_bus *bus = ctrl->pci_dev->subordinate;
@@ -680,10 +680,10 @@ static int shpc_get_cur_bus_speed(struct controller *ctrl)
 }
 
 
-int shpchp_set_bus_speed_mode(struct slot *slot, enum pci_bus_speed value)
+int shpchp_set_bus_speed_mode(struct shpchp_slot *slot, enum pci_bus_speed value)
 {
 	int retval;
-	struct controller *ctrl = slot->ctrl;
+	struct shpchp_controller *ctrl = slot->ctrl;
 	u8 pi, cmd;
 
 	pi = shpc_readb(ctrl, PROG_INTERFACE);
@@ -748,7 +748,7 @@ int shpchp_set_bus_speed_mode(struct slot *slot, enum pci_bus_speed value)
 
 static irqreturn_t shpc_isr(int irq, void *dev_id)
 {
-	struct controller *ctrl = (struct controller *)dev_id;
+	struct shpchp_controller *ctrl = (struct shpchp_controller *)dev_id;
 	u32 serr_int, slot_reg, intr_loc, intr_loc2;
 	int hp_slot;
 
@@ -825,7 +825,7 @@ static irqreturn_t shpc_isr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int shpc_get_max_bus_speed(struct controller *ctrl)
+static int shpc_get_max_bus_speed(struct shpchp_controller *ctrl)
 {
 	int retval = 0;
 	struct pci_bus *bus = ctrl->pci_dev->subordinate;
@@ -870,7 +870,7 @@ static int shpc_get_max_bus_speed(struct controller *ctrl)
 	return retval;
 }
 
-int shpc_init(struct controller *ctrl, struct pci_dev *pdev)
+int shpc_init(struct shpchp_controller *ctrl, struct pci_dev *pdev)
 {
 	int rc = -1, num_slots = 0;
 	u8 hp_slot;

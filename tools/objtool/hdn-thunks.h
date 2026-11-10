@@ -352,8 +352,20 @@ static bool rap_thunk_peer(struct objtool_file *file, const char *name)
 {
 	struct symbol *sym = find_symbol_by_name(file->elf, name);
 
-	return sym && (is_undef_sym(sym) ? !opts.link :
-			sym->rap_kind == 27 && sym->rap_thunk_protocol);
+	if (!sym)
+		return false;
+	if (is_undef_sym(sym)) {
+		/* These three leaf services are exported for module alternatives.
+		 * Their bodies are part of, and verified with, the vmlinux RAP
+		 * image; an in-tree module can only retain an exact PC-relative
+		 * relocation to the named kernel export.  Keep every other linked
+		 * undefined thunk rejected, and keep non-module objects closed. */
+		return !opts.link || (opts.module &&
+			(!strcmp(name, "entry_untrain_ret") ||
+			 !strcmp(name, "srso_alias_untrain_ret") ||
+			 !strcmp(name, "write_ibpb")));
+	}
+	return sym->rap_kind == 27 && sym->rap_thunk_protocol;
 }
 
 /* Direct edges have already been recategorized as synthetic returns or
@@ -494,9 +506,19 @@ static int read_rap_mitigation_calls(struct objtool_file *file)
 		struct symbol span = { .sec = insn->sec, .offset = insn->offset, .len = insn->len };
 		struct rap_sequence s = { .file = file, .func = &span };
 
-		if (!callee || (strcmp(callee->name, "entry_untrain_ret") &&
-		    strcmp(callee->name, "srso_alias_untrain_ret") && strcmp(callee->name, "write_ibpb")))
+		if (!callee || !rap_thunk_name(callee->name))
 			continue;
+		/* Calls inside a fully matched thunk protocol are already closed.
+		 * Ordinary code may call only the three leaf services below; naming
+		 * a different known mitigation thunk must not bypass this gate. */
+		if (insn->rap_thunk_safe)
+			continue;
+		if (strcmp(callee->name, "entry_untrain_ret") &&
+		    strcmp(callee->name, "srso_alias_untrain_ret") &&
+		    strcmp(callee->name, "write_ibpb")) {
+			ERROR_INSN(insn, "ordinary call targets a non-leaf mitigation thunk");
+			return -1;
+		}
 		if (!rap_thunk_peer(file, callee->name) ||
 		    !rap_sequence_edge_match(&s, callee->name, true, false) || s.pos != insn->len) {
 			ERROR_INSN(insn, "mitigation call lacks a complete closed leaf protocol");

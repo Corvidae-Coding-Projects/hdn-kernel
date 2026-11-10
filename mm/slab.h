@@ -221,6 +221,15 @@ struct kmem_cache_order_objects {
 	unsigned int x;
 };
 
+/* Shared by SLUB and its independent allocation-layout observations. */
+#define OO_SHIFT	16
+#define OO_MASK		((1 << OO_SHIFT) - 1)
+
+static inline unsigned int oo_order(struct kmem_cache_order_objects x)
+{
+	return x.x >> OO_SHIFT;
+}
+
 /*
  * Slab cache management.
  */

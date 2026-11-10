@@ -227,17 +227,14 @@ struct intel_pinctrl_soc_data {
 
 const struct intel_pinctrl_soc_data *intel_pinctrl_get_soc_data(struct platform_device *pdev);
 
-struct intel_pad_context;
-struct intel_community_context;
-
 /**
  * struct intel_pinctrl_context - context to be saved during suspend-resume
  * @pads: Opaque context per pad (driver dependent)
  * @communities: Opaque context per community (driver dependent)
  */
 struct intel_pinctrl_context {
-	struct intel_pad_context *pads;
-	struct intel_community_context *communities;
+	void *pads;
+	void *communities;
 };
 
 /**

@@ -458,6 +458,14 @@ static unsigned int hdn_respectre_execute(void)
 					serialize(&it, true, "store-drain");
 				}
 			} else if (is_gimple_call(stmt)) {
+				/* BUG() emits UD2 as inline assembly followed by
+				 * __builtin_unreachable().  The latter has no machine-code
+				 * boundary to serialize; inserting before it would instead
+				 * leave CPUID after the terminal trap, which objtool correctly
+				 * rejects as unreachable.  The reviewed trap assembly and the
+				 * condition leading to it remain instrumented independently. */
+				if (gimple_call_builtin_p(stmt, BUILT_IN_UNREACHABLE))
+					continue;
 				gimple_call_set_tail(as_a<gcall *>(stmt), false);
 				bool input = !gimple_call_fndecl(stmt);
 				for (unsigned int n = 0; n < gimple_call_num_args(stmt); n++)

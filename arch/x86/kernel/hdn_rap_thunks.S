@@ -94,8 +94,10 @@ SYM_FUNC_START(__hdn_rap_jump)
 	RAP_RESTORE
 	leaq 8(%rsp), %rsp
 SYM_INNER_LABEL(__hdn_rap_jump_transfer, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
 	jmp __hdn_rap_transfer
 SYM_INNER_LABEL(__hdn_rap_jump_transfer_end, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
 SYM_FUNC_END(__hdn_rap_jump)
 RAP_ADAPTER __hdn_rap_jump
 _ASM_NOKPROBE(__hdn_rap_jump)
@@ -161,8 +163,10 @@ SYM_FUNC_START(\name)
 	RAP_RESTORE
 	leaq 8(%rsp), %rsp
 SYM_INNER_LABEL(\name\()_transfer, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
 	jmp __hdn_rap_transfer
 SYM_INNER_LABEL(\name\()_transfer_end, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
 .Lhdn_rap_bad_entry_\@:
 	movl $HDN_RAP_FAIL_RETURN_CLASS, %edi
 	jmp __hdn_rap_fail
@@ -222,6 +226,7 @@ SYM_FUNC_END(__hdn_rap_bpf_exception)
 RAP_ADAPTER __hdn_rap_bpf_exception
 _ASM_NOKPROBE(__hdn_rap_bpf_exception)
 
+#ifdef CONFIG_DYNAMIC_FTRACE_WITH_JMP
 SYM_FUNC_START(__hdn_rap_bpf_tramp_enter)
 	ANNOTATE_NOENDBR
 	cmpq %r11, (%rsp)
@@ -241,6 +246,7 @@ SYM_FUNC_START(__hdn_rap_bpf_tramp_enter)
 SYM_FUNC_END(__hdn_rap_bpf_tramp_enter)
 RAP_ADAPTER __hdn_rap_bpf_tramp_enter
 _ASM_NOKPROBE(__hdn_rap_bpf_tramp_enter)
+#endif
 
 SYM_FUNC_START(__hdn_rap_bpf_original)
 	ANNOTATE_NOENDBR
@@ -294,8 +300,10 @@ SYM_FUNC_START(__hdn_rap_return)
 	RAP_RESTORE
 	leaq 8(%rsp), %rsp
 SYM_INNER_LABEL(__hdn_rap_return_transfer, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
 	jmp __hdn_rap_transfer
 SYM_INNER_LABEL(__hdn_rap_return_transfer_end, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
 SYM_FUNC_END(__hdn_rap_return)
 RAP_ADAPTER __hdn_rap_return
 _ASM_NOKPROBE(__hdn_rap_return)
@@ -334,8 +342,10 @@ SYM_FUNC_START(\name)
 	RAP_RESTORE
 	leaq 8(%rsp), %rsp
 SYM_INNER_LABEL(\name\()_transfer, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
 	jmp __hdn_rap_transfer
 SYM_INNER_LABEL(\name\()_transfer_end, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
 SYM_FUNC_END(\name)
 RAP_ADAPTER \name
 _ASM_NOKPROBE(\name)
@@ -362,8 +372,10 @@ SYM_FUNC_START(__hdn_rap_transfer)
 	int3
 .Lhdn_rap_transfer_capture:
 SYM_INNER_LABEL(__hdn_rap_transfer_capture, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
 	movq %r11, (%rsp)
 SYM_INNER_LABEL(__hdn_rap_transfer_ready, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
 	UNWIND_HINT_FUNC
 	RET
 SYM_FUNC_END(__hdn_rap_transfer)

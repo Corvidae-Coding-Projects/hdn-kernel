@@ -924,7 +924,7 @@ static void rcu_exp_print_detail_task_stall_rnp(struct rcu_node *rnp)
 void synchronize_rcu_expedited(void)
 {
 	unsigned long flags;
-	struct rcu_exp_work rew;
+	struct rcu_exp_work *rew = NULL;
 	struct rcu_node *rnp;
 	unsigned long s;
 
@@ -967,14 +967,20 @@ void synchronize_rcu_expedited(void)
 		rcu_exp_sel_wait_wake(s);
 	} else {
 		/* Marshall arguments & schedule the expedited grace period. */
-		rew.rew_s = s;
-		synchronize_rcu_expedited_queue_work(&rew);
+		rew = kmalloc(sizeof(*rew), GFP_KERNEL);
+		if (rew) {
+			rew->rew_s = s;
+			synchronize_rcu_expedited_queue_work(rew);
+		} else {
+			rcu_exp_sel_wait_wake(s);
+		}
 	}
 
 	/* Wait for expedited grace period to complete. */
 	rnp = rcu_get_root();
 	wait_event(rnp->exp_wq[rcu_seq_ctr(s) & 0x3],
 		   sync_exp_work_done(s));
+	kfree(rew);
 
 	/* Let the next expedited grace period start. */
 	mutex_unlock(&rcu_state.exp_mutex);

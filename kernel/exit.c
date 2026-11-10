@@ -1729,17 +1729,38 @@ notask:
 
 static long do_wait(struct wait_opts *wo)
 {
+	struct wait_opts *active_wo = wo;
 	int retval;
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/*
+	 * child_wait is linked into signal->wait_chldexit and traversed by a
+	 * different task.  A private task stack is unmapped while its owner is
+	 * scheduled out, so the normal stack-resident wait_opts cannot own the
+	 * published entry.  Keep the whole callback container in stable memory;
+	 * the remaining pointers still belong to, and are only dereferenced by,
+	 * the waiting task.
+	 */
+	active_wo = kzalloc(sizeof(*active_wo), GFP_KERNEL);
+	if (!active_wo)
+		return -ENOMEM;
+	active_wo->wo_type = wo->wo_type;
+	active_wo->wo_flags = wo->wo_flags;
+	active_wo->wo_pid = wo->wo_pid;
+	active_wo->wo_info = wo->wo_info;
+	active_wo->wo_stat = wo->wo_stat;
+	active_wo->wo_rusage = wo->wo_rusage;
+#endif
 
 	trace_sched_process_wait(wo->wo_pid);
 
-	init_waitqueue_func_entry(&wo->child_wait, child_wait_callback);
-	wo->child_wait.private = current;
-	add_wait_queue(&current->signal->wait_chldexit, &wo->child_wait);
+	init_waitqueue_func_entry(&active_wo->child_wait, child_wait_callback);
+	active_wo->child_wait.private = current;
+	add_wait_queue(&current->signal->wait_chldexit, &active_wo->child_wait);
 
 	do {
 		set_current_state(TASK_INTERRUPTIBLE);
-		retval = __do_wait(wo);
+		retval = __do_wait(active_wo);
 		if (retval != -ERESTARTSYS)
 			break;
 		if (signal_pending(current))
@@ -1748,7 +1769,13 @@ static long do_wait(struct wait_opts *wo)
 	} while (1);
 
 	__set_current_state(TASK_RUNNING);
-	remove_wait_queue(&current->signal->wait_chldexit, &wo->child_wait);
+	remove_wait_queue(&current->signal->wait_chldexit,
+			  &active_wo->child_wait);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wo->wo_stat = active_wo->wo_stat;
+	wo->notask_error = active_wo->notask_error;
+	kfree(active_wo);
+#endif
 	return retval;
 }
 

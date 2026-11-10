@@ -126,9 +126,11 @@ SYM_TYPED_FUNC_START(swsusp_arch_suspend)
 	movq	%rax, restore_cr3(%rip)
 
 #ifdef CONFIG_SECURITY_HARDENING_RAP
+	FRAME_BEGIN
 	movq %rsp, %rsi
 	movl $HDN_RAP_RESUME_IMAGE, %edi
 	HDN_C_CALL hdn_rap_resume_save
+	FRAME_END
 #endif
 
 	FRAME_BEGIN
@@ -137,10 +139,14 @@ SYM_TYPED_FUNC_START(swsusp_arch_suspend)
 #ifdef CONFIG_SECURITY_HARDENING_RAP
 	/* The original image also returns here after making the snapshot.
 	 * Retire its checkpoint; the snapshot retains its own live copy. */
+	FRAME_BEGIN
 	pushq %rax
+	subq $8, %rsp
 	movl $HDN_RAP_RESUME_IMAGE, %edi
 	HDN_C_CALL hdn_rap_resume_restore
+	addq $8, %rsp
 	popq %rax
+	FRAME_END
 #endif
 	HDN_ENTRY_ROOT_RETURN
 SYM_FUNC_END(swsusp_arch_suspend)

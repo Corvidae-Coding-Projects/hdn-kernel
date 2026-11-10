@@ -291,6 +291,16 @@ asmlinkage __visible void __init __noreturn x86_64_start_kernel(char * real_mode
 	x86_64_start_reservations(real_mode_data);
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_RAP
+/* common_startup_64 remains available for secondary-CPU hotplug, while this
+ * one-time BSP bridge is the explicit retained reference into init text. */
+asmlinkage __visible void __ref __noreturn
+hdn_x86_64_start_kernel(char *real_mode_data)
+{
+	x86_64_start_kernel(real_mode_data);
+}
+#endif
+
 void __init __noreturn x86_64_start_reservations(char *real_mode_data)
 {
 	/* version is always not zero if it is copied */

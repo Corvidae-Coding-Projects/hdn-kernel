@@ -34,6 +34,8 @@ const struct hdn_stack_switch *hdn_stack_mm_prepare(struct task_struct *prev,
 void hdn_stack_mm_finish(void);
 bool hdn_stack_mm_active(const struct task_struct *owner, unsigned long address);
 bool hdn_stack_mm_async_enter(void);
+unsigned long hdn_stack_mm_async_target(const struct task_struct *owner,
+		unsigned long address, unsigned long cr3, bool gdt_window);
 void hdn_stack_mm_async_exit(unsigned long cr3, bool gdt_window);
 void hdn_stack_mm_cpu_prepare(unsigned int cpu, struct task_struct *idle);
 unsigned long hdn_stack_mm_cpu_enter(void);
@@ -60,5 +62,10 @@ static inline void hdn_stack_mm_update_end(unsigned long pfn, unsigned int offse
 		unsigned long value, unsigned int level) { }
 static inline void hdn_stack_mm_update_abort(void) { }
 static inline bool hdn_stack_mm_in_use(unsigned long begin) { return false; }
+static inline unsigned long hdn_stack_mm_async_target(const struct task_struct *owner,
+		unsigned long address, unsigned long cr3, bool gdt_window)
+{
+	return cr3;
+}
 #endif
 #endif

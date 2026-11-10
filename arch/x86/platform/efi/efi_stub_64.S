@@ -67,6 +67,7 @@ STACK_FRAME_NON_STANDARD __hdn_efi_call
 _ASM_NOKPROBE(__hdn_efi_call)
 
 SYM_FUNC_START(__hdn_efi_fault_return)
+	ENDBR
 	HDN_KEXEC_FUNC __hdn_efi_fault_return, 16
 	movabsq $0x8000000000000015, %rax /* EFI_ABORTED */
 	jmp __hdn_efi_return
@@ -75,6 +76,7 @@ STACK_FRAME_NON_STANDARD __hdn_efi_fault_return
 _ASM_NOKPROBE(__hdn_efi_fault_return)
 
 SYM_FUNC_START(__hdn_efi_return)
+	ENDBR
 	HDN_KEXEC_FUNC __hdn_efi_return, 15
 	cli
 	cld

@@ -5,6 +5,7 @@
 #include <linux/list.h>
 #include <linux/stddef.h>
 #include <linux/spinlock.h>
+#include <linux/swait_types.h>
 #include <linux/wait.h>
 #include <asm/current.h>
 
@@ -39,16 +40,6 @@
  */
 
 struct task_struct;
-
-struct swait_queue_head {
-	raw_spinlock_t		lock;
-	struct list_head	task_list;
-};
-
-struct swait_queue {
-	struct task_struct	*task;
-	struct list_head	task_list;
-};
 
 #define __SWAITQUEUE_INITIALIZER(name) {				\
 	.task		= current,					\
@@ -154,7 +145,37 @@ extern long prepare_to_swait_event(struct swait_queue_head *q, struct swait_queu
 extern void __finish_swait(struct swait_queue_head *q, struct swait_queue *wait);
 extern void finish_swait(struct swait_queue_head *q, struct swait_queue *wait);
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+struct swait_queue *hdn_swait_acquire(void);
+void hdn_swait_release(struct swait_queue *wait);
+#endif
+
 /* as per ___wait_event() but for swait, therefore "exclusive == 1" */
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+#define ___swait_event(wq, condition, state, ret, cmd)			\
+({									\
+	__label__ __out;						\
+	struct swait_queue *__wait = hdn_swait_acquire();		\
+	long __ret = ret;						\
+									\
+	for (;;) {							\
+		long __int = prepare_to_swait_event(&wq, __wait, state);\
+									\
+		if (condition)						\
+			break;						\
+									\
+		if (___wait_is_interruptible(state) && __int) {		\
+			__ret = __int;					\
+			goto __out;					\
+		}							\
+									\
+		cmd;							\
+	}								\
+	finish_swait(&wq, __wait);					\
+__out:	hdn_swait_release(__wait);					\
+	__ret;								\
+})
+#else
 #define ___swait_event(wq, condition, state, ret, cmd)			\
 ({									\
 	__label__ __out;						\
@@ -178,6 +199,7 @@ extern void finish_swait(struct swait_queue_head *q, struct swait_queue *wait);
 	finish_swait(&wq, &__wait);					\
 __out:	__ret;								\
 })
+#endif
 
 #define __swait_event(wq, condition)					\
 	(void)___swait_event(wq, condition, TASK_UNINTERRUPTIBLE, 0,	\

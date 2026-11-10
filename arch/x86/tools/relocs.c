@@ -63,6 +63,8 @@ static const char * const	sym_regex_kernel[S_NSYMTYPES] = {
 	"xen_elfnote_.+_offset$|"
 	"VDSO|"
 	"__kcfi_typeid_|"
+	/* Objtool verifies these RAP static-call result capabilities as 0 or 1. */
+	"__hdn_rap_static_zero_|"
 	"__crc_)",
 
 /*

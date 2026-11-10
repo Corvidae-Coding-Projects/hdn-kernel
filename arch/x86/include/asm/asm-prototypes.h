@@ -23,3 +23,11 @@ extern void cmpxchg8b_emu(void);
 #ifdef CONFIG_STACKPROTECTOR
 extern unsigned long __ref_stack_chk_guard;
 #endif
+
+/* genksyms identities for the exported assembly protocol endpoints. These are
+ * not C-callable ABIs; the declarations exist only for symbol versioning. */
+extern void __hdn_rap_call(void);
+extern void __hdn_rap_jump(void);
+extern void __hdn_rap_enter(void);
+extern void __hdn_rap_return(void);
+extern void __hdn_rap_static_null(void);

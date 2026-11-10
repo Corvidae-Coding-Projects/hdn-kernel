@@ -17,6 +17,7 @@
 #include <linux/panic.h>
 #include <linux/sched/debug.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 
 #include "debugfs.h"
@@ -569,9 +570,23 @@ static void kunit_run_case_catch_errors(struct kunit_suite *suite,
 					struct kunit_case *test_case,
 					struct kunit *test)
 {
-	struct kunit_try_catch_context context;
+	struct kunit_try_catch_context stack_context;
+	struct kunit_try_catch_context *context = &stack_context;
 	struct kunit_try_catch *try_catch;
 
+	/* The try body runs in a different task. A private kernel stack is not
+	 * mapped in that task's CR3, so its shared control object must not live on
+	 * the caller's stack. Ordinary profiles retain the upstream stack object. */
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS)) {
+		context = kmalloc_typed(struct kunit_try_catch_context,
+					 sizeof(*context), GFP_KERNEL | __GFP_ZERO);
+		if (!context) {
+			kunit_err(test, "failed to allocate try/catch context\n");
+			kunit_set_failure(test);
+			test_case->status = KUNIT_FAILURE;
+			return;
+		}
+	}
 	try_catch = &test->try_catch;
 
 	kunit_try_catch_init(try_catch,
@@ -579,10 +594,10 @@ static void kunit_run_case_catch_errors(struct kunit_suite *suite,
 			     kunit_try_run_case,
 			     kunit_catch_run_case,
 			     kunit_test_timeout(suite, test_case));
-	context.test = test;
-	context.suite = suite;
-	context.test_case = test_case;
-	kunit_try_catch_run(try_catch, &context);
+	context->test = test;
+	context->suite = suite;
+	context->test_case = test_case;
+	kunit_try_catch_run(try_catch, context);
 
 	/* Now run the cleanup */
 	kunit_try_catch_init(try_catch,
@@ -590,13 +605,15 @@ static void kunit_run_case_catch_errors(struct kunit_suite *suite,
 			     kunit_try_run_case_cleanup,
 			     kunit_catch_run_case_cleanup,
 			     kunit_test_timeout(suite, test_case));
-	kunit_try_catch_run(try_catch, &context);
+	kunit_try_catch_run(try_catch, context);
 
 	/* Propagate the parameter result to the test case. */
 	if (test->status == KUNIT_FAILURE)
 		test_case->status = KUNIT_FAILURE;
 	else if (test_case->status != KUNIT_FAILURE && test->status == KUNIT_SUCCESS)
 		test_case->status = KUNIT_SUCCESS;
+	if (context != &stack_context)
+		kfree(context);
 }
 
 static void kunit_print_suite_stats(struct kunit_suite *suite,
@@ -713,27 +730,45 @@ kunit_run_param_test(struct kunit_suite *suite, struct kunit_case *test_case,
 	}
 
 	while (curr_param) {
-		struct kunit param_test = {
+		struct kunit stack_param_test = {
 			.param_value = curr_param,
 			.param_index = ++test->param_index,
 			.parent = test,
 		};
-		kunit_init_test(&param_test, test_case->name, NULL);
-		param_test.log = test_case->log;
-		kunit_run_case_catch_errors(suite, test_case, &param_test);
+		struct kunit *param_test = &stack_param_test;
+
+		if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS)) {
+			param_test = kmalloc_typed(struct kunit, sizeof(*param_test),
+						  GFP_KERNEL | __GFP_ZERO);
+			if (!param_test) {
+				kunit_err(test, "failed to allocate parameter test context\n");
+				kunit_set_failure(test);
+				test_case->status = KUNIT_FAILURE;
+				kunit_update_stats(param_stats, KUNIT_FAILURE);
+				break;
+			}
+			param_test->param_value = curr_param;
+			param_test->param_index = test->param_index;
+			param_test->parent = test;
+		}
+		kunit_init_test(param_test, test_case->name, NULL);
+		param_test->log = test_case->log;
+		kunit_run_case_catch_errors(suite, test_case, param_test);
 
 		if (param_desc[0] == '\0') {
 			snprintf(param_desc, sizeof(param_desc),
-				 "param-%d", param_test.param_index);
+					 "param-%d", param_test->param_index);
 		}
 
-		kunit_print_ok_not_ok(&param_test, KUNIT_LEVEL_CASE_PARAM,
-				      param_test.status,
-				      param_test.param_index,
+		kunit_print_ok_not_ok(param_test, KUNIT_LEVEL_CASE_PARAM,
+					      param_test->status,
+					      param_test->param_index,
 				      param_desc,
-				      param_test.status_comment);
+					      param_test->status_comment);
 
-		kunit_update_stats(param_stats, param_test.status);
+		kunit_update_stats(param_stats, param_test->status);
+		if (param_test != &stack_param_test)
+			kfree(param_test);
 
 		/* Get next param. */
 		param_desc[0] = '\0';
@@ -755,34 +790,50 @@ kunit_run_one_test(struct kunit_suite *suite, struct kunit_case *test_case,
 		   struct kunit_result_stats *suite_stats,
 		   struct kunit_result_stats *total_stats)
 {
-	struct kunit test = { .param_value = NULL, .param_index = 0 };
+	struct kunit stack_test = { .param_value = NULL, .param_index = 0 };
+	struct kunit *test = &stack_test;
 	struct kunit_result_stats param_stats = { 0 };
+	bool allocation_failed = false;
 
-	kunit_init_test(&test, test_case->name, test_case->log);
-	if (test_case->status == KUNIT_SKIPPED) {
+	if (IS_ENABLED(CONFIG_SECURITY_HARDENING_PRIVATE_STACKS)) {
+		test = kmalloc_typed(struct kunit, sizeof(*test), GFP_KERNEL | __GFP_ZERO);
+		if (!test) {
+			test = &stack_test;
+			allocation_failed = true;
+		}
+	}
+	kunit_init_test(test, test_case->name, test_case->log);
+	if (allocation_failed) {
+		kunit_err(test, "failed to allocate test context\n");
+		kunit_set_failure(test);
+		test_case->status = KUNIT_FAILURE;
+		kunit_update_stats(&param_stats, test->status);
+	} else if (test_case->status == KUNIT_SKIPPED) {
 		/* Test marked as skip */
-		test.status = KUNIT_SKIPPED;
-		kunit_update_stats(&param_stats, test.status);
+		test->status = KUNIT_SKIPPED;
+		kunit_update_stats(&param_stats, test->status);
 	} else if (!test_case->generate_params) {
 		/* Non-parameterised test. */
 		test_case->status = KUNIT_SKIPPED;
-		kunit_run_case_catch_errors(suite, test_case, &test);
-		kunit_update_stats(&param_stats, test.status);
+		kunit_run_case_catch_errors(suite, test_case, test);
+		kunit_update_stats(&param_stats, test->status);
 	} else {
-		kunit_run_param_test(suite, test_case, &test, suite_stats,
+		kunit_run_param_test(suite, test_case, test, suite_stats,
 				     total_stats, &param_stats);
 	}
 	kunit_print_attr((void *)test_case, true, KUNIT_LEVEL_CASE);
 
-	kunit_print_test_stats(&test, &param_stats);
+	kunit_print_test_stats(test, &param_stats);
 
-	kunit_print_ok_not_ok(&test, KUNIT_LEVEL_CASE, test_case->status,
+	kunit_print_ok_not_ok(test, KUNIT_LEVEL_CASE, test_case->status,
 			      kunit_test_case_num(suite, test_case),
 			      test_case->name,
-			      test.status_comment);
+				      test->status_comment);
 
 	kunit_update_stats(suite_stats, test_case->status);
 	kunit_accumulate_stats(total_stats, param_stats);
+	if (test != &stack_test)
+		kfree(test);
 }
 
 

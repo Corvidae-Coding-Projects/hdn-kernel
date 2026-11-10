@@ -8,8 +8,10 @@
 
 int hdn_lifetime_shared BOOT;
 
+int hdn_lifetime_shared_call(int value);
+
 #ifndef HDN_LIFETIME_RESIDENT_CONTROL
-__attribute__((section(".init.text"), noinline))
+__attribute__((section(".init.text"), __noinline__))
 #endif
 int hdn_lifetime_shared_call(int value)
 {

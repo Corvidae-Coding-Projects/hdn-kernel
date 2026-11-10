@@ -308,6 +308,9 @@ static inline unsigned int work_static(struct work_struct *work) { return 0; }
 #define INIT_WORK(_work, _func)						\
 	__INIT_WORK((_work), (_func), 0)
 
+#define INIT_WORK_KEY(_work, _func, _key)				\
+	__INIT_WORK_KEY((_work), (_func), 0, (_key))
+
 #define INIT_WORK_ONSTACK(_work, _func)					\
 	__INIT_WORK((_work), (_func), 1)
 

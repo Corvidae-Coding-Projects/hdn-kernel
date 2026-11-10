@@ -104,7 +104,7 @@ SYM_CODE_START_NOALIGN(startup_64)
 	 * virtual addresses of common_startup_64().
 	 */
 	leaq	common_startup_64(%rip), %rdi
-	subq	.Lcommon_startup_64(%rip), %rdi
+	subq	hdn_common_startup_64_ptr(%rip), %rdi
 
 	/*
 	 * Perform pagetable fixups. Additionally, if SME is active, encrypt
@@ -139,11 +139,11 @@ SYM_CODE_START_NOALIGN(startup_64)
 
 	/* Branch to the common startup code at its kernel virtual address */
 	ANNOTATE_RETPOLINE_SAFE
-	jmp	*.Lcommon_startup_64(%rip)
+	jmp	*hdn_common_startup_64_ptr(%rip)
 SYM_CODE_END(startup_64)
 
 	__INITRODATA
-SYM_DATA_LOCAL(.Lcommon_startup_64, .quad common_startup_64)
+SYM_DATA_LOCAL(hdn_common_startup_64_ptr, .quad common_startup_64)
 
 	.text
 SYM_CODE_START(secondary_startup_64)
@@ -246,6 +246,13 @@ SYM_INNER_LABEL(common_startup_64, SYM_L_LOCAL)
 	 * Set CR4.PGE to re-enable global translations.
 	 */
 	btsl	$X86_CR4_PGE_BIT, %ecx
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/* Alternatives have already patched hdn_pt_cpu() to RDGSBASE on an AP.
+	 * Private-stack validation calls it before cpu_init_exception_handling(),
+	 * so enable the matching architectural control bit before that first call.
+	 */
+	ALTERNATIVE "", "btsl $16, %ecx", X86_FEATURE_FSGSBASE
+#endif
 	movq	%rcx, %cr4
 
 #ifdef CONFIG_SECURITY_HARDENING_RAP
@@ -523,14 +530,14 @@ SYM_INNER_LABEL(common_startup_64, SYM_L_LOCAL)
 	testq	%r12, %r12
 	jnz	wakeup_long64
 #endif
-	HDN_C_CALL start_secondary
+	HDN_C_TERMINAL_CALL start_secondary
 	ud2
 .Linitial_C_code:
 #endif
 #ifdef CONFIG_SECURITY_HARDENING_RAP
 	/* APs and S3 resumes take the sealed launch path above. This is the
 	 * native BSP handoff; writable initial_code is not an authority here. */
-	HDN_C_CALL x86_64_start_kernel
+	HDN_C_TERMINAL_CALL hdn_x86_64_start_kernel
 #else
 	ANNOTATE_RETPOLINE_SAFE
 	callq	*initial_code(%rip)

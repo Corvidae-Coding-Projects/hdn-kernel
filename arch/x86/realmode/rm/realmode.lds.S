@@ -27,10 +27,6 @@ SECTIONS
 	.rodata : {
 		*(.rodata)
 		*(.rodata.*)
-		. = ALIGN(16);
-		video_cards = .;
-		*(.videocards)
-		video_cards_end = .;
 	}
 
 	. = ALIGN(PAGE_SIZE);
@@ -53,6 +49,11 @@ SECTIONS
 
 	. = ALIGN(PAGE_SIZE);
 	.data : {
+		/* Probe results mutate card_info; keep them off descriptor pages. */
+		. = ALIGN(16);
+		video_cards = .;
+		*(.videocards)
+		video_cards_end = .;
 		*(.data)
 		*(.data.*)
 	}

@@ -230,6 +230,39 @@ void hdn_text_open(struct hdn_text_token *token, pte_t *ptep, void *address,
 		hdn_text_reject();
 }
 
+/* Page-table admission normally rejects every writable alias of sealed
+ * execmem.  The text-poke mm is the sole exception, and only while the exact
+ * prebound PTE slot is being opened by its current owner.  Binding the slot as
+ * well as the PFN prevents this lifecycle token from authorizing an alias in
+ * any other root or at any other virtual address. */
+bool hdn_text_leaf_allowed(const unsigned long *slot, unsigned long pfn,
+			   unsigned long nr, unsigned long flags)
+{
+	unsigned long irqflags;
+	unsigned int index = ARRAY_SIZE(hdn_window.pfns);
+	bool allowed;
+
+	lockdep_assert_irqs_disabled();
+	raw_spin_lock_irqsave(&hdn_text_lock, irqflags);
+	if (hdn_window.ptep && slot == (const unsigned long *)hdn_window.ptep)
+		index = 0;
+	else if (hdn_window.ptep &&
+		 slot == (const unsigned long *)(hdn_window.ptep + 1))
+		index = 1;
+	allowed = nr == 1 && index < hdn_window.nr_pages &&
+		hdn_window.state == HDN_TEXT_PREPARED &&
+		hdn_window.token &&
+		hdn_window.generation == hdn_window.token->generation &&
+		hdn_window.owner == current &&
+		hdn_window.cpu == raw_smp_processor_id() &&
+		hdn_window.pfns[index] == pfn &&
+		(flags & (_PAGE_PRESENT | _PAGE_RW | _PAGE_NX)) ==
+			 (_PAGE_PRESENT | _PAGE_RW | _PAGE_NX) &&
+		!(flags & (_PAGE_USER | _PAGE_GLOBAL));
+	raw_spin_unlock_irqrestore(&hdn_text_lock, irqflags);
+	return allowed;
+}
+
 /* Called only after clearing both aliases, leaving the mm and flushing it. */
 void hdn_text_close(struct hdn_text_token *token, pte_t *ptep)
 {
