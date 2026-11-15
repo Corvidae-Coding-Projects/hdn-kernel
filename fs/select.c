@@ -483,7 +483,12 @@ static inline __poll_t select_poll_one(int fd, poll_table *wait, unsigned long i
 static noinline_for_stack int do_select(int n, fd_set_bits *fds, struct timespec64 *end_time)
 {
 	ktime_t expire, *to = NULL;
-	struct poll_wqueues table;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct poll_wqueues *table;
+#else
+	struct poll_wqueues table_storage;
+	struct poll_wqueues *table = &table_storage;
+#endif
 	poll_table *wait;
 	int retval, i, timed_out = 0;
 	u64 slack = 0;
@@ -498,8 +503,18 @@ static noinline_for_stack int do_select(int n, fd_set_bits *fds, struct timespec
 		return retval;
 	n = retval;
 
-	poll_initwait(&table);
-	wait = &table.pt;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	/*
+	 * The inline poll entries are published on remote waitqueues while
+	 * this task sleeps.  Its private kernel stack is then unmapped, so the
+	 * whole callback container must remain in stable memory until removal.
+	 */
+	table = kzalloc(sizeof(*table), GFP_KERNEL);
+	if (!table)
+		return -ENOMEM;
+#endif
+	poll_initwait(table);
+	wait = &table->pt;
 	if (end_time && !end_time->tv_sec && !end_time->tv_nsec) {
 		wait->_qproc = NULL;
 		timed_out = 1;
@@ -574,8 +589,8 @@ static noinline_for_stack int do_select(int n, fd_set_bits *fds, struct timespec
 		wait->_qproc = NULL;
 		if (retval || timed_out || signal_pending(current))
 			break;
-		if (table.error) {
-			retval = table.error;
+		if (table->error) {
+			retval = table->error;
 			break;
 		}
 
@@ -600,12 +615,15 @@ static noinline_for_stack int do_select(int n, fd_set_bits *fds, struct timespec
 			to = &expire;
 		}
 
-		if (!poll_schedule_timeout(&table, TASK_INTERRUPTIBLE,
+		if (!poll_schedule_timeout(table, TASK_INTERRUPTIBLE,
 					   to, slack))
 			timed_out = 1;
 	}
 
-	poll_freewait(&table);
+	poll_freewait(table);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	kfree(table);
+#endif
 
 	return retval;
 }
@@ -963,7 +981,12 @@ static int do_poll(struct poll_list *list, struct poll_wqueues *wait,
 static int do_sys_poll(struct pollfd __user *ufds, unsigned int nfds,
 		struct timespec64 *end_time)
 {
-	struct poll_wqueues table;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct poll_wqueues *table;
+#else
+	struct poll_wqueues table_storage;
+	struct poll_wqueues *table = &table_storage;
+#endif
 	int err = -EFAULT, fdcount;
 	/* Allocate small arguments on the stack to save memory and be
 	   faster - use long to make sure the buffer is aligned properly
@@ -1000,9 +1023,19 @@ static int do_sys_poll(struct pollfd __user *ufds, unsigned int nfds,
 		}
 	}
 
-	poll_initwait(&table);
-	fdcount = do_poll(head, &table, end_time);
-	poll_freewait(&table);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	table = kzalloc(sizeof(*table), GFP_KERNEL);
+	if (!table) {
+		err = -ENOMEM;
+		goto out_fds;
+	}
+#endif
+	poll_initwait(table);
+	fdcount = do_poll(head, table, end_time);
+	poll_freewait(table);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	kfree(table);
+#endif
 
 	if (!user_write_access_begin(ufds, nfds * sizeof(*ufds)))
 		goto out_fds;

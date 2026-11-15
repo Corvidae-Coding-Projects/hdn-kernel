@@ -8,6 +8,7 @@
 #include <linux/compat.h>
 #include <linux/uaccess.h>
 #include <linux/cleanup.h>
+#include <linux/slab.h>
 
 #ifdef CONFIG_PREEMPT_RT
 #include <linux/rcuwait.h>
@@ -210,6 +211,40 @@ struct futex_q {
 
 extern const struct futex_q futex_q_init;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+static inline struct futex_q *hdn_futex_q_acquire(void)
+{
+	struct futex_q *q = current->hdn_futex_q;
+
+	if (unlikely(current->hdn_futex_q_active))
+		BUG();
+	if (!q) {
+		/* requeue_pi_key is remotely dereferenced while the task sleeps,
+		 * so keep its target in the same non-stack allocation. */
+		q = kmalloc(sizeof(*q) + sizeof(union futex_key), GFP_KERNEL);
+		if (!q)
+			return NULL;
+		current->hdn_futex_q = q;
+	}
+	current->hdn_futex_q_active = true;
+	*q = futex_q_init;
+	return q;
+}
+
+static inline union futex_key *hdn_futex_q_requeue_key(struct futex_q *q)
+{
+	return (union futex_key *)(q + 1);
+}
+
+static inline void hdn_futex_q_release(struct futex_q *q)
+{
+	if (unlikely(q != current->hdn_futex_q ||
+		     !current->hdn_futex_q_active))
+		BUG();
+	current->hdn_futex_q_active = false;
+}
+#endif
+
 enum futex_access {
 	FUTEX_READ,
 	FUTEX_WRITE
@@ -221,6 +256,7 @@ extern void futex_q_lockptr_lock(struct futex_q *q);
 extern struct hrtimer_sleeper *
 futex_setup_timer(ktime_t *time, struct hrtimer_sleeper *timeout,
 		  int flags, u64 range_ns);
+extern void futex_destroy_timer(struct hrtimer_sleeper *timeout);
 
 extern struct futex_hash_bucket *futex_hash(union futex_key *key);
 #ifdef CONFIG_FUTEX_PRIVATE_HASH

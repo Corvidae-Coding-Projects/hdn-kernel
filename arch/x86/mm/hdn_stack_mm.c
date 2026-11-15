@@ -470,7 +470,11 @@ void noinstr hdn_stack_mm_cpu_prepare(unsigned int cpu, struct task_struct *idle
 	struct hdn_stack_startup *startup;
 	struct hdn_stack_storage *storage;
 	unsigned long flags = native_local_irq_save();
-	unsigned long sp = round_down((unsigned long)task_pt_regs(idle), 16);
+	/* Match the ordinary x86 AP launch stack exactly.  The frame-pointer
+	 * unwinder recognizes its terminal frame relative to task_pt_regs();
+	 * rounding this down shifts that sentinel and makes a valid idle-task
+	 * backtrace look corrupt. */
+	unsigned long sp = (unsigned long)task_pt_regs(idle);
 	unsigned int index;
 
 	if (!READ_ONCE(hdn_stack_mm_ready) || cpu >= NR_CPUS || cpu == hdn_pt_cpu() ||

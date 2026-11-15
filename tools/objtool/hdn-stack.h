@@ -1,4 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* Require a RIP-relative LEA of the following bound call's return site and an
+ * exact store to the canonical last-frame slot at (%rsp). */
+static bool rap_stack_unwind_boundary(struct rap_sequence *s)
+{
+	return rap_sequence_bytes(s,
+		"\x48\x8d\x05\x10\0\0\0\x48\x89\x04\x24", 11);
+}
+
 /* The private boot-stack handoff abandons the incoming CR3 and stack. Match
  * its entire fixed protocol instead of exempting a generic stack switch. */
 static int verify_rap_stack_bootstrap(struct objtool_file *file, struct symbol *func)
@@ -13,7 +21,9 @@ static int verify_rap_stack_bootstrap(struct objtool_file *file, struct symbol *
 	    is_weak_sym(func) || strcmp(func->sec->name, ".init.text") ||
 	    !rap_sequence_bytes(&s, "\x4c\x8b\x5f\x08\x48\x8b\x17\x41\x0f\x22\xdb"
 				   "\x48\x89\xd4\x31\xed", 16) ||
+	    !rap_stack_unwind_boundary(&s) ||
 	    !rap_entry_call(&s, "hdn_stack_mm_finish") ||
+	    !rap_stack_unwind_boundary(&s) ||
 	    !rap_entry_call(&s, "hdn_stack_bootstrap_continue") ||
 	    !rap_sequence_bytes(&s, "\x0f\x0b", 2) || s.pos != func->len)
 		goto bad;

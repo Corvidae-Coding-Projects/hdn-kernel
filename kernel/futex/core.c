@@ -466,9 +466,19 @@ futex_setup_timer(ktime_t *time, struct hrtimer_sleeper *timeout,
 	if (!time)
 		return NULL;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (unlikely(current->hdn_hrtimeout_active))
+		BUG();
+	current->hdn_hrtimeout_active = true;
+	timeout = &current->hdn_hrtimeout;
+	hrtimer_setup_sleeper(timeout,
+			       (flags & FLAGS_CLOCKRT) ? CLOCK_REALTIME : CLOCK_MONOTONIC,
+			       HRTIMER_MODE_ABS);
+#else
 	hrtimer_setup_sleeper_on_stack(timeout,
 				       (flags & FLAGS_CLOCKRT) ? CLOCK_REALTIME : CLOCK_MONOTONIC,
 				       HRTIMER_MODE_ABS);
+#endif
 	/*
 	 * If range_ns is 0, calling hrtimer_set_expires_range_ns() is
 	 * effectively the same as calling hrtimer_set_expires().
@@ -476,6 +486,23 @@ futex_setup_timer(ktime_t *time, struct hrtimer_sleeper *timeout,
 	hrtimer_set_expires_range_ns(&timeout->timer, *time, range_ns);
 
 	return timeout;
+}
+
+void futex_destroy_timer(struct hrtimer_sleeper *timeout)
+{
+	if (!timeout)
+		return;
+
+	hrtimer_cancel(&timeout->timer);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (unlikely(timeout != &current->hdn_hrtimeout ||
+		     !current->hdn_hrtimeout_active ||
+		     hrtimer_active(&timeout->timer)))
+		BUG();
+	current->hdn_hrtimeout_active = false;
+#else
+	destroy_hrtimer_on_stack(&timeout->timer);
+#endif
 }
 
 /*
@@ -1511,6 +1538,12 @@ void futex_exit_release(struct task_struct *tsk)
 	futex_cleanup_begin(tsk);
 	futex_cleanup(tsk);
 	futex_cleanup_end(tsk, FUTEX_STATE_DEAD);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (unlikely(tsk->hdn_futex_q_active))
+		BUG();
+	kfree(tsk->hdn_futex_q);
+	tsk->hdn_futex_q = NULL;
+#endif
 }
 
 static void futex_hash_bucket_init(struct futex_hash_bucket *fhb,

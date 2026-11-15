@@ -2167,15 +2167,50 @@ static int __sched do_nanosleep(struct hrtimer_sleeper *t, enum hrtimer_mode mod
 	return -ERESTART_RESTARTBLOCK;
 }
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+static struct hrtimer_sleeper *hdn_nanosleep_timer_acquire(clockid_t clockid,
+		const enum hrtimer_mode mode)
+{
+	struct hrtimer_sleeper *timer = &current->hdn_hrtimeout;
+
+	if (unlikely(current->hdn_hrtimeout_active))
+		BUG();
+	current->hdn_hrtimeout_active = true;
+	hrtimer_setup_sleeper(timer, clockid, mode);
+	return timer;
+}
+
+static void hdn_nanosleep_timer_release(struct hrtimer_sleeper *timer)
+{
+	if (unlikely(timer != &current->hdn_hrtimeout ||
+		     !current->hdn_hrtimeout_active ||
+		     hrtimer_active(&timer->timer)))
+		BUG();
+	current->hdn_hrtimeout_active = false;
+}
+#endif
+
 static long __sched hrtimer_nanosleep_restart(struct restart_block *restart)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct hrtimer_sleeper *t;
+#else
 	struct hrtimer_sleeper t;
+#endif
 	int ret;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	t = hdn_nanosleep_timer_acquire(restart->nanosleep.clockid,
+					 HRTIMER_MODE_ABS);
+	hrtimer_set_expires(&t->timer, restart->nanosleep.expires);
+	ret = do_nanosleep(t, HRTIMER_MODE_ABS);
+	hdn_nanosleep_timer_release(t);
+#else
 	hrtimer_setup_sleeper_on_stack(&t, restart->nanosleep.clockid, HRTIMER_MODE_ABS);
 	hrtimer_set_expires(&t.timer, restart->nanosleep.expires);
 	ret = do_nanosleep(&t, HRTIMER_MODE_ABS);
 	destroy_hrtimer_on_stack(&t.timer);
+#endif
 	return ret;
 }
 
@@ -2183,12 +2218,22 @@ long hrtimer_nanosleep(ktime_t rqtp, const enum hrtimer_mode mode,
 		       const clockid_t clockid)
 {
 	struct restart_block *restart;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct hrtimer_sleeper *t;
+#else
 	struct hrtimer_sleeper t;
+#endif
 	int ret = 0;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	t = hdn_nanosleep_timer_acquire(clockid, mode);
+	hrtimer_set_expires_range_ns(&t->timer, rqtp, current->timer_slack_ns);
+	ret = do_nanosleep(t, mode);
+#else
 	hrtimer_setup_sleeper_on_stack(&t, clockid, mode);
 	hrtimer_set_expires_range_ns(&t.timer, rqtp, current->timer_slack_ns);
 	ret = do_nanosleep(&t, mode);
+#endif
 	if (ret != -ERESTART_RESTARTBLOCK)
 		goto out;
 
@@ -2199,11 +2244,20 @@ long hrtimer_nanosleep(ktime_t rqtp, const enum hrtimer_mode mode,
 	}
 
 	restart = &current->restart_block;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	restart->nanosleep.clockid = t->timer.base->clockid;
+	restart->nanosleep.expires = hrtimer_get_expires(&t->timer);
+#else
 	restart->nanosleep.clockid = t.timer.base->clockid;
 	restart->nanosleep.expires = hrtimer_get_expires(&t.timer);
+#endif
 	set_restart_fn(restart, hrtimer_nanosleep_restart);
 out:
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_nanosleep_timer_release(t);
+#else
 	destroy_hrtimer_on_stack(&t.timer);
+#endif
 	return ret;
 }
 

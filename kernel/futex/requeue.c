@@ -792,8 +792,18 @@ int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
 	struct rt_mutex_waiter stack_rt_waiter;
 	struct rt_mutex_waiter *rt_waiter = &stack_rt_waiter;
 #endif
-	union futex_key key2 = FUTEX_KEY_INIT;
-	struct futex_q q = futex_q_init;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	union futex_key *key2;
+#else
+	union futex_key stack_key2 = FUTEX_KEY_INIT;
+	union futex_key *key2 = &stack_key2;
+#endif
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct futex_q *q;
+#else
+	struct futex_q stack_q = futex_q_init;
+	struct futex_q *q = &stack_q;
+#endif
 	struct rt_mutex_base *pi_mutex;
 	int res, ret;
 
@@ -806,10 +816,17 @@ int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
 	if (!bitset)
 		return -EINVAL;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	q = hdn_futex_q_acquire();
+	if (!q)
+		return -ENOMEM;
+	key2 = hdn_futex_q_requeue_key(q);
+	*key2 = FUTEX_KEY_INIT;
+#endif
 	to = futex_setup_timer(abs_time, &timeout, flags,
 			       current->timer_slack_ns);
 
-	ret = get_futex_key(uaddr2, flags, &key2, FUTEX_WRITE);
+	ret = get_futex_key(uaddr2, flags, key2, FUTEX_WRITE);
 	if (unlikely(ret != 0))
 		goto out;
 
@@ -818,28 +835,28 @@ int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
 #endif
 	rt_mutex_init_waiter(rt_waiter);
 
-	q.bitset = bitset;
-	q.rt_waiter = rt_waiter;
-	q.requeue_pi_key = &key2;
+	q->bitset = bitset;
+	q->rt_waiter = rt_waiter;
+	q->requeue_pi_key = key2;
 
 	/*
 	 * Prepare to wait on uaddr. On success, it holds hb->lock and q
 	 * is initialized.
 	 */
-	ret = futex_wait_setup(uaddr, val, flags, &q, &key2, current);
+	ret = futex_wait_setup(uaddr, val, flags, q, key2, current);
 	if (ret)
 		goto out;
 
 	/* Queue the futex_q, drop the hb lock, wait for wakeup. */
-	futex_do_wait(&q, to);
+	futex_do_wait(q, to);
 
-	switch (futex_requeue_pi_wakeup_sync(&q)) {
+	switch (futex_requeue_pi_wakeup_sync(q)) {
 	case Q_REQUEUE_PI_IGNORE:
 		{
-			CLASS(hb, hb)(&q.key);
+			CLASS(hb, hb)(&q->key);
 			/* The waiter is still on uaddr1 */
 			spin_lock(&hb->lock);
-			ret = handle_early_requeue_pi_wakeup(hb, &q, to);
+			ret = handle_early_requeue_pi_wakeup(hb, q, to);
 			spin_unlock(&hb->lock);
 		}
 #ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
@@ -854,15 +871,15 @@ int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
 		hdn_rt_mutex_waiter_release(rt_waiter);
 		rt_waiter = NULL;
 #endif
-		if (q.pi_state && (q.pi_state->owner != current)) {
-			futex_q_lockptr_lock(&q);
-			ret = fixup_pi_owner(uaddr2, &q, true);
+		if (q->pi_state && (q->pi_state->owner != current)) {
+			futex_q_lockptr_lock(q);
+			ret = fixup_pi_owner(uaddr2, q, true);
 			/*
 			 * Drop the reference to the pi state which the
 			 * requeue_pi() code acquired for us.
 			 */
-			put_pi_state(q.pi_state);
-			spin_unlock(q.lock_ptr);
+			put_pi_state(q->pi_state);
+			spin_unlock(q->lock_ptr);
 			/*
 			 * Adjust the return value. It's either -EFAULT or
 			 * success (1) but the caller expects 0 for success.
@@ -873,7 +890,7 @@ int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
 
 	case Q_REQUEUE_PI_DONE:
 		/* Requeue completed. Current is 'pi_blocked_on' the rtmutex */
-		pi_mutex = &q.pi_state->pi_mutex;
+		pi_mutex = &q->pi_state->pi_mutex;
 		ret = rt_mutex_wait_proxy_lock(pi_mutex, to, rt_waiter);
 
 		/*
@@ -887,12 +904,12 @@ int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
 		hdn_rt_mutex_waiter_release(rt_waiter);
 		rt_waiter = NULL;
 #endif
-		futex_q_lockptr_lock(&q);
+		futex_q_lockptr_lock(q);
 		/*
 		 * Fixup the pi_state owner and possibly acquire the lock if we
 		 * haven't already.
 		 */
-		res = fixup_pi_owner(uaddr2, &q, !ret);
+		res = fixup_pi_owner(uaddr2, q, !ret);
 		/*
 		 * If fixup_pi_owner() returned an error, propagate that.  If it
 		 * acquired the lock, clear -ETIMEDOUT or -EINTR.
@@ -900,8 +917,8 @@ int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
 		if (res)
 			ret = (res < 0) ? res : 0;
 
-		futex_unqueue_pi(&q);
-		spin_unlock(q.lock_ptr);
+		futex_unqueue_pi(q);
+		spin_unlock(q->lock_ptr);
 
 		if (ret == -EINTR) {
 			/*
@@ -918,8 +935,8 @@ int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
 	default:
 		BUG();
 	}
-	if (q.drop_hb_ref) {
-		CLASS(hb, hb)(&q.key);
+	if (q->drop_hb_ref) {
+		CLASS(hb, hb)(&q->key);
 		/* Additional reference from requeue_pi_wake_futex() */
 		futex_hash_put(hb);
 	}
@@ -929,10 +946,10 @@ out:
 	if (rt_waiter)
 		hdn_rt_mutex_waiter_release(rt_waiter);
 #endif
-	if (to) {
-		hrtimer_cancel(&to->timer);
-		destroy_hrtimer_on_stack(&to->timer);
-	}
+	futex_destroy_timer(to);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_futex_q_release(q);
+#endif
 	return ret;
 }
 

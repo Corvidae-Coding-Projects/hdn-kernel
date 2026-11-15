@@ -666,32 +666,46 @@ retry_private:
 int __futex_wait(u32 __user *uaddr, unsigned int flags, u32 val,
 		 struct hrtimer_sleeper *to, u32 bitset)
 {
-	struct futex_q q = futex_q_init;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct futex_q *q;
+#else
+	struct futex_q stack_q = futex_q_init;
+	struct futex_q *q = &stack_q;
+#endif
 	int ret;
 
 	if (!bitset)
 		return -EINVAL;
 
-	q.bitset = bitset;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	q = hdn_futex_q_acquire();
+	if (!q)
+		return -ENOMEM;
+#endif
+	q->bitset = bitset;
 
 retry:
 	/*
 	 * Prepare to wait on uaddr. On success, it holds hb->lock and q
 	 * is initialized.
 	 */
-	ret = futex_wait_setup(uaddr, val, flags, &q, NULL, current);
+	ret = futex_wait_setup(uaddr, val, flags, q, NULL, current);
 	if (ret)
-		return ret;
+		goto out;
 
 	/* futex_queue and wait for wakeup, timeout, or a signal. */
-	futex_do_wait(&q, to);
+	futex_do_wait(q, to);
 
 	/* If we were woken (and unqueued), we succeeded, whatever. */
-	if (!futex_unqueue(&q))
-		return 0;
+	if (!futex_unqueue(q)) {
+		ret = 0;
+		goto out;
+	}
 
-	if (to && !to->task)
-		return -ETIMEDOUT;
+	if (to && !to->task) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
 
 	/*
 	 * We expect signal_pending(current), but we might be the
@@ -700,7 +714,12 @@ retry:
 	if (!signal_pending(current))
 		goto retry;
 
-	return -ERESTARTSYS;
+	ret = -ERESTARTSYS;
+out:
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_futex_q_release(q);
+#endif
+	return ret;
 }
 
 int futex_wait(u32 __user *uaddr, unsigned int flags, u32 val, ktime_t *abs_time, u32 bitset)
@@ -718,8 +737,7 @@ int futex_wait(u32 __user *uaddr, unsigned int flags, u32 val, ktime_t *abs_time
 	if (!to)
 		return ret;
 
-	hrtimer_cancel(&to->timer);
-	destroy_hrtimer_on_stack(&to->timer);
+	futex_destroy_timer(to);
 
 	if (ret == -ERESTARTSYS) {
 		restart = &current->restart_block;

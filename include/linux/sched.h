@@ -67,6 +67,7 @@ struct bpf_net_context;
 struct capture_control;
 struct cfs_rq;
 struct fs_struct;
+struct futex_q;
 struct futex_pi_state;
 struct io_context;
 struct io_uring_task;
@@ -1253,10 +1254,15 @@ struct task_struct {
 	bool				hdn_wait_active;
 	struct wait_bit_queue_entry hdn_wait_bit;
 	bool				hdn_wait_bit_active;
+	struct wait_page_queue		hdn_wait_page;
+	bool				hdn_wait_page_active;
 	struct timer_list		hdn_timeout_timer;
 	bool				hdn_timeout_active;
 	struct hrtimer_sleeper		hdn_hrtimeout;
 	bool				hdn_hrtimeout_active;
+	/* Futex hash chains may retain a waiter while this stack is unmapped. */
+	struct futex_q			*hdn_futex_q;
+	bool				hdn_futex_q_active;
 	union hdn_lock_waiter		hdn_lock_waiter;
 	enum hdn_lock_waiter_type	hdn_lock_waiter_active;
 	/* A synchronous remote CPU must not dequeue a descriptor from this

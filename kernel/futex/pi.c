@@ -925,7 +925,12 @@ int futex_lock_pi(u32 __user *uaddr, unsigned int flags, ktime_t *time, int tryl
 	struct rt_mutex_waiter stack_rt_waiter;
 	struct rt_mutex_waiter *rt_waiter = &stack_rt_waiter;
 #endif
-	struct futex_q q = futex_q_init;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct futex_q *q;
+#else
+	struct futex_q stack_q = futex_q_init;
+	struct futex_q *q = &stack_q;
+#endif
 	DEFINE_WAKE_Q(wake_q);
 	int res, ret;
 
@@ -935,21 +940,26 @@ int futex_lock_pi(u32 __user *uaddr, unsigned int flags, ktime_t *time, int tryl
 	if (refill_pi_state_cache())
 		return -ENOMEM;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	q = hdn_futex_q_acquire();
+	if (!q)
+		return -ENOMEM;
+#endif
 	to = futex_setup_timer(time, &timeout, flags, 0);
 
 retry:
 	exiting = NULL;
-	ret = get_futex_key(uaddr, flags, &q.key, FUTEX_WRITE);
+	ret = get_futex_key(uaddr, flags, &q->key, FUTEX_WRITE);
 	if (unlikely(ret != 0))
 		goto out;
 
 retry_private:
 	if (1) {
-		CLASS(hb, hb)(&q.key);
+		CLASS(hb, hb)(&q->key);
 
-		futex_q_lock(&q, hb);
+		futex_q_lock(q, hb);
 
-		ret = futex_lock_pi_atomic(uaddr, hb, &q.key, &q.pi_state, current,
+		ret = futex_lock_pi_atomic(uaddr, hb, &q->key, &q->pi_state, current,
 					   &exiting, 0);
 		if (unlikely(ret)) {
 			/*
@@ -985,15 +995,15 @@ retry_private:
 			}
 		}
 
-		WARN_ON(!q.pi_state);
+		WARN_ON(!q->pi_state);
 
 		/*
 		 * Only actually queue now that the atomic ops are done:
 		 */
-		__futex_queue(&q, hb, current);
+		__futex_queue(q, hb, current);
 
 		if (trylock) {
-			ret = rt_mutex_futex_trylock(&q.pi_state->pi_mutex);
+			ret = rt_mutex_futex_trylock(&q->pi_state->pi_mutex);
 			/* Fixup the trylock return value: */
 			ret = ret ? 0 : -EWOULDBLOCK;
 			goto no_block;
@@ -1033,15 +1043,15 @@ retry_private:
 		 * handoff -- such that the latter can observe the futex_q::pi_state
 		 * before __rt_mutex_start_proxy_lock() is done.
 		 */
-		raw_spin_lock_irq(&q.pi_state->pi_mutex.wait_lock);
-		spin_unlock(q.lock_ptr);
+		raw_spin_lock_irq(&q->pi_state->pi_mutex.wait_lock);
+		spin_unlock(q->lock_ptr);
 		/*
 		 * __rt_mutex_start_proxy_lock() unconditionally enqueues the @rt_waiter
 		 * such that futex_unlock_pi() is guaranteed to observe the waiter when
 		 * it sees the futex_q::pi_state.
 		 */
-		ret = __rt_mutex_start_proxy_lock(&q.pi_state->pi_mutex, rt_waiter, current, &wake_q);
-		raw_spin_unlock_irq_wake(&q.pi_state->pi_mutex.wait_lock, &wake_q);
+		ret = __rt_mutex_start_proxy_lock(&q->pi_state->pi_mutex, rt_waiter, current, &wake_q);
+		raw_spin_unlock_irq_wake(&q->pi_state->pi_mutex.wait_lock, &wake_q);
 
 		if (ret) {
 			if (ret == 1)
@@ -1052,7 +1062,7 @@ retry_private:
 		if (unlikely(to))
 			hrtimer_sleeper_start_expires(to, HRTIMER_MODE_ABS);
 
-		ret = rt_mutex_wait_proxy_lock(&q.pi_state->pi_mutex, to, rt_waiter);
+		ret = rt_mutex_wait_proxy_lock(&q->pi_state->pi_mutex, to, rt_waiter);
 
 cleanup:
 		/*
@@ -1073,7 +1083,7 @@ cleanup:
 		 *
 		 * What could possibly go wrong...
 		 */
-		if (ret && !rt_mutex_cleanup_proxy_lock(&q.pi_state->pi_mutex, rt_waiter))
+		if (ret && !rt_mutex_cleanup_proxy_lock(&q->pi_state->pi_mutex, rt_waiter))
 			ret = 0;
 
 #ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
@@ -1086,7 +1096,7 @@ cleanup:
 		 * spinlock/rtlock (which might enqueue its own rt_waiter) and fix up
 		 * the
 		 */
-		futex_q_lockptr_lock(&q);
+		futex_q_lockptr_lock(q);
 		/*
 		 * Waiter is unqueued.
 		 */
@@ -1096,7 +1106,7 @@ no_block:
 		 * Fixup the pi_state owner and possibly acquire the lock if we
 		 * haven't already.
 		 */
-		res = fixup_pi_owner(uaddr, &q, !ret);
+		res = fixup_pi_owner(uaddr, q, !ret);
 		/*
 		 * If fixup_pi_owner() returned an error, propagate that.  If it acquired
 		 * the lock, clear our -ETIMEDOUT or -EINTR.
@@ -1104,10 +1114,10 @@ no_block:
 		if (res)
 			ret = (res < 0) ? res : 0;
 
-		futex_unqueue_pi(&q);
-		spin_unlock(q.lock_ptr);
-		if (q.drop_hb_ref) {
-			CLASS(hb, hb)(&q.key);
+		futex_unqueue_pi(q);
+		spin_unlock(q->lock_ptr);
+		if (q->drop_hb_ref) {
+			CLASS(hb, hb)(&q->key);
 			/* Additional reference from futex_unlock_pi() */
 			futex_hash_put(hb);
 		}
@@ -1135,10 +1145,10 @@ out:
 	if (rt_waiter)
 		hdn_rt_mutex_waiter_release(rt_waiter);
 #endif
-	if (to) {
-		hrtimer_cancel(&to->timer);
-		destroy_hrtimer_on_stack(&to->timer);
-	}
+	futex_destroy_timer(to);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_futex_q_release(q);
+#endif
 	return ret != -EINTR ? ret : -ERESTARTNOINTR;
 }
 

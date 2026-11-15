@@ -16,9 +16,18 @@ SYM_FUNC_START(__hdn_stack_bootstrap)
 	movq %rdx, %rsp
 	xorl %ebp, %ebp
 	UNWIND_HINT_END_OF_STACK
-	/* The bootstrap SP is 16-byte aligned before each C ABI call. */
+	/* The bootstrap SP is 16-byte aligned before each C ABI call. It is
+	 * also the canonical last-frame return slot immediately below
+	 * task_pt_regs(). Seed that slot with each call's return site so the
+	 * frame-pointer unwinder recognizes this one-way stack boundary. */
+	leaq .Lhdn_stack_mm_finished(%rip), %rax
+	movq %rax, (%rsp)
 	HDN_C_CALL hdn_stack_mm_finish
+.Lhdn_stack_mm_finished:
+	leaq .Lhdn_stack_bootstrap_continued(%rip), %rax
+	movq %rax, (%rsp)
 	HDN_C_CALL hdn_stack_bootstrap_continue
+.Lhdn_stack_bootstrap_continued:
 	ud2
 SYM_FUNC_END(__hdn_stack_bootstrap)
 STACK_FRAME_NON_STANDARD __hdn_stack_bootstrap

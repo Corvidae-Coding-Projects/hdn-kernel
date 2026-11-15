@@ -5,6 +5,7 @@
 #include <linux/list.h>
 #include <linux/spinlock_types.h>
 
+struct folio;
 struct wait_queue_entry;
 typedef int (*wait_queue_func_t)(struct wait_queue_entry *wq_entry,
 		unsigned int mode, int flags, void *key);
@@ -30,6 +31,12 @@ struct wait_bit_key {
 struct wait_bit_queue_entry {
 	struct wait_bit_key	key;
 	struct wait_queue_entry	wq_entry;
+};
+
+struct wait_page_queue {
+	struct folio		*folio;
+	int			bit_nr;
+	struct wait_queue_entry	wait;
 };
 
 #endif /* _LINUX_WAIT_TYPES_H */

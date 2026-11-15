@@ -172,11 +172,15 @@ int main(int argc, char **argv)
 	unsigned int cpus, online;
 	unsigned int hotplugged;
 	unsigned long long switches_before, switches_after, async_before, async_after;
-	struct sigaction action = { .sa_handler = signal_handler };
+	struct sigaction action = {
+		.sa_handler = signal_handler,
+		.sa_flags = SA_RESTART,
+	};
 	struct itimerval timer = { .it_interval = { .tv_usec = 1000 },
 				   .it_value = { .tv_usec = 1000 } };
 	pthread_t *threads;
 	struct worker *workers;
+	const char *phase = "startup";
 	int failed = 0;
 
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -185,13 +189,16 @@ int main(int argc, char **argv)
 		goto fail;
 	cpus = configured;
 	online = available;
+	phase = "mount-and-initial-counters";
 	if (!iterations || mount_interfaces() ||
 	    read_counter("private_stacks_task_switches", &switches_before) ||
 	    read_counter("private_stacks_async_root_entries", &async_before))
 		goto fail;
+	phase = "signal-setup";
 	if (sigaction(SIGALRM, &action, NULL) || sigaction(SIGUSR1, &action, NULL) ||
 	    setitimer(ITIMER_REAL, &timer, NULL))
 		goto fail;
+	phase = "thread-allocation";
 	threads = calloc(online, sizeof(*threads));
 	workers = calloc(online, sizeof(*workers));
 	if (!threads || !workers)
@@ -210,15 +217,28 @@ int main(int argc, char **argv)
 	}
 	free(workers);
 	free(threads);
-	if (failed || fork_teardown(iterations / 32 + 1) || ptrace_register_roundtrip())
+	phase = "worker-threads";
+	if (failed)
+		goto fail;
+	phase = "fork-teardown";
+	if (fork_teardown(iterations / 32 + 1))
+		goto fail;
+	phase = "ptrace-registers";
+	if (ptrace_register_roundtrip())
 		goto fail;
 	/* SysRq-l uses the architecture backtrace/NMI path; SysRq-t walks and
 	 * attributes sleeping task stacks through the privileged unwinder. */
-	if (write_text("/proc/sysrq-trigger", "l\n") || write_text("/proc/sysrq-trigger", "t\n"))
+	phase = "sysrq-backtrace";
+	if (write_text("/proc/sysrq-trigger", "l\n"))
 		goto fail;
+	phase = "sysrq-task-state";
+	if (write_text("/proc/sysrq-trigger", "t\n"))
+		goto fail;
+	phase = "cpu-hotplug";
 	hotplugged = hotplug_roundtrip(cpus);
 	if (cpus > 1 && !hotplugged)
 		goto fail;
+	phase = "final-counters";
 	if (read_counter("private_stacks_task_switches", &switches_after) ||
 	    read_counter("private_stacks_async_root_entries", &async_after) ||
 	    switches_after <= switches_before || async_after <= async_before || !signals_seen)
@@ -230,7 +250,7 @@ int main(int argc, char **argv)
 		reboot(RB_POWER_OFF);
 	return 0;
 fail:
-	printf("HDN_PRIVATE_STACK_STRESS_FAIL errno=%d\n", errno);
+	printf("HDN_PRIVATE_STACK_STRESS_FAIL phase=%s errno=%d\n", phase, errno);
 	if (getpid() == 1)
 		reboot(RB_POWER_OFF);
 	return 1;

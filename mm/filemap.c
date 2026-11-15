@@ -1225,6 +1225,25 @@ enum behavior {
 			 */
 };
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+static struct wait_page_queue *hdn_wait_page_acquire(void)
+{
+	if (unlikely(current->hdn_wait_page_active))
+		BUG();
+	current->hdn_wait_page_active = true;
+	return &current->hdn_wait_page;
+}
+
+static void hdn_wait_page_release(struct wait_page_queue *wait_page)
+{
+	if (unlikely(wait_page != &current->hdn_wait_page ||
+		     !current->hdn_wait_page_active ||
+		     !list_empty(&wait_page->wait.entry)))
+		BUG();
+	current->hdn_wait_page_active = false;
+}
+#endif
+
 /*
  * Attempt to check (or get) the folio flag, and mark us done
  * if successful.
@@ -1247,11 +1266,17 @@ static inline int folio_wait_bit_common(struct folio *folio, int bit_nr,
 {
 	wait_queue_head_t *q = folio_waitqueue(folio);
 	int unfairness = sysctl_page_lock_unfairness;
-	struct wait_page_queue wait_page;
-	wait_queue_entry_t *wait = &wait_page.wait;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct wait_page_queue *wait_page = hdn_wait_page_acquire();
+#else
+	struct wait_page_queue wait_page_storage;
+	struct wait_page_queue *wait_page = &wait_page_storage;
+#endif
+	wait_queue_entry_t *wait = &wait_page->wait;
 	bool thrashing = false;
 	unsigned long pflags;
 	bool in_thrashing;
+	int ret;
 
 	if (bit_nr == PG_locked &&
 	    !folio_test_uptodate(folio) && folio_test_workingset(folio)) {
@@ -1262,8 +1287,8 @@ static inline int folio_wait_bit_common(struct folio *folio, int bit_nr,
 
 	init_wait(wait);
 	wait->func = wake_page_function;
-	wait_page.folio = folio;
-	wait_page.bit_nr = bit_nr;
+	wait_page->folio = folio;
+	wait_page->bit_nr = bit_nr;
 
 repeat:
 	wait->flags = 0;
@@ -1373,9 +1398,13 @@ repeat:
 	 * waiter, but an exclusive one requires WQ_FLAG_DONE.
 	 */
 	if (behavior == EXCLUSIVE)
-		return wait->flags & WQ_FLAG_DONE ? 0 : -EINTR;
-
-	return wait->flags & WQ_FLAG_WOKEN ? 0 : -EINTR;
+		ret = wait->flags & WQ_FLAG_DONE ? 0 : -EINTR;
+	else
+		ret = wait->flags & WQ_FLAG_WOKEN ? 0 : -EINTR;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_wait_page_release(wait_page);
+#endif
+	return ret;
 }
 
 #ifdef CONFIG_MIGRATION
@@ -1400,8 +1429,13 @@ repeat:
 void softleaf_entry_wait_on_locked(softleaf_t entry, spinlock_t *ptl)
 	__releases(ptl)
 {
-	struct wait_page_queue wait_page;
-	wait_queue_entry_t *wait = &wait_page.wait;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct wait_page_queue *wait_page = hdn_wait_page_acquire();
+#else
+	struct wait_page_queue wait_page_storage;
+	struct wait_page_queue *wait_page = &wait_page_storage;
+#endif
+	wait_queue_entry_t *wait = &wait_page->wait;
 	bool thrashing = false;
 	unsigned long pflags;
 	bool in_thrashing;
@@ -1417,8 +1451,8 @@ void softleaf_entry_wait_on_locked(softleaf_t entry, spinlock_t *ptl)
 
 	init_wait(wait);
 	wait->func = wake_page_function;
-	wait_page.folio = folio;
-	wait_page.bit_nr = PG_locked;
+	wait_page->folio = folio;
+	wait_page->bit_nr = PG_locked;
 	wait->flags = 0;
 
 	spin_lock_irq(&q->lock);
@@ -1460,6 +1494,9 @@ void softleaf_entry_wait_on_locked(softleaf_t entry, spinlock_t *ptl)
 		delayacct_thrashing_end(&in_thrashing);
 		psi_memstall_leave(&pflags);
 	}
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_wait_page_release(wait_page);
+#endif
 }
 #endif
 

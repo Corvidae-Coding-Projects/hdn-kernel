@@ -72,6 +72,10 @@ static inline void futex_init_task(struct task_struct *tsk)
 	tsk->pi_state_cache = NULL;
 	tsk->futex_state = FUTEX_STATE_OK;
 	mutex_init(&tsk->futex_exit_mutex);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	tsk->hdn_futex_q = NULL;
+	tsk->hdn_futex_q_active = false;
+#endif
 }
 
 void futex_exit_recursive(struct task_struct *tsk);

@@ -253,7 +253,8 @@ int futex_parse_waitv(struct futex_vector *futexv,
 }
 
 static int futex2_setup_timeout(struct __kernel_timespec __user *timeout,
-				clockid_t clockid, struct hrtimer_sleeper *to)
+				clockid_t clockid, struct hrtimer_sleeper *stack_to,
+				struct hrtimer_sleeper **to)
 {
 	int flag_clkid = 0, flag_init = 0;
 	struct timespec64 ts;
@@ -282,14 +283,8 @@ static int futex2_setup_timeout(struct __kernel_timespec __user *timeout,
 	if (ret)
 		return ret;
 
-	futex_setup_timer(&time, to, flag_clkid, 0);
+	*to = futex_setup_timer(&time, stack_to, flag_clkid, 0);
 	return 0;
-}
-
-static inline void futex2_destroy_timeout(struct hrtimer_sleeper *to)
-{
-	hrtimer_cancel(&to->timer);
-	destroy_hrtimer_on_stack(&to->timer);
 }
 
 /**
@@ -319,7 +314,7 @@ SYSCALL_DEFINE5(futex_waitv, struct futex_waitv __user *, waiters,
 		unsigned int, nr_futexes, unsigned int, flags,
 		struct __kernel_timespec __user *, timeout, clockid_t, clockid)
 {
-	struct hrtimer_sleeper to;
+	struct hrtimer_sleeper stack_to, *to = NULL;
 	struct futex_vector *futexv;
 	int ret;
 
@@ -330,7 +325,8 @@ SYSCALL_DEFINE5(futex_waitv, struct futex_waitv __user *, waiters,
 	if (!nr_futexes || nr_futexes > FUTEX_WAITV_MAX || !waiters)
 		return -EINVAL;
 
-	if (timeout && (ret = futex2_setup_timeout(timeout, clockid, &to)))
+	if (timeout && (ret = futex2_setup_timeout(timeout, clockid,
+						  &stack_to, &to)))
 		return ret;
 
 	futexv = kzalloc_objs(*futexv, nr_futexes);
@@ -342,13 +338,12 @@ SYSCALL_DEFINE5(futex_waitv, struct futex_waitv __user *, waiters,
 	ret = futex_parse_waitv(futexv, waiters, nr_futexes, futex_wake_mark,
 				NULL);
 	if (!ret)
-		ret = futex_wait_multiple(futexv, nr_futexes, timeout ? &to : NULL);
+		ret = futex_wait_multiple(futexv, nr_futexes, to);
 
 	kfree(futexv);
 
 destroy_timer:
-	if (timeout)
-		futex2_destroy_timeout(&to);
+	futex_destroy_timer(to);
 	return ret;
 }
 
@@ -403,7 +398,7 @@ SYSCALL_DEFINE6(futex_wait,
 		struct __kernel_timespec __user *, timeout,
 		clockid_t, clockid)
 {
-	struct hrtimer_sleeper to;
+	struct hrtimer_sleeper stack_to, *to = NULL;
 	int ret;
 
 	if (flags & ~FUTEX2_VALID_MASK)
@@ -417,13 +412,13 @@ SYSCALL_DEFINE6(futex_wait,
 	    !futex_validate_input(flags, mask))
 		return -EINVAL;
 
-	if (timeout && (ret = futex2_setup_timeout(timeout, clockid, &to)))
+	if (timeout && (ret = futex2_setup_timeout(timeout, clockid,
+						  &stack_to, &to)))
 		return ret;
 
-	ret = __futex_wait(uaddr, flags, val, timeout ? &to : NULL, mask);
+	ret = __futex_wait(uaddr, flags, val, to, mask);
 
-	if (timeout)
-		futex2_destroy_timeout(&to);
+	futex_destroy_timer(to);
 
 	return ret;
 }
