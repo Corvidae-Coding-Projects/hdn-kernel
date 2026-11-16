@@ -54,6 +54,7 @@
 #include <linux/uaccess.h>
 #include <linux/nospec.h>
 #include <linux/task_work.h>
+#include <linux/wait.h>
 #include <linux/io_uring.h>
 #include <linux/io_uring/cmd.h>
 #include <linux/audit.h>
@@ -2332,7 +2333,7 @@ static __cold void io_ring_exit_work(struct work_struct *work)
 	struct io_ring_ctx *ctx = container_of(work, struct io_ring_ctx, exit_work);
 	unsigned long timeout = jiffies + IO_URING_EXIT_WAIT_MAX;
 	unsigned long interval = HZ / 20;
-	struct io_tctx_exit exit;
+	DEFINE_HDN_WAIT_OBJECT(struct io_tctx_exit, exit);
 	struct io_tctx_node *node;
 	int ret;
 
@@ -2391,9 +2392,9 @@ static __cold void io_ring_exit_work(struct work_struct *work)
 		 */
 	} while (!wait_for_completion_interruptible_timeout(&ctx->ref_comp, interval));
 
-	init_completion(&exit.completion);
-	init_task_work(&exit.task_work, io_tctx_exit_cb);
-	exit.ctx = ctx;
+	init_completion(&exit->completion);
+	init_task_work(&exit->task_work, io_tctx_exit_cb);
+	exit->ctx = ctx;
 
 	mutex_lock(&ctx->uring_lock);
 	mutex_lock(&ctx->tctx_lock);
@@ -2404,7 +2405,7 @@ static __cold void io_ring_exit_work(struct work_struct *work)
 					ctx_node);
 		/* don't spin on a single task if cancellation failed */
 		list_rotate_left(&ctx->tctx_list);
-		ret = task_work_add(node->task, &exit.task_work, TWA_SIGNAL);
+		ret = task_work_add(node->task, &exit->task_work, TWA_SIGNAL);
 		if (WARN_ON_ONCE(ret))
 			continue;
 
@@ -2415,7 +2416,7 @@ static __cold void io_ring_exit_work(struct work_struct *work)
 		 * wait_for_completion_interruptible_timeout() on why this
 		 * wait is marked as interruptible.
 		 */
-		wait_for_completion_interruptible(&exit.completion);
+		wait_for_completion_interruptible(&exit->completion);
 		mutex_lock(&ctx->uring_lock);
 		mutex_lock(&ctx->tctx_lock);
 	}
