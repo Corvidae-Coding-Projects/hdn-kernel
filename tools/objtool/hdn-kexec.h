@@ -17,6 +17,26 @@ static bool rap_kexec_terminal_name(const char *name)
 	return false;
 }
 
+static bool rap_kexec_has_annotation(struct objtool_file *file,
+				     struct instruction *insn, int type)
+{
+	struct section *sec = find_section_by_name(file->elf, ".discard.annotate_insn");
+	struct reloc *reloc;
+
+	if (!sec || !sec->rsec || sec_size(sec) % 8 ||
+	    sec_size(sec) / 8 != sec_num_entries(sec->rsec))
+		return false;
+	for_each_reloc(sec->rsec, reloc) {
+		if (!reloc->sym || reloc_idx(reloc) >= sec_size(sec) / 8)
+			return false;
+		if (annotype(file->elf, sec, reloc) == type &&
+		    reloc->sym->sec == insn->sec &&
+		    reloc->sym->offset + reloc_addend(reloc) == insn->offset)
+			return true;
+	}
+	return false;
+}
+
 struct rap_kexec_sequence {
 	struct rap_sequence seq;
 	unsigned long labels[16];
@@ -280,6 +300,15 @@ static int verify_rap_kexec(struct objtool_file *file, struct symbol *func)
 		};
 		static const unsigned char slots[] = { 0x28, 0x30, 0x38, 0x50, 0x20, 0x18, 0x10, 0x08 };
 
+		/*
+		 * VALIDATE_UNRET_END emits one annotated NOP when UNRET-entry
+		 * mitigation and noinstr validation are enabled.  Admit it only with
+		 * that annotation; configurations which do not emit it still start at
+		 * the first push below.
+		 */
+		if (first && first->type == INSN_NOP && first->len == 1 &&
+		    rap_kexec_has_annotation(file, first, ANNOTYPE_RETPOLINE_SAFE))
+			K_BYTES("\x90");
 		K_BYTES("\x50\x53\x51\x52\x56");
 		K_REF("\x48\x8d\x35", "pr_char_8250", true);
 		K_REF("\x66\x8b\x15", "kexec_debug_8250_port", true);
