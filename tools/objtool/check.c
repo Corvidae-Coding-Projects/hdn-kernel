@@ -2486,7 +2486,8 @@ static int __annotate_late(struct objtool_file *file, int type, struct instructi
 		if (insn->type != INSN_JUMP_DYNAMIC &&
 		    insn->type != INSN_CALL_DYNAMIC &&
 		    insn->type != INSN_RETURN &&
-		    insn->type != INSN_NOP) {
+		    insn->type != INSN_NOP &&
+		    !(insn->type == INSN_JUMP_UNCONDITIONAL && insn->rap_jump)) {
 			ERROR_INSN(insn, "retpoline_safe hint not an indirect jump/call/ret/nop");
 			return -1;
 		}
@@ -3934,9 +3935,14 @@ static int verify_rap_ibt(struct objtool_file *file, struct symbol *func)
 		    insn->jump_dest->offset < func->offset + func->len)
 			goto bad;
 	/* Follow the independently verified local edge in the ordinary stack,
-	 * return and IBT walkers. No arbitrary dynamic edge acquires permission. */
+	 * return and IBT walkers. Mark it as the same closed local-jump class used
+	 * by the RAP jump protocol so late annotation handling retains the exact
+	 * retpoline-safe source marker after this type conversion. No arbitrary
+	 * dynamic edge acquires permission.
+	 */
 	jump->type = INSN_JUMP_UNCONDITIONAL;
 	jump->jump_dest = tail;
+	jump->rap_jump = true;
 	return 0;
 bad:
 	ERROR_FUNC(func->sec, func->offset + s.pos, "RAP IBT selftest has an invalid fixed-target protocol");
