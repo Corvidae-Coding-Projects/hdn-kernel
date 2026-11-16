@@ -2329,6 +2329,7 @@ asm (
 	 * int3_selftest_callee().
 	 */
 "int3_selftest_ip:\n"
+	ANNOTATE_NOENDBR "\n"
 "	int3; nop; nop; nop; nop\n"
 	HDN_INT3_SELFTEST_SITE(int3_selftest_asm)
 	HDN_INT3_SELFTEST_RETURN

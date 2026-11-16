@@ -5761,6 +5761,14 @@ static inline bool noinstr_call_dest(struct objtool_file *file,
 	if (func->static_call_tramp)
 		return true;
 
+	/* The RAP call adapter is an exact byte-verified, IRQ-disabled gateway
+	 * whose only C edge is the noinstr call-target validator.  It is emitted
+	 * in ordinary text so all protected callers can reach one shared copy,
+	 * but remains safe for an already-noinstr caller.
+	 */
+	if (func->rap_adapter && !strcmp(func->name, "__hdn_rap_call"))
+		return true;
+
 	/*
 	 * The __ubsan_handle_*() calls are like WARN(), they only happen when
 	 * something 'BAD' happened. At the risk of taking the machine down,
@@ -6953,6 +6961,7 @@ static int __validate_ibt_insn(struct objtool_file *file, struct instruction *in
 
 static int validate_ibt_insn(struct objtool_file *file, struct instruction *insn)
 {
+	struct symbol *func = rap_insn_owner(insn);
 	struct instruction *dest;
 	struct reloc *reloc;
 	unsigned long off;
@@ -6961,6 +6970,13 @@ static int validate_ibt_insn(struct objtool_file *file, struct instruction *insn
 	/* Already proven to load R10 with the immediately following call's
 	 * exact return address. A noreturn call may end at a symbol boundary. */
 	if (insn->rap_binding)
+		return 0;
+
+	/* The PVH verifier has already matched every byte and relocation in its
+	 * physical-to-virtual handoff roots, including the two fixed computed
+	 * jumps.  Their address materialization is not a general IBT target load.
+	 */
+	if (func && func->rap_pvh_protocol)
 		return 0;
 
 	/*

@@ -57,6 +57,7 @@
 
 .text
 SYM_FUNC_START(crc32c_x86_3way)
+	ENDBR
 	HDN_ASM_FUNCTION crc32c_x86_3way, 1
 #define    crc0		  %edi
 #define    crc0_q	  %rdi
