@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
+#include "hdn_rap_tag.h"
+
 #ifdef HDN_RAP_PROTO_CONFLICT
 extern int rap_external(long value);
 #else
@@ -15,11 +17,6 @@ static int (*const __hdn_rap_prototype_shared_type)(int)
 	rap_external;
 #else
 	0;
-#endif
-#ifdef HDN_RAP_TAG_CONFLICT
-struct rap_shared_tag { unsigned int value; };
-#else
-struct rap_shared_tag { unsigned long value; };
 #endif
 unsigned long rap_tag_b(struct rap_shared_tag *value)
 {

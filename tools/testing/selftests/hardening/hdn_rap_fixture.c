@@ -57,6 +57,25 @@ long rap_memory_target(long (**function)(long), long value)
 	return (*function)(value);
 }
 
+/* Keep a source retry label at the first body operation.  The compiler RAP
+ * adapter must stay on the function's synthetic entry edge so this backedge
+ * cannot push the same physical return slot twice.
+ */
+long rap_entry_retry(volatile unsigned int *sequence, volatile long *value)
+{
+	unsigned int start;
+	long result;
+
+retry:
+	/* Preserve the source label as the first RTL body operation. */
+	asm volatile("" : : : "memory");
+	start = *sequence;
+	result = *value;
+	if ((start & 1) || start != *sequence)
+		goto retry;
+	return result;
+}
+
 /* The stackleak plugin uses this exact opaque, register-preserving call.
  * Its return address must be protected even though it is not CALL_INSN RTL. */
 long rap_stack_depth(long value)

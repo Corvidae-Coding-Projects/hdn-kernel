@@ -575,6 +575,7 @@ static unsigned int hdn_rap_returns_execute(void)
 	unsigned int returns = 0;
 	bool trace_entry = crtl->profile;
 	bool entry_endbr = false;
+	rtx_insn *entry_endbr_insn = NULL;
 	identity *jump_type = NULL;
 	std::set<int> labels;
 	rtx_insn *forced;
@@ -656,8 +657,10 @@ static unsigned int hdn_rap_returns_execute(void)
 			return 0;
 		}
 		rtx endbr = find_code(PATTERN(insn), UNSPEC_VOLATILE);
-		if (!first && endbr && XINT(endbr, 1) == UNSPECV_NOP_ENDBR)
+		if (!first && endbr && XINT(endbr, 1) == UNSPECV_NOP_ENDBR) {
 			entry_endbr = true;
+			entry_endbr_insn = insn;
+		}
 		if (!first && !(endbr && XINT(endbr, 1) == UNSPECV_NOP_ENDBR))
 			first = insn;
 		/* These exact stack-depth and scheduler calls use register-preserving
@@ -795,8 +798,20 @@ static unsigned int hdn_rap_returns_execute(void)
 			report("protected-fentry", current_function_decl,
 				DECL_SOURCE_LOCATION(current_function_decl), NULL);
 		}
-		rtx_insn *entry = emit_insn_before(gen_rtx_ASM_INPUT_loc(VOIDmode,
-			ggc_strdup(code.c_str()), DECL_SOURCE_LOCATION(current_function_decl)), first);
+		/* Put the once-per-call adapter on the artificial ENTRY edge, before
+		 * any source label.  A retry loop may branch to the first executable
+		 * body instruction; inserting after that label would push the same
+		 * physical return slot a second time.  ENDBR remains the public landing
+		 * instruction when present.
+		 */
+		rtx entry_pattern = gen_rtx_ASM_INPUT_loc(VOIDmode, ggc_strdup(code.c_str()),
+			DECL_SOURCE_LOCATION(current_function_decl));
+		rtx_insn *entry;
+
+		if (entry_endbr_insn)
+			entry = emit_insn_after(entry_pattern, entry_endbr_insn);
+		else
+			entry = emit_insn_before(entry_pattern, get_insns());
 		MEM_VOLATILE_P(PATTERN(entry)) = 1;
 		identity *type = get_identity(TREE_TYPE(current_function_decl),
 				DECL_SOURCE_LOCATION(current_function_decl));

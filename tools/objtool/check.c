@@ -4261,6 +4261,20 @@ static int read_rap_function_entries(struct objtool_file *file)
 		entry = first ? next_insn_same_sec(file, first) : NULL;
 		if (!entry || !entry->rap_entry || body->sym->sec != entry->sec)
 			goto bad;
+		/* The entry adapter represents one physical function invocation.  No
+		 * local retry/backedge may re-enter its binding or CALL and duplicate
+		 * the protected return record for that same stack slot.
+		 */
+		{
+			struct instruction *insn;
+
+			rap_for_each_insn(file, func, insn)
+				if (is_static_jump(insn) &&
+				    (insn->jump_dest == first || insn->jump_dest == entry)) {
+					ERROR_INSN(insn, "local branch re-enters RAP function entry");
+					return -1;
+				}
+		}
 		body_offset = body->sym->offset + reloc_addend(body);
 		if (body_offset != entry->offset + entry->len)
 			goto bad;
