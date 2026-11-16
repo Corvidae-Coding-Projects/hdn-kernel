@@ -892,14 +892,14 @@ static int kill_ioctx(struct mm_struct *mm, struct kioctx *ctx,
 void exit_aio(struct mm_struct *mm)
 {
 	struct kioctx_table *table = rcu_dereference_raw(mm->ioctx_table);
-	struct ctx_rq_wait wait;
+	DEFINE_HDN_WAIT_OBJECT(struct ctx_rq_wait, wait);
 	int i, skipped;
 
 	if (!table)
 		return;
 
-	atomic_set(&wait.count, table->nr);
-	init_completion(&wait.comp);
+	atomic_set(&wait->count, table->nr);
+	init_completion(&wait->comp);
 
 	skipped = 0;
 	for (i = 0; i < table->nr; ++i) {
@@ -919,12 +919,12 @@ void exit_aio(struct mm_struct *mm)
 		 * that it needs to unmap the area, just set it to 0.
 		 */
 		ctx->mmap_size = 0;
-		kill_ioctx(mm, ctx, &wait);
+		kill_ioctx(mm, ctx, wait);
 	}
 
-	if (!atomic_sub_and_test(skipped, &wait.count)) {
+	if (!atomic_sub_and_test(skipped, &wait->count)) {
 		/* Wait until all IO for the context are done. */
-		wait_for_completion(&wait.comp);
+		wait_for_completion(&wait->comp);
 	}
 
 	RCU_INIT_POINTER(mm->ioctx_table, NULL);
@@ -1458,17 +1458,17 @@ SYSCALL_DEFINE1(io_destroy, aio_context_t, ctx)
 {
 	struct kioctx *ioctx = lookup_ioctx(ctx);
 	if (likely(NULL != ioctx)) {
-		struct ctx_rq_wait wait;
+		DEFINE_HDN_WAIT_OBJECT(struct ctx_rq_wait, wait);
 		int ret;
 
-		init_completion(&wait.comp);
-		atomic_set(&wait.count, 1);
+		init_completion(&wait->comp);
+		atomic_set(&wait->count, 1);
 
 		/* Pass requests_done to kill_ioctx() where it can be set
 		 * in a thread-safe way. If we try to set it here then we have
 		 * a race condition if two io_destroy() called simultaneously.
 		 */
-		ret = kill_ioctx(current->mm, ioctx, &wait);
+		ret = kill_ioctx(current->mm, ioctx, wait);
 		percpu_ref_put(&ioctx->users);
 
 		/* Wait until all IO for the context are done. Otherwise kernel
@@ -1476,7 +1476,7 @@ SYSCALL_DEFINE1(io_destroy, aio_context_t, ctx)
 		 * is destroyed.
 		 */
 		if (!ret)
-			wait_for_completion(&wait.comp);
+			wait_for_completion(&wait->comp);
 
 		return ret;
 	}
