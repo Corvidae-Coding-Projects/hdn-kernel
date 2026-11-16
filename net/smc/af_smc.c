@@ -831,18 +831,15 @@ static void smc_fback_wakeup_waitqueue(struct smc_sock *smc, void *key)
 static int smc_fback_mark_woken(wait_queue_entry_t *wait,
 				unsigned int mode, int sync, void *key)
 {
-	struct smc_mark_woken *mark =
-		container_of(wait, struct smc_mark_woken, wait_entry);
-
-	mark->woken = true;
-	mark->key = key;
+	wait->flags |= WQ_FLAG_CUSTOM;
+	wait->private = key;
 	return 0;
 }
 
 static void smc_fback_forward_wakeup(struct smc_sock *smc, struct sock *clcsk,
 				     void (*clcsock_callback)(struct sock *sk))
 {
-	struct smc_mark_woken mark = { .woken = false };
+	struct smc_mark_woken mark;
 	struct socket_wq *wq;
 
 	init_waitqueue_func_entry(&mark.wait_entry,
@@ -855,8 +852,8 @@ static void smc_fback_forward_wakeup(struct smc_sock *smc, struct sock *clcsk,
 	clcsock_callback(clcsk);
 	remove_wait_queue(sk_sleep(clcsk), &mark.wait_entry);
 
-	if (mark.woken)
-		smc_fback_wakeup_waitqueue(smc, mark.key);
+	if (mark.wait_entry.flags & WQ_FLAG_CUSTOM)
+		smc_fback_wakeup_waitqueue(smc, mark.wait_entry.private);
 out:
 	rcu_read_unlock();
 }

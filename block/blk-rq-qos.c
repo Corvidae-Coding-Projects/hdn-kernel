@@ -255,12 +255,6 @@ void rq_qos_wait(struct rq_wait *rqw, void *private_data,
 		 acquire_inflight_cb_t *acquire_inflight_cb,
 		 cleanup_cb_t *cleanup_cb)
 {
-	struct rq_qos_wait_data data = {
-		.rqw		= rqw,
-		.cb		= acquire_inflight_cb,
-		.private_data	= private_data,
-		.got_token	= false,
-	};
 	bool first_waiter;
 
 	/*
@@ -271,8 +265,16 @@ void rq_qos_wait(struct rq_wait *rqw, void *private_data,
 	if (!waitqueue_active(&rqw->wait) && acquire_inflight_cb(rqw, private_data))
 		return;
 
-	init_wait_func(&data.wq, rq_qos_wake_function);
-	first_waiter = prepare_to_wait_exclusive(&rqw->wait, &data.wq,
+	DEFINE_HDN_WAIT_OBJECT(struct rq_qos_wait_data, data);
+
+	*data = (struct rq_qos_wait_data) {
+		.rqw		= rqw,
+		.cb		= acquire_inflight_cb,
+		.private_data	= private_data,
+		.got_token	= false,
+	};
+	init_wait_func(&data->wq, rq_qos_wake_function);
+	first_waiter = prepare_to_wait_exclusive(&rqw->wait, &data->wq,
 						 TASK_UNINTERRUPTIBLE);
 	/*
 	 * Make sure there is at least one inflight process; otherwise, waiters
@@ -283,8 +285,8 @@ void rq_qos_wait(struct rq_wait *rqw, void *private_data,
 	 * will re-check the waiting condition before going to sleep, thus
 	 * ensuring forward progress.
 	 */
-	if (!data.got_token && first_waiter && acquire_inflight_cb(rqw, private_data)) {
-		finish_wait(&rqw->wait, &data.wq);
+	if (!data->got_token && first_waiter && acquire_inflight_cb(rqw, private_data)) {
+		finish_wait(&rqw->wait, &data->wq);
 		/*
 		 * We raced with rq_qos_wake_function() getting a token,
 		 * which means we now have two. Put our local token
@@ -295,19 +297,19 @@ void rq_qos_wait(struct rq_wait *rqw, void *private_data,
 		 * in rq_qos_wake_function() to make sure we will see
 		 * the latest @data->got_token.
 		 */
-		if (data.got_token)
+		if (data->got_token)
 			cleanup_cb(rqw, private_data);
 		return;
 	}
 
 	/* we are now relying on the waker to increase our inflight counter. */
 	do {
-		if (data.got_token)
+		if (data->got_token)
 			break;
 		io_schedule();
 		set_current_state(TASK_UNINTERRUPTIBLE);
 	} while (1);
-	finish_wait(&rqw->wait, &data.wq);
+	finish_wait(&rqw->wait, &data->wq);
 }
 
 void rq_qos_exit(struct request_queue *q)

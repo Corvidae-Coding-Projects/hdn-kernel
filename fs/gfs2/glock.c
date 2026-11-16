@@ -1031,16 +1031,16 @@ static void glock_work_func(struct work_struct *work)
 static struct gfs2_glock *find_insert_glock(struct lm_lockname *name,
 					    struct gfs2_glock *new)
 {
-	struct wait_glock_queue wait;
+	DEFINE_HDN_WAIT_OBJECT(struct wait_glock_queue, wait);
 	wait_queue_head_t *wq = glock_waitqueue(name);
 	struct gfs2_glock *gl;
 
-	wait.name = name;
-	init_wait(&wait.wait);
-	wait.wait.func = glock_wake_function;
+	wait->name = name;
+	init_wait(&wait->wait);
+	wait->wait.func = glock_wake_function;
 
 again:
-	prepare_to_wait(wq, &wait.wait, TASK_UNINTERRUPTIBLE);
+	prepare_to_wait(wq, &wait->wait, TASK_UNINTERRUPTIBLE);
 	rcu_read_lock();
 	if (new) {
 		gl = rhashtable_lookup_get_insert_fast(&gl_hash_table,
@@ -1058,7 +1058,7 @@ again:
 	}
 out:
 	rcu_read_unlock();
-	finish_wait(wq, &wait.wait);
+	finish_wait(wq, &wait->wait);
 	if (gl)
 		gfs2_glock_remove_from_lru(gl);
 	return gl;

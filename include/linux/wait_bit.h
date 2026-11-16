@@ -242,6 +242,28 @@ extern wait_queue_head_t *__var_waitqueue(void *p);
 #ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
 struct wait_bit_queue_entry *hdn_wait_bit_acquire(void);
 void hdn_wait_bit_release(struct wait_bit_queue_entry *wait);
+void hdn_init_wait_bit_entry(struct wait_bit_queue_entry *wait,
+			     unsigned long *word, int bit);
+
+#define DEFINE_WAIT_BIT_TASK(name, word, bit)					\
+	struct wait_bit_queue_entry *name = hdn_wait_bit_acquire();		\
+	hdn_init_wait_bit_entry(name, word, bit)
+#define DECLARE_WAIT_BIT_TASK(name)						\
+	struct wait_bit_queue_entry *name = hdn_wait_bit_acquire()
+#define FINISH_WAIT_BIT_TASK(wq, name)						\
+	do {									\
+		finish_wait(wq, &(name)->wq_entry);				\
+		hdn_wait_bit_release(name);					\
+	} while (0)
+#else
+#define DEFINE_WAIT_BIT_TASK(name, word, bit)					\
+	DEFINE_WAIT_BIT(name##_storage, word, bit);				\
+	struct wait_bit_queue_entry *name = &name##_storage
+#define DECLARE_WAIT_BIT_TASK(name)						\
+	struct wait_bit_queue_entry name##_storage;				\
+	struct wait_bit_queue_entry *name = &name##_storage
+#define FINISH_WAIT_BIT_TASK(wq, name)						\
+	finish_wait(wq, &(name)->wq_entry)
 #endif
 
 #ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS

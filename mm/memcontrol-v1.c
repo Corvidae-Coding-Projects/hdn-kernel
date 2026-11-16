@@ -1373,7 +1373,7 @@ void memcg1_oom_recover(struct mem_cgroup *memcg)
 bool mem_cgroup_oom_synchronize(bool handle)
 {
 	struct mem_cgroup *memcg = current->memcg_in_oom;
-	struct oom_wait_info owait;
+	DEFINE_HDN_WAIT_OBJECT(struct oom_wait_info, owait);
 	bool locked;
 
 	/* OOM is global, do not handle */
@@ -1383,13 +1383,13 @@ bool mem_cgroup_oom_synchronize(bool handle)
 	if (!handle)
 		goto cleanup;
 
-	owait.memcg = memcg;
-	owait.wait.flags = 0;
-	owait.wait.func = memcg_oom_wake_function;
-	owait.wait.private = current;
-	INIT_LIST_HEAD(&owait.wait.entry);
+	owait->memcg = memcg;
+	owait->wait.flags = 0;
+	owait->wait.func = memcg_oom_wake_function;
+	owait->wait.private = current;
+	INIT_LIST_HEAD(&owait->wait.entry);
 
-	prepare_to_wait(&memcg_oom_waitq, &owait.wait, TASK_KILLABLE);
+	prepare_to_wait(&memcg_oom_waitq, &owait->wait, TASK_KILLABLE);
 	mem_cgroup_mark_under_oom(memcg);
 
 	locked = mem_cgroup_oom_trylock(memcg);
@@ -1399,7 +1399,7 @@ bool mem_cgroup_oom_synchronize(bool handle)
 
 	schedule();
 	mem_cgroup_unmark_under_oom(memcg);
-	finish_wait(&memcg_oom_waitq, &owait.wait);
+	finish_wait(&memcg_oom_waitq, &owait->wait);
 
 	if (locked)
 		mem_cgroup_oom_unlock(memcg);

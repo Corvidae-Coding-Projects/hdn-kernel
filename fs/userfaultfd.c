@@ -388,7 +388,7 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 	struct vm_area_struct *vma = vmf->vma;
 	struct mm_struct *mm = vma->vm_mm;
 	struct userfaultfd_ctx *ctx;
-	struct userfaultfd_wait_queue uwq;
+	DEFINE_HDN_WAIT_OBJECT(struct userfaultfd_wait_queue, uwq);
 	vm_fault_t ret = VM_FAULT_SIGBUS;
 	bool must_wait;
 	unsigned int blocking_state;
@@ -481,12 +481,12 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 	/* take the reference before dropping the mmap_lock */
 	userfaultfd_ctx_get(ctx);
 
-	init_waitqueue_func_entry(&uwq.wq, userfaultfd_wake_function);
-	uwq.wq.private = current;
-	uwq.msg = userfault_msg(vmf->address, vmf->real_address, vmf->flags,
-				reason, ctx->features);
-	uwq.ctx = ctx;
-	uwq.waken = false;
+	init_waitqueue_func_entry(&uwq->wq, userfaultfd_wake_function);
+	uwq->wq.private = current;
+	uwq->msg = userfault_msg(vmf->address, vmf->real_address, vmf->flags,
+				 reason, ctx->features);
+	uwq->ctx = ctx;
+	uwq->waken = false;
 
 	blocking_state = userfaultfd_get_blocking_state(vmf->flags);
 
@@ -504,7 +504,7 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 	 * After the __add_wait_queue the uwq is visible to userland
 	 * through poll/read().
 	 */
-	__add_wait_queue(&ctx->fault_pending_wqh, &uwq.wq);
+	__add_wait_queue(&ctx->fault_pending_wqh, &uwq->wq);
 	/*
 	 * The smp_mb() after __set_current_state prevents the reads
 	 * following the spin_unlock to happen before the list_add in
@@ -539,16 +539,15 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 	 * pointing to self at any time during the list refile. The
 	 * only case where list_del_init() is called is the full
 	 * removal in the wake function and there we don't re-list_add
-	 * and it's fine not to block on the spinlock. The uwq on this
-	 * kernel stack can be released after the list_del_init.
+	 * and it's fine not to block on the spinlock. The uwq descriptor can
+	 * be released after the list_del_init.
 	 */
-	if (!list_empty_careful(&uwq.wq.entry)) {
+	if (!list_empty_careful(&uwq->wq.entry)) {
 		spin_lock_irq(&ctx->fault_pending_wqh.lock);
 		/*
-		 * No need of list_del_init(), the uwq on the stack
-		 * will be freed shortly anyway.
+		 * Keep the entry detached before releasing its stable storage.
 		 */
-		list_del(&uwq.wq.entry);
+		list_del_init(&uwq->wq.entry);
 		spin_unlock_irq(&ctx->fault_pending_wqh.lock);
 	}
 
@@ -693,14 +692,14 @@ int dup_userfaultfd(struct vm_area_struct *vma, struct list_head *fcs)
 static void dup_fctx(struct userfaultfd_fork_ctx *fctx)
 {
 	struct userfaultfd_ctx *ctx = fctx->orig;
-	struct userfaultfd_wait_queue ewq;
+	DEFINE_HDN_WAIT_OBJECT(struct userfaultfd_wait_queue, ewq);
 
-	msg_init(&ewq.msg);
+	msg_init(&ewq->msg);
 
-	ewq.msg.event = UFFD_EVENT_FORK;
-	ewq.msg.arg.reserved.reserved1 = (unsigned long)fctx->new;
+	ewq->msg.event = UFFD_EVENT_FORK;
+	ewq->msg.arg.reserved.reserved1 = (unsigned long)fctx->new;
 
-	userfaultfd_event_wait_completion(ctx, &ewq);
+	userfaultfd_event_wait_completion(ctx, ewq);
 }
 
 void dup_userfaultfd_complete(struct list_head *fcs)
@@ -769,19 +768,19 @@ void mremap_userfaultfd_complete(struct vm_userfaultfd_ctx *vm_ctx,
 				 unsigned long len)
 {
 	struct userfaultfd_ctx *ctx = vm_ctx->ctx;
-	struct userfaultfd_wait_queue ewq;
+	DEFINE_HDN_WAIT_OBJECT(struct userfaultfd_wait_queue, ewq);
 
 	if (!ctx)
 		return;
 
-	msg_init(&ewq.msg);
+	msg_init(&ewq->msg);
 
-	ewq.msg.event = UFFD_EVENT_REMAP;
-	ewq.msg.arg.remap.from = from;
-	ewq.msg.arg.remap.to = to;
-	ewq.msg.arg.remap.len = len;
+	ewq->msg.event = UFFD_EVENT_REMAP;
+	ewq->msg.arg.remap.from = from;
+	ewq->msg.arg.remap.to = to;
+	ewq->msg.arg.remap.len = len;
 
-	userfaultfd_event_wait_completion(ctx, &ewq);
+	userfaultfd_event_wait_completion(ctx, ewq);
 }
 
 void mremap_userfaultfd_fail(struct vm_userfaultfd_ctx *vm_ctx)
@@ -799,7 +798,7 @@ bool userfaultfd_remove(struct vm_area_struct *vma,
 {
 	struct mm_struct *mm = vma->vm_mm;
 	struct userfaultfd_ctx *ctx;
-	struct userfaultfd_wait_queue ewq;
+	DEFINE_HDN_WAIT_OBJECT(struct userfaultfd_wait_queue, ewq);
 
 	ctx = vma->vm_userfaultfd_ctx.ctx;
 	if (!ctx || !(ctx->features & UFFD_FEATURE_EVENT_REMOVE))
@@ -811,13 +810,13 @@ bool userfaultfd_remove(struct vm_area_struct *vma,
 	up_write(&ctx->map_changing_lock);
 	mmap_read_unlock(mm);
 
-	msg_init(&ewq.msg);
+	msg_init(&ewq->msg);
 
-	ewq.msg.event = UFFD_EVENT_REMOVE;
-	ewq.msg.arg.remove.start = start;
-	ewq.msg.arg.remove.end = end;
+	ewq->msg.event = UFFD_EVENT_REMOVE;
+	ewq->msg.arg.remove.start = start;
+	ewq->msg.arg.remove.end = end;
 
-	userfaultfd_event_wait_completion(ctx, &ewq);
+	userfaultfd_event_wait_completion(ctx, ewq);
 
 	return false;
 }
@@ -864,16 +863,16 @@ int userfaultfd_unmap_prep(struct vm_area_struct *vma, unsigned long start,
 void userfaultfd_unmap_complete(struct mm_struct *mm, struct list_head *uf)
 {
 	struct userfaultfd_unmap_ctx *ctx, *n;
-	struct userfaultfd_wait_queue ewq;
+	DEFINE_HDN_WAIT_OBJECT(struct userfaultfd_wait_queue, ewq);
 
 	list_for_each_entry_safe(ctx, n, uf, list) {
-		msg_init(&ewq.msg);
+		msg_init(&ewq->msg);
 
-		ewq.msg.event = UFFD_EVENT_UNMAP;
-		ewq.msg.arg.remove.start = ctx->start;
-		ewq.msg.arg.remove.end = ctx->end;
+		ewq->msg.event = UFFD_EVENT_UNMAP;
+		ewq->msg.arg.remove.start = ctx->start;
+		ewq->msg.arg.remove.end = ctx->end;
 
-		userfaultfd_event_wait_completion(ctx->ctx, &ewq);
+		userfaultfd_event_wait_completion(ctx->ctx, ewq);
 
 		list_del(&ctx->list);
 		kfree(ctx);

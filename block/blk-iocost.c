@@ -2609,7 +2609,7 @@ static void ioc_rqos_throttle(struct rq_qos *rqos, struct bio *bio)
 	struct ioc *ioc = rqos_to_ioc(rqos);
 	struct ioc_gq *iocg = blkg_to_iocg(blkg);
 	struct ioc_now now;
-	struct iocg_wait wait;
+	DEFINE_HDN_WAIT_OBJECT(struct iocg_wait, wait);
 	u64 abs_cost, cost, vtime;
 	bool use_debt, ioc_locked;
 	unsigned long flags;
@@ -2716,25 +2716,25 @@ retry_lock:
 	 * All waiters are on iocg->waitq and the wait states are
 	 * synchronized using waitq.lock.
 	 */
-	init_wait_func(&wait.wait, iocg_wake_fn);
-	wait.bio = bio;
-	wait.abs_cost = abs_cost;
-	wait.committed = false;	/* will be set true by waker */
+	init_wait_func(&wait->wait, iocg_wake_fn);
+	wait->bio = bio;
+	wait->abs_cost = abs_cost;
+	wait->committed = false;	/* will be set true by waker */
 
-	__add_wait_queue_entry_tail(&iocg->waitq, &wait.wait);
+	__add_wait_queue_entry_tail(&iocg->waitq, &wait->wait);
 	iocg_kick_waitq(iocg, ioc_locked, &now);
 
 	iocg_unlock(iocg, ioc_locked, &flags);
 
 	while (true) {
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		if (wait.committed)
+		if (wait->committed)
 			break;
 		io_schedule();
 	}
 
 	/* waker already committed us, proceed */
-	finish_wait(&iocg->waitq, &wait.wait);
+	finish_wait(&iocg->waitq, &wait->wait);
 }
 
 static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,

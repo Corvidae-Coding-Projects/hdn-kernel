@@ -24,9 +24,9 @@
 /*
  * Per-task space reservation.
  *
- * Tasks that need to wait for GC to free up space allocate one of these
- * on-stack and adds it to the per-mount zi_reclaim_reservations lists.
- * The GC thread will then wake the tasks in order when space becomes available.
+ * Tasks that need to wait for GC to free up space add one of these to the
+ * per-mount zi_reclaim_reservations list. Private-stack builds keep the
+ * descriptor in task-owned stable storage while the GC thread can access it.
  */
 struct xfs_zone_reservation {
 	struct list_head	entry;
@@ -121,11 +121,13 @@ xfs_zoned_reserve_available(
 	unsigned int			flags)
 {
 	struct xfs_zone_info		*zi = mp->m_zone_info;
-	struct xfs_zone_reservation	reservation = {
+	DEFINE_HDN_WAIT_OBJECT(struct xfs_zone_reservation, reservation);
+	int				error;
+
+	*reservation = (struct xfs_zone_reservation) {
 		.task		= current,
 		.count_fsb	= count_fsb,
 	};
-	int				error;
 
 	/*
 	 * If there are no waiters, try to directly grab the available blocks
@@ -148,7 +150,7 @@ xfs_zoned_reserve_available(
 		return -EAGAIN;
 
 	spin_lock(&zi->zi_reservation_lock);
-	list_add_tail(&reservation.entry, &zi->zi_reclaim_reservations);
+	list_add_tail(&reservation->entry, &zi->zi_reclaim_reservations);
 	while ((error = xfs_zoned_space_wait_error(mp)) == 0) {
 		set_current_state(TASK_KILLABLE);
 
@@ -180,7 +182,7 @@ xfs_zoned_reserve_available(
 		schedule();
 		spin_lock(&zi->zi_reservation_lock);
 	}
-	list_del(&reservation.entry);
+	list_del_init(&reservation->entry);
 	spin_unlock(&zi->zi_reservation_lock);
 
 	__set_current_state(TASK_RUNNING);

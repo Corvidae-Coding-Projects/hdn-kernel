@@ -4452,6 +4452,20 @@ static void __sched_fork(u64 clone_flags, struct task_struct *p)
 {
 	p->on_rq			= 0;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	p->hdn_swait_active		= false;
+	p->hdn_wait_active		= 0;
+	memset(p->hdn_wait_origin, 0, sizeof(p->hdn_wait_origin));
+	p->hdn_wait_object_active	= 0;
+	p->hdn_wait_bit_active		= false;
+	p->hdn_wait_page_active		= false;
+	p->hdn_timeout_active		= false;
+	p->hdn_hrtimeout_active		= false;
+	p->hdn_futex_q			= NULL;
+	p->hdn_futex_q_active		= false;
+	p->hdn_lock_waiter_active	= HDN_LOCK_WAITER_NONE;
+#endif
+
 	p->se.on_rq			= 0;
 	p->se.exec_start		= 0;
 	p->se.sum_exec_runtime		= 0;

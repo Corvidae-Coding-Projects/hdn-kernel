@@ -1594,7 +1594,6 @@ static int write_inode(struct inode *inode, struct writeback_control *wbc)
  */
 void inode_wait_for_writeback(struct inode *inode)
 {
-	struct wait_bit_queue_entry wqe;
 	struct wait_queue_head *wq_head;
 
 	assert_spin_locked(&inode->i_lock);
@@ -1602,9 +1601,11 @@ void inode_wait_for_writeback(struct inode *inode)
 	if (!(inode_state_read(inode) & I_SYNC))
 		return;
 
-	wq_head = inode_bit_waitqueue(&wqe, inode, __I_SYNC);
+	DECLARE_WAIT_BIT_TASK(wqe);
+
+	wq_head = inode_bit_waitqueue(wqe, inode, __I_SYNC);
 	for (;;) {
-		prepare_to_wait_event(wq_head, &wqe.wq_entry, TASK_UNINTERRUPTIBLE);
+		prepare_to_wait_event(wq_head, &wqe->wq_entry, TASK_UNINTERRUPTIBLE);
 		/* Checking I_SYNC with inode->i_lock guarantees memory ordering. */
 		if (!(inode_state_read(inode) & I_SYNC))
 			break;
@@ -1612,7 +1613,7 @@ void inode_wait_for_writeback(struct inode *inode)
 		schedule();
 		spin_lock(&inode->i_lock);
 	}
-	finish_wait(wq_head, &wqe.wq_entry);
+	FINISH_WAIT_BIT_TASK(wq_head, wqe);
 }
 
 /*
@@ -1623,20 +1624,21 @@ void inode_wait_for_writeback(struct inode *inode)
 static void inode_sleep_on_writeback(struct inode *inode)
 	__releases(inode->i_lock)
 {
-	struct wait_bit_queue_entry wqe;
 	struct wait_queue_head *wq_head;
 	bool sleep;
 
 	assert_spin_locked(&inode->i_lock);
 
-	wq_head = inode_bit_waitqueue(&wqe, inode, __I_SYNC);
-	prepare_to_wait_event(wq_head, &wqe.wq_entry, TASK_UNINTERRUPTIBLE);
+	DECLARE_WAIT_BIT_TASK(wqe);
+
+	wq_head = inode_bit_waitqueue(wqe, inode, __I_SYNC);
+	prepare_to_wait_event(wq_head, &wqe->wq_entry, TASK_UNINTERRUPTIBLE);
 	/* Checking I_SYNC with inode->i_lock guarantees memory ordering. */
 	sleep = !!(inode_state_read(inode) & I_SYNC);
 	spin_unlock(&inode->i_lock);
 	if (sleep)
 		schedule();
-	finish_wait(wq_head, &wqe.wq_entry);
+	FINISH_WAIT_BIT_TASK(wq_head, wqe);
 }
 
 /*

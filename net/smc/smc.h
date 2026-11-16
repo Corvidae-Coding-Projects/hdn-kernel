@@ -187,8 +187,6 @@ enum smc_urg_state {
 };
 
 struct smc_mark_woken {
-	bool woken;
-	void *key;
 	wait_queue_entry_t wait_entry;
 };
 

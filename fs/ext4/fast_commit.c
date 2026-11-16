@@ -263,23 +263,23 @@ void ext4_fc_del(struct inode *inode)
 		&& !ext4_test_mount_flag(inode->i_sb, EXT4_MF_FC_INELIGIBLE));
 	while (ext4_test_inode_state(inode, EXT4_STATE_FC_FLUSHING_DATA)) {
 #if (BITS_PER_LONG < 64)
-		DEFINE_WAIT_BIT(wait, &ei->i_state_flags,
-				EXT4_STATE_FC_FLUSHING_DATA);
+		DEFINE_WAIT_BIT_TASK(wait, &ei->i_state_flags,
+				     EXT4_STATE_FC_FLUSHING_DATA);
 		wq = bit_waitqueue(&ei->i_state_flags,
 				   EXT4_STATE_FC_FLUSHING_DATA);
 #else
-		DEFINE_WAIT_BIT(wait, &ei->i_flags,
-				EXT4_STATE_FC_FLUSHING_DATA);
+		DEFINE_WAIT_BIT_TASK(wait, &ei->i_flags,
+				     EXT4_STATE_FC_FLUSHING_DATA);
 		wq = bit_waitqueue(&ei->i_flags,
 				   EXT4_STATE_FC_FLUSHING_DATA);
 #endif
-		prepare_to_wait(wq, &wait.wq_entry, TASK_UNINTERRUPTIBLE);
+		prepare_to_wait(wq, &wait->wq_entry, TASK_UNINTERRUPTIBLE);
 		if (ext4_test_inode_state(inode, EXT4_STATE_FC_FLUSHING_DATA)) {
 			ext4_fc_unlock(inode->i_sb, alloc_ctx);
 			schedule();
 			alloc_ctx = ext4_fc_lock(inode->i_sb);
 		}
-		finish_wait(wq, &wait.wq_entry);
+		FINISH_WAIT_BIT_TASK(wq, wait);
 	}
 	list_del_init(&ei->i_fc_list);
 
@@ -578,20 +578,20 @@ void ext4_fc_track_inode(handle_t *handle, struct inode *inode)
 
 	while (ext4_test_inode_state(inode, EXT4_STATE_FC_COMMITTING)) {
 #if (BITS_PER_LONG < 64)
-		DEFINE_WAIT_BIT(wait, &ei->i_state_flags,
-				EXT4_STATE_FC_COMMITTING);
+		DEFINE_WAIT_BIT_TASK(wait, &ei->i_state_flags,
+				     EXT4_STATE_FC_COMMITTING);
 		wq = bit_waitqueue(&ei->i_state_flags,
 				   EXT4_STATE_FC_COMMITTING);
 #else
-		DEFINE_WAIT_BIT(wait, &ei->i_flags,
-				EXT4_STATE_FC_COMMITTING);
+		DEFINE_WAIT_BIT_TASK(wait, &ei->i_flags,
+				     EXT4_STATE_FC_COMMITTING);
 		wq = bit_waitqueue(&ei->i_flags,
 				   EXT4_STATE_FC_COMMITTING);
 #endif
-		prepare_to_wait(wq, &wait.wq_entry, TASK_UNINTERRUPTIBLE);
+		prepare_to_wait(wq, &wait->wq_entry, TASK_UNINTERRUPTIBLE);
 		if (ext4_test_inode_state(inode, EXT4_STATE_FC_COMMITTING))
 			schedule();
-		finish_wait(wq, &wait.wq_entry);
+		FINISH_WAIT_BIT_TASK(wq, wait);
 	}
 
 	/*

@@ -3038,12 +3038,13 @@ restart:
 	/* Is commit writing out inode - we have to wait */
 	if (jinode->i_flags & JI_COMMIT_RUNNING) {
 		wait_queue_head_t *wq;
-		DEFINE_WAIT_BIT(wait, &jinode->i_flags, __JI_COMMIT_RUNNING);
+		DEFINE_WAIT_BIT_TASK(wait, &jinode->i_flags,
+				     __JI_COMMIT_RUNNING);
 		wq = bit_waitqueue(&jinode->i_flags, __JI_COMMIT_RUNNING);
-		prepare_to_wait(wq, &wait.wq_entry, TASK_UNINTERRUPTIBLE);
+		prepare_to_wait(wq, &wait->wq_entry, TASK_UNINTERRUPTIBLE);
 		spin_unlock(&journal->j_list_lock);
 		schedule();
-		finish_wait(wq, &wait.wq_entry);
+		FINISH_WAIT_BIT_TASK(wq, wait);
 		goto restart;
 	}
 

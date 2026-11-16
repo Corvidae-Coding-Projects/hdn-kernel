@@ -32,8 +32,8 @@ void hdn_wait_bit_release(struct wait_bit_queue_entry *wait)
 EXPORT_SYMBOL_GPL(hdn_wait_bit_acquire);
 EXPORT_SYMBOL_GPL(hdn_wait_bit_release);
 
-static void init_wait_bit_entry(struct wait_bit_queue_entry *wait,
-		unsigned long *word, int bit)
+void hdn_init_wait_bit_entry(struct wait_bit_queue_entry *wait,
+			     unsigned long *word, int bit)
 {
 	*wait = (struct wait_bit_queue_entry) {
 		.key = __WAIT_BIT_KEY_INITIALIZER(word, bit),
@@ -44,6 +44,7 @@ static void init_wait_bit_entry(struct wait_bit_queue_entry *wait,
 		},
 	};
 }
+EXPORT_SYMBOL_GPL(hdn_init_wait_bit_entry);
 #endif
 
 wait_queue_head_t *bit_waitqueue(unsigned long *word, int bit)
@@ -100,7 +101,7 @@ int __sched out_of_line_wait_on_bit(unsigned long *word, int bit,
 	struct wait_bit_queue_entry *wq_entry = hdn_wait_bit_acquire();
 	int ret;
 
-	init_wait_bit_entry(wq_entry, word, bit);
+	hdn_init_wait_bit_entry(wq_entry, word, bit);
 	ret = __wait_on_bit(wq_head, wq_entry, action, mode);
 	hdn_wait_bit_release(wq_entry);
 	return ret;
@@ -121,7 +122,7 @@ int __sched out_of_line_wait_on_bit_timeout(
 	struct wait_bit_queue_entry *wq_entry = hdn_wait_bit_acquire();
 	int ret;
 
-	init_wait_bit_entry(wq_entry, word, bit);
+	hdn_init_wait_bit_entry(wq_entry, word, bit);
 	wq_entry->key.timeout = jiffies + timeout;
 	ret = __wait_on_bit(wq_head, wq_entry, action, mode);
 	hdn_wait_bit_release(wq_entry);
@@ -174,7 +175,7 @@ int __sched out_of_line_wait_on_bit_lock(unsigned long *word, int bit,
 	struct wait_bit_queue_entry *wq_entry = hdn_wait_bit_acquire();
 	int ret;
 
-	init_wait_bit_entry(wq_entry, word, bit);
+	hdn_init_wait_bit_entry(wq_entry, word, bit);
 	ret = __wait_on_bit_lock(wq_head, wq_entry, action, mode);
 	hdn_wait_bit_release(wq_entry);
 	return ret;

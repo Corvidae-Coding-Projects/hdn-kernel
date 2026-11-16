@@ -39,4 +39,20 @@ struct wait_page_queue {
 	struct wait_queue_entry	wait;
 };
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+/*
+ * Manual wait-queue users can nest (for example, poll plus a driver wait).
+ * Keep a small task-owned pool so no queued descriptor is left on a private
+ * stack while that stack is unmapped.
+ */
+#define HDN_WAIT_SLOTS	8
+#define HDN_WAIT_OBJECT_SLOTS	4
+#define HDN_WAIT_OBJECT_SIZE	256
+
+union hdn_wait_object {
+	u8 data[HDN_WAIT_OBJECT_SIZE];
+	u64 align;
+} __aligned(16);
+#endif
+
 #endif /* _LINUX_WAIT_TYPES_H */

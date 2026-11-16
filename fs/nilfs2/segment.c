@@ -2230,13 +2230,13 @@ struct nilfs_segctor_wait_request {
 
 static int nilfs_segctor_sync(struct nilfs_sc_info *sci)
 {
-	struct nilfs_segctor_wait_request wait_req;
+	DEFINE_HDN_WAIT_OBJECT(struct nilfs_segctor_wait_request, wait_req);
 	int err = 0;
 
-	init_wait(&wait_req.wq);
-	wait_req.err = 0;
-	atomic_set(&wait_req.done, 0);
-	init_waitqueue_entry(&wait_req.wq, current);
+	init_wait(&wait_req->wq);
+	wait_req->err = 0;
+	atomic_set(&wait_req->done, 0);
+	init_waitqueue_entry(&wait_req->wq, current);
 
 	/*
 	 * To prevent a race issue where completion notifications from the
@@ -2246,8 +2246,8 @@ static int nilfs_segctor_sync(struct nilfs_sc_info *sci)
 	 * within the lock section of "sc_state_lock".
 	 */
 	spin_lock(&sci->sc_state_lock);
-	wait_req.seq = ++sci->sc_seq_request;
-	add_wait_queue(&sci->sc_wait_request, &wait_req.wq);
+	wait_req->seq = ++sci->sc_seq_request;
+	add_wait_queue(&sci->sc_wait_request, &wait_req->wq);
 	spin_unlock(&sci->sc_state_lock);
 
 	wake_up(&sci->sc_wait_daemon);
@@ -2263,8 +2263,8 @@ static int nilfs_segctor_sync(struct nilfs_sc_info *sci)
 		if (!sci->sc_task)
 			break;
 
-		if (atomic_read(&wait_req.done)) {
-			err = wait_req.err;
+		if (atomic_read(&wait_req->done)) {
+			err = wait_req->err;
 			break;
 		}
 		if (!signal_pending(current)) {
@@ -2274,7 +2274,7 @@ static int nilfs_segctor_sync(struct nilfs_sc_info *sci)
 		err = -ERESTARTSYS;
 		break;
 	}
-	finish_wait(&sci->sc_wait_request, &wait_req.wq);
+	finish_wait(&sci->sc_wait_request, &wait_req->wq);
 	return err;
 }
 

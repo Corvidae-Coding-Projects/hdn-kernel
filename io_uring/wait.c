@@ -118,12 +118,22 @@ static int io_cqring_schedule_timeout(struct io_wait_queue *iowq,
 
 	if (iowq->min_timeout) {
 		timeout = ktime_add_ns(iowq->min_timeout, start_time);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+		hrtimer_setup(&iowq->t, io_cqring_min_timer_wakeup, clock_id,
+			      HRTIMER_MODE_ABS);
+#else
 		hrtimer_setup_on_stack(&iowq->t, io_cqring_min_timer_wakeup, clock_id,
 				       HRTIMER_MODE_ABS);
+#endif
 	} else {
 		timeout = iowq->timeout;
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+		hrtimer_setup(&iowq->t, io_cqring_timer_wakeup, clock_id,
+			      HRTIMER_MODE_ABS);
+#else
 		hrtimer_setup_on_stack(&iowq->t, io_cqring_timer_wakeup, clock_id,
 				       HRTIMER_MODE_ABS);
+#endif
 	}
 
 	hrtimer_set_expires_range_ns(&iowq->t, timeout, 0);
@@ -133,7 +143,9 @@ static int io_cqring_schedule_timeout(struct io_wait_queue *iowq,
 		schedule();
 
 	hrtimer_cancel(&iowq->t);
+#ifndef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
 	destroy_hrtimer_on_stack(&iowq->t);
+#endif
 	__set_current_state(TASK_RUNNING);
 
 	return READ_ONCE(iowq->hit_timeout) ? -ETIME : 0;
@@ -188,7 +200,7 @@ static inline int io_cqring_wait_schedule(struct io_ring_ctx *ctx,
 int io_cqring_wait(struct io_ring_ctx *ctx, int min_events, u32 flags,
 		   struct ext_arg *ext_arg)
 {
-	struct io_wait_queue iowq;
+	DEFINE_HDN_WAIT_OBJECT(struct io_wait_queue, iowq);
 	struct io_rings *rings;
 	ktime_t start_time;
 	int ret, nr_wait;
@@ -212,25 +224,25 @@ int io_cqring_wait(struct io_ring_ctx *ctx, int min_events, u32 flags,
 		return 0;
 	}
 
-	init_waitqueue_func_entry(&iowq.wq, io_wake_function);
-	iowq.wq.private = current;
-	INIT_LIST_HEAD(&iowq.wq.entry);
-	iowq.ctx = ctx;
-	iowq.cq_tail = READ_ONCE(rings->cq.head) + min_events;
-	iowq.cq_min_tail = READ_ONCE(rings->cq.tail);
-	nr_wait = (int) iowq.cq_tail - READ_ONCE(rings->cq.tail);
+	init_waitqueue_func_entry(&iowq->wq, io_wake_function);
+	iowq->wq.private = current;
+	INIT_LIST_HEAD(&iowq->wq.entry);
+	iowq->ctx = ctx;
+	iowq->cq_tail = READ_ONCE(rings->cq.head) + min_events;
+	iowq->cq_min_tail = READ_ONCE(rings->cq.tail);
+	nr_wait = (int)iowq->cq_tail - READ_ONCE(rings->cq.tail);
 	rcu_read_unlock();
 	rings = NULL;
-	iowq.nr_timeouts = atomic_read(&ctx->cq_timeouts);
-	iowq.hit_timeout = 0;
-	iowq.min_timeout = ext_arg->min_time;
-	iowq.timeout = KTIME_MAX;
+	iowq->nr_timeouts = atomic_read(&ctx->cq_timeouts);
+	iowq->hit_timeout = 0;
+	iowq->min_timeout = ext_arg->min_time;
+	iowq->timeout = KTIME_MAX;
 	start_time = io_get_time(ctx);
 
 	if (ext_arg->ts_set) {
-		iowq.timeout = timespec64_to_ktime(ext_arg->ts);
+		iowq->timeout = timespec64_to_ktime(ext_arg->ts);
 		if (!(flags & IORING_ENTER_ABS_TIMER))
-			iowq.timeout = ktime_add(iowq.timeout, start_time);
+			iowq->timeout = ktime_add(iowq->timeout, start_time);
 	}
 
 	if (ext_arg->sig) {
@@ -246,7 +258,7 @@ int io_cqring_wait(struct io_ring_ctx *ctx, int min_events, u32 flags,
 			return ret;
 	}
 
-	io_napi_busy_loop(ctx, &iowq);
+	io_napi_busy_loop(ctx, iowq);
 
 	trace_io_uring_cqring_wait(ctx, min_events);
 	do {
@@ -256,11 +268,11 @@ int io_cqring_wait(struct io_ring_ctx *ctx, int min_events, u32 flags,
 			atomic_set(&ctx->cq_wait_nr, nr_wait);
 			set_current_state(TASK_INTERRUPTIBLE);
 		} else {
-			prepare_to_wait_exclusive(&ctx->cq_wait, &iowq.wq,
-							TASK_INTERRUPTIBLE);
+			prepare_to_wait_exclusive(&ctx->cq_wait, &iowq->wq,
+						  TASK_INTERRUPTIBLE);
 		}
 
-		ret = io_cqring_wait_schedule(ctx, &iowq, ext_arg, start_time);
+		ret = io_cqring_wait_schedule(ctx, iowq, ext_arg, start_time);
 		__set_current_state(TASK_RUNNING);
 		atomic_set(&ctx->cq_wait_nr, IO_CQ_WAKE_INIT);
 
@@ -296,23 +308,23 @@ int io_cqring_wait(struct io_ring_ctx *ctx, int min_events, u32 flags,
 			}
 		}
 
-		if (io_should_wake(&iowq)) {
+		if (io_should_wake(iowq)) {
 			ret = 0;
 			break;
 		}
 		cond_resched();
 
 		/* if min timeout has been hit, don't reset wait count */
-		if (!iowq.hit_timeout)
+		if (!iowq->hit_timeout)
 			scoped_guard(rcu)
-				nr_wait = (int) iowq.cq_tail -
+				nr_wait = (int)iowq->cq_tail -
 						READ_ONCE(io_get_rings(ctx)->cq.tail);
 		else
 			nr_wait = 1;
 	} while (1);
 
 	if (!(ctx->flags & IORING_SETUP_DEFER_TASKRUN))
-		finish_wait(&ctx->cq_wait, &iowq.wq);
+		finish_wait(&ctx->cq_wait, &iowq->wq);
 	restore_saved_sigmask_unless(ret == -EINTR);
 
 	guard(rcu)();

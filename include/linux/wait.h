@@ -26,6 +26,27 @@ typedef struct wait_queue_head wait_queue_head_t;
 
 struct task_struct;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+struct wait_queue_entry *hdn_wait_acquire(void);
+void hdn_wait_release(struct wait_queue_entry *wait);
+struct wait_queue_entry *hdn_wait_stabilize(struct wait_queue_entry *wait);
+struct wait_queue_entry *hdn_wait_resolve(struct wait_queue_entry *wait);
+void hdn_wait_unstabilize(struct wait_queue_entry *wait);
+void hdn_wait_cleanup(struct wait_queue_entry *wait);
+void *hdn_wait_object_acquire(size_t size);
+void hdn_wait_object_cleanup(void *object);
+#define __HDN_WAIT_CLEANUP	__cleanup(hdn_wait_cleanup)
+#define DEFINE_HDN_WAIT_OBJECT(type, name)					\
+	static_assert(sizeof(type) <= HDN_WAIT_OBJECT_SIZE);			\
+	type *name __cleanup(hdn_wait_object_cleanup) =			\
+		hdn_wait_object_acquire(sizeof(type))
+#else
+#define __HDN_WAIT_CLEANUP
+#define DEFINE_HDN_WAIT_OBJECT(type, name)					\
+	type name##_storage;							\
+	type *name = &name##_storage
+#endif
+
 /*
  * Macros for declaration and initialisaton of the datatypes
  */
@@ -36,7 +57,8 @@ struct task_struct;
 	.entry		= { NULL, NULL } }
 
 #define DECLARE_WAITQUEUE(name, tsk)						\
-	struct wait_queue_entry name = __WAITQUEUE_INITIALIZER(name, tsk)
+	struct wait_queue_entry name __HDN_WAIT_CLEANUP =			\
+		__WAITQUEUE_INITIALIZER(name, tsk)
 
 #define __WAIT_QUEUE_HEAD_INITIALIZER(name) {					\
 	.lock		= __SPIN_LOCK_UNLOCKED(name.lock),			\
@@ -159,6 +181,10 @@ static inline void __add_wait_queue(struct wait_queue_head *wq_head, struct wait
 	struct list_head *head = &wq_head->head;
 	struct wait_queue_entry *wq;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_entry = hdn_wait_stabilize(wq_entry);
+#endif
+
 	list_for_each_entry(wq, &wq_head->head, entry) {
 		if (!(wq->flags & WQ_FLAG_PRIORITY))
 			break;
@@ -179,6 +205,9 @@ __add_wait_queue_exclusive(struct wait_queue_head *wq_head, struct wait_queue_en
 
 static inline void __add_wait_queue_entry_tail(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_entry)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_entry = hdn_wait_stabilize(wq_entry);
+#endif
 	list_add_tail(&wq_entry->entry, &wq_head->head);
 }
 
@@ -192,7 +221,10 @@ __add_wait_queue_entry_tail_exclusive(struct wait_queue_head *wq_head, struct wa
 static inline void
 __remove_wait_queue(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_entry)
 {
-	list_del(&wq_entry->entry);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_entry = hdn_wait_resolve(wq_entry);
+#endif
+	list_del_init(&wq_entry->entry);
 }
 
 int __wake_up(struct wait_queue_head *wq_head, unsigned int mode, int nr, void *key);
@@ -272,11 +304,6 @@ static inline void wake_up_pollfree(struct wait_queue_head *wq_head)
 	 (state & (TASK_INTERRUPTIBLE | TASK_WAKEKILL)))
 
 extern void init_wait_entry(struct wait_queue_entry *wq_entry, int flags);
-
-#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
-struct wait_queue_entry *hdn_wait_acquire(void);
-void hdn_wait_release(struct wait_queue_entry *wait);
-#endif
 
 /*
  * The below macro ___wait_event() has an explicit shadow of the __ret
@@ -1252,7 +1279,7 @@ int woken_wake_function(struct wait_queue_entry *wq_entry, unsigned mode, int sy
 int autoremove_wake_function(struct wait_queue_entry *wq_entry, unsigned mode, int sync, void *key);
 
 #define DEFINE_WAIT_FUNC(name, function)					\
-	struct wait_queue_entry name = {					\
+	struct wait_queue_entry name __HDN_WAIT_CLEANUP = {			\
 		.private	= current,					\
 		.func		= function,					\
 		.entry		= LIST_HEAD_INIT((name).entry),			\

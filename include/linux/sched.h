@@ -1250,8 +1250,11 @@ struct task_struct {
 	/* Waiters must remain reachable while another private stack is active. */
 	struct swait_queue		hdn_swait;
 	bool				hdn_swait_active;
-	struct wait_queue_entry	hdn_wait;
-	bool				hdn_wait_active;
+	struct wait_queue_entry	hdn_wait[HDN_WAIT_SLOTS];
+	const struct wait_queue_entry *hdn_wait_origin[HDN_WAIT_SLOTS];
+	unsigned long			hdn_wait_active;
+	union hdn_wait_object		hdn_wait_object[HDN_WAIT_OBJECT_SLOTS];
+	unsigned long			hdn_wait_object_active;
 	struct wait_bit_queue_entry hdn_wait_bit;
 	bool				hdn_wait_bit_active;
 	struct wait_page_queue		hdn_wait_page;

@@ -7657,21 +7657,23 @@ nfs4_retry_setlk(struct nfs4_state *state, int cmd, struct file_lock *request)
 	struct nfs_server *server = NFS_SERVER(state->inode);
 	struct nfs_client *clp = server->nfs_client;
 	wait_queue_head_t *q = &clp->cl_lock_waitq;
-	struct nfs4_lock_waiter waiter = {
+	DEFINE_HDN_WAIT_OBJECT(struct nfs4_lock_waiter, waiter);
+	int status;
+
+	*waiter = (struct nfs4_lock_waiter) {
 		.inode = state->inode,
 		.owner = { .clientid = clp->cl_clientid,
 			   .id = lsp->ls_seqid.owner_id,
 			   .s_dev = server->s_dev },
 	};
-	int status;
 
 	/* Don't bother with waitqueue if we don't expect a callback */
 	if (!test_bit(NFS_STATE_MAY_NOTIFY_LOCK, &state->flags))
 		return nfs4_retry_setlk_simple(state, cmd, request);
 
-	init_wait(&waiter.wait);
-	waiter.wait.func = nfs4_wake_lock_waiter;
-	add_wait_queue(q, &waiter.wait);
+	init_wait(&waiter->wait);
+	waiter->wait.func = nfs4_wake_lock_waiter;
+	add_wait_queue(q, &waiter->wait);
 
 	do {
 		status = nfs4_proc_setlk(state, cmd, request);
@@ -7679,11 +7681,11 @@ nfs4_retry_setlk(struct nfs4_state *state, int cmd, struct file_lock *request)
 			break;
 
 		status = -ERESTARTSYS;
-		wait_woken(&waiter.wait, TASK_INTERRUPTIBLE|TASK_FREEZABLE,
+		wait_woken(&waiter->wait, TASK_INTERRUPTIBLE | TASK_FREEZABLE,
 			   NFS4_LOCK_MAXTIMEOUT);
 	} while (!signalled());
 
-	remove_wait_queue(q, &waiter.wait);
+	remove_wait_queue(q, &waiter->wait);
 
 	return status;
 }

@@ -1960,7 +1960,8 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 {
 	int res, eavail, timed_out = 0;
 	u64 slack = 0;
-	wait_queue_entry_t wait;
+	wait_queue_entry_t wait __HDN_WAIT_CLEANUP;
+	wait_queue_entry_t *active_wait = &wait;
 	ktime_t expires, *to = NULL;
 
 	lockdep_assert_irqs_enabled();
@@ -2023,6 +2024,7 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 		 */
 		init_wait(&wait);
 		wait.func = ep_autoremove_wake_function;
+		active_wait = &wait;
 
 		spin_lock_irq(&ep->lock);
 		/*
@@ -2040,8 +2042,12 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 		 * important.
 		 */
 		eavail = ep_events_available(ep);
-		if (!eavail)
+		if (!eavail) {
 			__add_wait_queue_exclusive(&ep->wq, &wait);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+			active_wait = hdn_wait_resolve(&wait);
+#endif
+		}
 
 		spin_unlock_irq(&ep->lock);
 
@@ -2058,7 +2064,7 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 		 */
 		eavail = 1;
 
-		if (!list_empty_careful(&wait.entry)) {
+		if (!list_empty_careful(&active_wait->entry)) {
 			spin_lock_irq(&ep->lock);
 			/*
 			 * If the thread timed out and is not on the wait queue,
@@ -2068,8 +2074,8 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 			 * events.
 			 */
 			if (timed_out)
-				eavail = list_empty(&wait.entry);
-			__remove_wait_queue(&ep->wq, &wait);
+				eavail = list_empty(&active_wait->entry);
+			__remove_wait_queue(&ep->wq, active_wait);
 			spin_unlock_irq(&ep->lock);
 		}
 	}

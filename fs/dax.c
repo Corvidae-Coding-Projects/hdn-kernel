@@ -213,11 +213,11 @@ static void dax_wake_entry(struct xa_state *xas, void *entry,
 static void *get_next_unlocked_entry(struct xa_state *xas, unsigned int order)
 {
 	void *entry;
-	struct wait_exceptional_entry_queue ewait;
+	DEFINE_HDN_WAIT_OBJECT(struct wait_exceptional_entry_queue, ewait);
 	wait_queue_head_t *wq;
 
-	init_wait(&ewait.wait);
-	ewait.wait.func = wake_exceptional_entry_func;
+	init_wait(&ewait->wait);
+	ewait->wait.func = wake_exceptional_entry_func;
 
 	for (;;) {
 		entry = xas_find_conflict(xas);
@@ -228,13 +228,13 @@ static void *get_next_unlocked_entry(struct xa_state *xas, unsigned int order)
 		if (!dax_is_locked(entry))
 			return entry;
 
-		wq = dax_entry_waitqueue(xas, entry, &ewait.key);
-		prepare_to_wait_exclusive(wq, &ewait.wait,
+		wq = dax_entry_waitqueue(xas, entry, &ewait->key);
+		prepare_to_wait_exclusive(wq, &ewait->wait,
 					  TASK_UNINTERRUPTIBLE);
 		xas_unlock_irq(xas);
 		xas_reset(xas);
 		schedule();
-		finish_wait(wq, &ewait.wait);
+		finish_wait(wq, &ewait->wait);
 		xas_lock_irq(xas);
 	}
 }
@@ -246,20 +246,20 @@ static void *get_next_unlocked_entry(struct xa_state *xas, unsigned int order)
  */
 static void *wait_entry_unlocked_exclusive(struct xa_state *xas, void *entry)
 {
-	struct wait_exceptional_entry_queue ewait;
+	DEFINE_HDN_WAIT_OBJECT(struct wait_exceptional_entry_queue, ewait);
 	wait_queue_head_t *wq;
 
-	init_wait(&ewait.wait);
-	ewait.wait.func = wake_exceptional_entry_func;
+	init_wait(&ewait->wait);
+	ewait->wait.func = wake_exceptional_entry_func;
 
 	while (unlikely(dax_is_locked(entry))) {
-		wq = dax_entry_waitqueue(xas, entry, &ewait.key);
-		prepare_to_wait_exclusive(wq, &ewait.wait,
-					TASK_UNINTERRUPTIBLE);
+		wq = dax_entry_waitqueue(xas, entry, &ewait->key);
+		prepare_to_wait_exclusive(wq, &ewait->wait,
+					  TASK_UNINTERRUPTIBLE);
 		xas_reset(xas);
 		xas_unlock_irq(xas);
 		schedule();
-		finish_wait(wq, &ewait.wait);
+		finish_wait(wq, &ewait->wait);
 		xas_lock_irq(xas);
 		entry = xas_load(xas);
 	}
@@ -277,23 +277,23 @@ static void *wait_entry_unlocked_exclusive(struct xa_state *xas, void *entry)
  */
 static void wait_entry_unlocked(struct xa_state *xas, void *entry)
 {
-	struct wait_exceptional_entry_queue ewait;
+	DEFINE_HDN_WAIT_OBJECT(struct wait_exceptional_entry_queue, ewait);
 	wait_queue_head_t *wq;
 
-	init_wait(&ewait.wait);
-	ewait.wait.func = wake_exceptional_entry_func;
+	init_wait(&ewait->wait);
+	ewait->wait.func = wake_exceptional_entry_func;
 
-	wq = dax_entry_waitqueue(xas, entry, &ewait.key);
+	wq = dax_entry_waitqueue(xas, entry, &ewait->key);
 	/*
 	 * Unlike get_next_unlocked_entry() there is no guarantee that this
 	 * path ever successfully retrieves an unlocked entry before an
 	 * inode dies. Perform a non-exclusive wait in case this path
 	 * never successfully performs its own wake up.
 	 */
-	prepare_to_wait(wq, &ewait.wait, TASK_UNINTERRUPTIBLE);
+	prepare_to_wait(wq, &ewait->wait, TASK_UNINTERRUPTIBLE);
 	xas_unlock_irq(xas);
 	schedule();
-	finish_wait(wq, &ewait.wait);
+	finish_wait(wq, &ewait->wait);
 }
 
 static void put_unlocked_entry(struct xa_state *xas, void *entry,

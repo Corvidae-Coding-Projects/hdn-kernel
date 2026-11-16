@@ -44,11 +44,17 @@ static void mark_killed(struct slot_map *m)
 static void run_down(struct slot_map *m)
 {
 	DEFINE_WAIT(wait);
+	wait_queue_entry_t *active_wait = &wait;
+
 	spin_lock(&m->q.lock);
 	if (m->c != -1) {
 		for (;;) {
-			if (likely(list_empty(&wait.entry)))
+			if (likely(list_empty(&active_wait->entry))) {
 				__add_wait_queue_entry_tail(&m->q, &wait);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+				active_wait = hdn_wait_resolve(&wait);
+#endif
+			}
 			set_current_state(TASK_UNINTERRUPTIBLE);
 
 			if (m->c == -1)
@@ -58,7 +64,7 @@ static void run_down(struct slot_map *m)
 			schedule();
 			spin_lock(&m->q.lock);
 		}
-		__remove_wait_queue(&m->q, &wait);
+		__remove_wait_queue(&m->q, active_wait);
 		__set_current_state(TASK_RUNNING);
 	}
 	m->map = NULL;
@@ -82,11 +88,16 @@ static int wait_for_free(struct slot_map *m)
 {
 	long left = slot_timeout_secs * HZ;
 	DEFINE_WAIT(wait);
+	wait_queue_entry_t *active_wait = &wait;
 
 	do {
 		long n = left, t;
-		if (likely(list_empty(&wait.entry)))
+		if (likely(list_empty(&active_wait->entry))) {
 			__add_wait_queue_entry_tail_exclusive(&m->q, &wait);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+			active_wait = hdn_wait_resolve(&wait);
+#endif
+		}
 		set_current_state(TASK_INTERRUPTIBLE);
 
 		if (m->c > 0)
@@ -109,8 +120,8 @@ static int wait_for_free(struct slot_map *m)
 			left = -EINTR;
 	} while (left > 0);
 
-	if (!list_empty(&wait.entry))
-		list_del(&wait.entry);
+	if (!list_empty(&active_wait->entry))
+		list_del_init(&active_wait->entry);
 	else if (left <= 0 && waitqueue_active(&m->q))
 		__wake_up_locked_key(&m->q, TASK_INTERRUPTIBLE, NULL);
 	__set_current_state(TASK_RUNNING);

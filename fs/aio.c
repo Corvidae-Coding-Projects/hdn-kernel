@@ -1313,8 +1313,8 @@ static long read_events(struct kioctx *ctx, long min_nr, long nr,
 			struct io_event __user *event,
 			ktime_t until)
 {
-	struct hrtimer_sleeper	t;
-	struct aio_waiter	w;
+	DEFINE_HDN_WAIT_OBJECT(struct hrtimer_sleeper, t);
+	DEFINE_HDN_WAIT_OBJECT(struct aio_waiter, w);
 	long ret = 0, ret2 = 0;
 
 	/*
@@ -1335,21 +1335,25 @@ static long read_events(struct kioctx *ctx, long min_nr, long nr,
 	if (until == 0 || ret < 0 || ret >= min_nr)
 		return ret;
 
-	hrtimer_setup_sleeper_on_stack(&t, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hrtimer_setup_sleeper(t, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+#else
+	hrtimer_setup_sleeper_on_stack(t, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+#endif
 	if (until != KTIME_MAX) {
-		hrtimer_set_expires_range_ns(&t.timer, until, current->timer_slack_ns);
-		hrtimer_sleeper_start_expires(&t, HRTIMER_MODE_REL);
+		hrtimer_set_expires_range_ns(&t->timer, until, current->timer_slack_ns);
+		hrtimer_sleeper_start_expires(t, HRTIMER_MODE_REL);
 	}
 
-	init_wait(&w.w);
+	init_wait(&w->w);
 
 	while (1) {
 		unsigned long nr_got = ret;
 
-		w.min_nr = min_nr - ret;
+		w->min_nr = min_nr - ret;
 
-		ret2 = prepare_to_wait_event(&ctx->wait, &w.w, TASK_INTERRUPTIBLE);
-		if (!ret2 && !t.task)
+		ret2 = prepare_to_wait_event(&ctx->wait, &w->w, TASK_INTERRUPTIBLE);
+		if (!ret2 && !t->task)
 			ret2 = -ETIME;
 
 		if (aio_read_events(ctx, min_nr, nr, event, &ret) || ret2)
@@ -1359,9 +1363,11 @@ static long read_events(struct kioctx *ctx, long min_nr, long nr,
 			schedule();
 	}
 
-	finish_wait(&ctx->wait, &w.w);
-	hrtimer_cancel(&t.timer);
-	destroy_hrtimer_on_stack(&t.timer);
+	finish_wait(&ctx->wait, &w->w);
+	hrtimer_cancel(&t->timer);
+#ifndef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	destroy_hrtimer_on_stack(&t->timer);
+#endif
 
 	return ret;
 }

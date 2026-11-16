@@ -29,7 +29,8 @@ void pin_insert(struct fs_pin *pin, struct vfsmount *m)
 
 void pin_kill(struct fs_pin *p)
 {
-	wait_queue_entry_t wait;
+	wait_queue_entry_t wait __HDN_WAIT_CLEANUP;
+	wait_queue_entry_t *active_wait = &wait;
 
 	if (!p) {
 		rcu_read_unlock();
@@ -50,13 +51,16 @@ void pin_kill(struct fs_pin *p)
 		return;
 	}
 	__add_wait_queue(&p->wait, &wait);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	active_wait = hdn_wait_resolve(&wait);
+#endif
 	while (1) {
 		set_current_state(TASK_UNINTERRUPTIBLE);
 		spin_unlock_irq(&p->wait.lock);
 		rcu_read_unlock();
 		schedule();
 		rcu_read_lock();
-		if (likely(list_empty(&wait.entry)))
+		if (likely(list_empty(&active_wait->entry)))
 			break;
 		/* OK, we know p couldn't have been freed yet */
 		spin_lock_irq(&p->wait.lock);

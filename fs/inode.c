@@ -544,7 +544,6 @@ EXPORT_SYMBOL(inode_bit_waitqueue);
 
 void wait_on_new_inode(struct inode *inode)
 {
-	struct wait_bit_queue_entry wqe;
 	struct wait_queue_head *wq_head;
 
 	spin_lock(&inode->i_lock);
@@ -553,16 +552,18 @@ void wait_on_new_inode(struct inode *inode)
 		return;
 	}
 
-	wq_head = inode_bit_waitqueue(&wqe, inode, __I_NEW);
+	DECLARE_WAIT_BIT_TASK(wqe);
+
+	wq_head = inode_bit_waitqueue(wqe, inode, __I_NEW);
 	for (;;) {
-		prepare_to_wait_event(wq_head, &wqe.wq_entry, TASK_UNINTERRUPTIBLE);
+		prepare_to_wait_event(wq_head, &wqe->wq_entry, TASK_UNINTERRUPTIBLE);
 		if (!(inode_state_read(inode) & I_NEW))
 			break;
 		spin_unlock(&inode->i_lock);
 		schedule();
 		spin_lock(&inode->i_lock);
 	}
-	finish_wait(wq_head, &wqe.wq_entry);
+	FINISH_WAIT_BIT_TASK(wq_head, wqe);
 	WARN_ON(inode_state_read(inode) & I_NEW);
 	spin_unlock(&inode->i_lock);
 }
@@ -623,16 +624,17 @@ static void inode_unpin_lru_isolating(struct inode *inode)
 
 static void inode_wait_for_lru_isolating(struct inode *inode)
 {
-	struct wait_bit_queue_entry wqe;
 	struct wait_queue_head *wq_head;
 
 	lockdep_assert_held(&inode->i_lock);
 	if (!(inode_state_read(inode) & I_LRU_ISOLATING))
 		return;
 
-	wq_head = inode_bit_waitqueue(&wqe, inode, __I_LRU_ISOLATING);
+	DECLARE_WAIT_BIT_TASK(wqe);
+
+	wq_head = inode_bit_waitqueue(wqe, inode, __I_LRU_ISOLATING);
 	for (;;) {
-		prepare_to_wait_event(wq_head, &wqe.wq_entry, TASK_UNINTERRUPTIBLE);
+		prepare_to_wait_event(wq_head, &wqe->wq_entry, TASK_UNINTERRUPTIBLE);
 		/*
 		 * Checking I_LRU_ISOLATING with inode->i_lock guarantees
 		 * memory ordering.
@@ -643,7 +645,7 @@ static void inode_wait_for_lru_isolating(struct inode *inode)
 		schedule();
 		spin_lock(&inode->i_lock);
 	}
-	finish_wait(wq_head, &wqe.wq_entry);
+	FINISH_WAIT_BIT_TASK(wq_head, wqe);
 	WARN_ON(inode_state_read(inode) & I_LRU_ISOLATING);
 }
 
@@ -2542,7 +2544,6 @@ EXPORT_SYMBOL(inode_needs_sync);
  */
 static void __wait_on_freeing_inode(struct inode *inode, bool hash_locked, bool rcu_locked)
 {
-	struct wait_bit_queue_entry wqe;
 	struct wait_queue_head *wq_head;
 
 	VFS_BUG_ON(!hash_locked && !rcu_locked);
@@ -2556,15 +2557,17 @@ static void __wait_on_freeing_inode(struct inode *inode, bool hash_locked, bool 
 		return;
 	}
 
-	wq_head = inode_bit_waitqueue(&wqe, inode, __I_NEW);
-	prepare_to_wait_event(wq_head, &wqe.wq_entry, TASK_UNINTERRUPTIBLE);
+	DECLARE_WAIT_BIT_TASK(wqe);
+
+	wq_head = inode_bit_waitqueue(wqe, inode, __I_NEW);
+	prepare_to_wait_event(wq_head, &wqe->wq_entry, TASK_UNINTERRUPTIBLE);
 	spin_unlock(&inode->i_lock);
 	if (rcu_locked)
 		rcu_read_unlock();
 	if (hash_locked)
 		spin_unlock(&inode_hash_lock);
 	schedule();
-	finish_wait(wq_head, &wqe.wq_entry);
+	FINISH_WAIT_BIT_TASK(wq_head, wqe);
 	if (hash_locked)
 		spin_lock(&inode_hash_lock);
 	if (rcu_locked)

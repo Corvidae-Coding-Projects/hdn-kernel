@@ -6,27 +6,161 @@
  */
 #include "sched.h"
 
+#include <linux/hdn_stack.h>
+
 #ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+static int hdn_wait_slot(const struct wait_queue_entry *wait)
+{
+	int slot;
+
+	for (slot = 0; slot < HDN_WAIT_SLOTS; slot++)
+		if (wait == &current->hdn_wait[slot])
+			return slot;
+	return -1;
+}
+
+static int hdn_wait_origin_slot(const struct wait_queue_entry *wait)
+{
+	int slot;
+
+	for (slot = 0; slot < HDN_WAIT_SLOTS; slot++) {
+		if ((current->hdn_wait_active & BIT(slot)) &&
+		    current->hdn_wait_origin[slot] == wait)
+			return slot;
+	}
+	return -1;
+}
+
 struct wait_queue_entry *hdn_wait_acquire(void)
 {
-	struct wait_queue_entry *wait = &current->hdn_wait;
+	struct wait_queue_entry *wait;
+	int slot;
 
-	if (unlikely(current->hdn_wait_active))
+	for (slot = 0; slot < HDN_WAIT_SLOTS; slot++)
+		if (!(current->hdn_wait_active & BIT(slot)))
+			break;
+	if (unlikely(slot == HDN_WAIT_SLOTS))
 		BUG();
-	current->hdn_wait_active = true;
+
+	current->hdn_wait_active |= BIT(slot);
+	wait = &current->hdn_wait[slot];
+	current->hdn_wait_origin[slot] = wait;
+	INIT_LIST_HEAD(&wait->entry);
 	return wait;
 }
+EXPORT_SYMBOL_GPL(hdn_wait_acquire);
 
 void hdn_wait_release(struct wait_queue_entry *wait)
 {
-	if (unlikely(wait != &current->hdn_wait ||
-		     !current->hdn_wait_active ||
+	int slot = hdn_wait_slot(wait);
+
+	if (unlikely(slot < 0 ||
+		     !(current->hdn_wait_active & BIT(slot)) ||
+		     current->hdn_wait_origin[slot] != wait ||
 		     !list_empty(&wait->entry)))
 		BUG();
-	current->hdn_wait_active = false;
+	current->hdn_wait_origin[slot] = NULL;
+	current->hdn_wait_active &= ~BIT(slot);
 }
-EXPORT_SYMBOL_GPL(hdn_wait_acquire);
 EXPORT_SYMBOL_GPL(hdn_wait_release);
+
+struct wait_queue_entry *hdn_wait_stabilize(struct wait_queue_entry *wait)
+{
+	struct wait_queue_entry *stable;
+	int slot;
+
+	slot = hdn_wait_origin_slot(wait);
+	if (slot >= 0)
+		return &current->hdn_wait[slot];
+
+	if (!hdn_stack_overlaps((unsigned long)wait, sizeof(*wait)))
+		return wait;
+
+	stable = hdn_wait_acquire();
+	slot = hdn_wait_slot(stable);
+	current->hdn_wait_origin[slot] = wait;
+	stable->flags = wait->flags;
+	stable->private = wait->private;
+	stable->func = wait->func;
+	INIT_LIST_HEAD(&stable->entry);
+	return stable;
+}
+EXPORT_SYMBOL_GPL(hdn_wait_stabilize);
+
+struct wait_queue_entry *hdn_wait_resolve(struct wait_queue_entry *wait)
+{
+	int slot = hdn_wait_origin_slot(wait);
+
+	return slot < 0 ? wait : &current->hdn_wait[slot];
+}
+EXPORT_SYMBOL_GPL(hdn_wait_resolve);
+
+void hdn_wait_unstabilize(struct wait_queue_entry *wait)
+{
+	struct wait_queue_entry *stable;
+	int slot;
+
+	/* Direct users of hdn_wait_acquire() own the slot's release. */
+	if (hdn_wait_slot(wait) >= 0)
+		return;
+	slot = hdn_wait_origin_slot(wait);
+	if (slot < 0)
+		return;
+	stable = &current->hdn_wait[slot];
+	if (unlikely(!list_empty(&stable->entry)))
+		BUG();
+
+	wait->flags = stable->flags;
+	wait->private = stable->private;
+	wait->func = stable->func;
+	INIT_LIST_HEAD(&wait->entry);
+	current->hdn_wait_origin[slot] = NULL;
+	current->hdn_wait_active &= ~BIT(slot);
+}
+EXPORT_SYMBOL_GPL(hdn_wait_unstabilize);
+
+void hdn_wait_cleanup(struct wait_queue_entry *wait)
+{
+	hdn_wait_unstabilize(wait);
+}
+EXPORT_SYMBOL_GPL(hdn_wait_cleanup);
+
+void *hdn_wait_object_acquire(size_t size)
+{
+	void *object;
+	int slot;
+
+	if (unlikely(size > HDN_WAIT_OBJECT_SIZE))
+		BUG();
+	for (slot = 0; slot < HDN_WAIT_OBJECT_SLOTS; slot++)
+		if (!(current->hdn_wait_object_active & BIT(slot)))
+			break;
+	if (unlikely(slot == HDN_WAIT_OBJECT_SLOTS))
+		BUG();
+
+	current->hdn_wait_object_active |= BIT(slot);
+	object = &current->hdn_wait_object[slot];
+	memset(object, 0, size);
+	return object;
+}
+EXPORT_SYMBOL_GPL(hdn_wait_object_acquire);
+
+void hdn_wait_object_cleanup(void *object_pointer)
+{
+	void *object = *(void **)object_pointer;
+	int slot;
+
+	if (!object)
+		return;
+	for (slot = 0; slot < HDN_WAIT_OBJECT_SLOTS; slot++)
+		if (object == &current->hdn_wait_object[slot])
+			break;
+	if (unlikely(slot == HDN_WAIT_OBJECT_SLOTS ||
+		     !(current->hdn_wait_object_active & BIT(slot))))
+		BUG();
+	current->hdn_wait_object_active &= ~BIT(slot);
+}
+EXPORT_SYMBOL_GPL(hdn_wait_object_cleanup);
 #endif
 
 void __init_waitqueue_head(struct wait_queue_head *wq_head, const char *name, struct lock_class_key *key)
@@ -42,6 +176,9 @@ void add_wait_queue(struct wait_queue_head *wq_head, struct wait_queue_entry *wq
 {
 	unsigned long flags;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_entry = hdn_wait_stabilize(wq_entry);
+#endif
 	wq_entry->flags &= ~WQ_FLAG_EXCLUSIVE;
 	spin_lock_irqsave(&wq_head->lock, flags);
 	__add_wait_queue(wq_head, wq_entry);
@@ -53,6 +190,9 @@ void add_wait_queue_exclusive(struct wait_queue_head *wq_head, struct wait_queue
 {
 	unsigned long flags;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_entry = hdn_wait_stabilize(wq_entry);
+#endif
 	wq_entry->flags |= WQ_FLAG_EXCLUSIVE;
 	spin_lock_irqsave(&wq_head->lock, flags);
 	__add_wait_queue_entry_tail(wq_head, wq_entry);
@@ -64,6 +204,9 @@ void add_wait_queue_priority(struct wait_queue_head *wq_head, struct wait_queue_
 {
 	unsigned long flags;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_entry = hdn_wait_stabilize(wq_entry);
+#endif
 	wq_entry->flags |= WQ_FLAG_PRIORITY;
 	spin_lock_irqsave(&wq_head->lock, flags);
 	__add_wait_queue(wq_head, wq_entry);
@@ -74,28 +217,51 @@ EXPORT_SYMBOL_GPL(add_wait_queue_priority);
 int add_wait_queue_priority_exclusive(struct wait_queue_head *wq_head,
 				      struct wait_queue_entry *wq_entry)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct wait_queue_entry *original = wq_entry;
+#endif
 	struct list_head *head = &wq_head->head;
+	int ret = 0;
+
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_entry = hdn_wait_stabilize(wq_entry);
+#endif
 
 	wq_entry->flags |= WQ_FLAG_EXCLUSIVE | WQ_FLAG_PRIORITY;
 
-	guard(spinlock_irqsave)(&wq_head->lock);
+	{
+		guard(spinlock_irqsave)(&wq_head->lock);
 
-	if (!list_empty(head) &&
-	    (list_first_entry(head, typeof(*wq_entry), entry)->flags & WQ_FLAG_PRIORITY))
-		return -EBUSY;
-
-	list_add(&wq_entry->entry, head);
-	return 0;
+		if (!list_empty(head) &&
+		    (list_first_entry(head, typeof(*wq_entry), entry)->flags & WQ_FLAG_PRIORITY))
+			ret = -EBUSY;
+		else
+			list_add(&wq_entry->entry, head);
+	}
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	if (ret)
+		hdn_wait_unstabilize(original);
+#endif
+	return ret;
 }
 EXPORT_SYMBOL_GPL(add_wait_queue_priority_exclusive);
 
 void remove_wait_queue(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_entry)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct wait_queue_entry *original = wq_entry;
+#endif
 	unsigned long flags;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_entry = hdn_wait_resolve(wq_entry);
+#endif
 	spin_lock_irqsave(&wq_head->lock, flags);
 	__remove_wait_queue(wq_head, wq_entry);
 	spin_unlock_irqrestore(&wq_head->lock, flags);
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_wait_unstabilize(original);
+#endif
 }
 EXPORT_SYMBOL(remove_wait_queue);
 
@@ -272,6 +438,9 @@ prepare_to_wait(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_ent
 {
 	unsigned long flags;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_entry = hdn_wait_stabilize(wq_entry);
+#endif
 	wq_entry->flags &= ~WQ_FLAG_EXCLUSIVE;
 	spin_lock_irqsave(&wq_head->lock, flags);
 	if (list_empty(&wq_entry->entry))
@@ -288,6 +457,9 @@ prepare_to_wait_exclusive(struct wait_queue_head *wq_head, struct wait_queue_ent
 	unsigned long flags;
 	bool was_empty = false;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_entry = hdn_wait_stabilize(wq_entry);
+#endif
 	wq_entry->flags |= WQ_FLAG_EXCLUSIVE;
 	spin_lock_irqsave(&wq_head->lock, flags);
 	if (list_empty(&wq_entry->entry)) {
@@ -314,6 +486,9 @@ long prepare_to_wait_event(struct wait_queue_head *wq_head, struct wait_queue_en
 	unsigned long flags;
 	long ret = 0;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_entry = hdn_wait_stabilize(wq_entry);
+#endif
 	spin_lock_irqsave(&wq_head->lock, flags);
 	if (signal_pending_state(state, current)) {
 		/*
@@ -397,8 +572,14 @@ EXPORT_SYMBOL(do_wait_intr_irq);
  */
 void finish_wait(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_entry)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	struct wait_queue_entry *original = wq_entry;
+#endif
 	unsigned long flags;
 
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_entry = hdn_wait_resolve(wq_entry);
+#endif
 	__set_current_state(TASK_RUNNING);
 	/*
 	 * We can check for list emptiness outside the lock
@@ -418,6 +599,9 @@ void finish_wait(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_en
 		list_del_init(&wq_entry->entry);
 		spin_unlock_irqrestore(&wq_head->lock, flags);
 	}
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	hdn_wait_unstabilize(original);
+#endif
 }
 EXPORT_SYMBOL(finish_wait);
 
@@ -454,6 +638,9 @@ EXPORT_SYMBOL(autoremove_wake_function);
  */
 long wait_woken(struct wait_queue_entry *wq_entry, unsigned mode, long timeout)
 {
+#ifdef CONFIG_SECURITY_HARDENING_PRIVATE_STACKS
+	wq_entry = hdn_wait_resolve(wq_entry);
+#endif
 	/*
 	 * The below executes an smp_mb(), which matches with the full barrier
 	 * executed by the try_to_wake_up() in woken_wake_function() such that
