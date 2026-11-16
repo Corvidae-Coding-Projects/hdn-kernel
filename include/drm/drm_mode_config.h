@@ -29,6 +29,7 @@
 #include <linux/workqueue.h>
 #include <linux/llist.h>
 
+#include <drm/drm_modes.h>
 #include <drm/drm_modeset_lock.h>
 
 struct drm_file;
